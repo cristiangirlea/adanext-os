@@ -125,9 +125,12 @@ for (const spec of refspecs) {
 }
 process.exit(0);
 
-// singleNonPushingGitCommand reports whether the command is one simple git command (no separator,
-// continuation or substitution outside quotes, no git option before the subcommand) whose
-// subcommand is on a short list of commands that never push. Any doubt answers false.
+// singleNonPushingGitCommand reports whether the command is one simple git command, every argument
+// of it literal, whose subcommand is on a short list of commands that never push. Literal means:
+// no separator, redirection, continuation, escape or substitution anywhere outside quotes, and
+// inside double quotes no $ or backtick, since Bash and PowerShell both run $(...) and Bash runs
+// `...` there. Single quotes are literal in both shells. The only git option allowed before the
+// subcommand is --no-pager. Any doubt answers false.
 function singleNonPushingGitCommand(text) {
   const neverPush = new Set(["add", "blame", "branch", "commit", "diff", "fetch", "grep", "log", "ls-files",
     "restore", "rev-parse", "shortlog", "show", "stash", "status", "switch", "tag"]);
@@ -138,6 +141,7 @@ function singleNonPushingGitCommand(text) {
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (quote) {
+      if (quote === '"' && (c === "$" || c === "`" || c === escape)) return false;
       if (c === quote) quote = null;
       else word += c;
       continue;
@@ -157,8 +161,9 @@ function singleNonPushingGitCommand(text) {
   if (quote) return false;
   if (word !== null) out.push(word);
   if (!/^git(?:\.exe)?$/i.test(out[0] ?? "")) return false;
-  const sub = out.slice(1).find((w) => !w.startsWith("-"));
-  // git's own options before the subcommand could change what runs; allow none.
-  if (out[1]?.startsWith("-")) return false;
-  return sub !== undefined && neverPush.has(sub.toLowerCase());
+  let i = 1;
+  if (out[i] === "--no-pager") i++;
+  // Any other git option before the subcommand (-c, -C, --exec-path, ...) could change what runs.
+  if (out[i] === undefined || out[i].startsWith("-")) return false;
+  return neverPush.has(out[i].toLowerCase());
 }

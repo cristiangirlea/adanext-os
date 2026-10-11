@@ -122,6 +122,8 @@ allow 'git push -u origin feature' PowerShell
 allow 'git commit -m "fix: git push docs"'
 allow "git commit -m 'push the fix'"
 allow 'git log --grep "push"' PowerShell
+allow 'git --no-pager log --grep push'
+allow "git log --grep='\$(push)'"
 
 # Anything else that mentions git and push: the push must run alone, as one plain command.
 refuse 'git push'
@@ -170,6 +172,13 @@ refuse '$env:git_config_count=1; $env:git_config_key_0="push.followTags"; $env:g
 refuse 'pwsh -Command "git push origin main"' PowerShell
 refuse 'git push origin $(echo main)'
 refuse 'git push origin `echo main`'
+# Substitutions run inside double quotes, so a quoted argument is literal only in single quotes.
+refuse 'git log --grep="$(git push --force origin HEAD:main)"'
+refuse 'git commit -m "`git push origin main`"'
+refuse 'git log --grep "$(git push origin main)"' PowerShell
+refuse 'git commit -m "say \"push\" now"'
+refuse 'git -c alias.x=push x origin main'
+refuse 'git --exec-path=/tmp log --grep push'
 
 # Other ways to push: plumbing, subtree, and aliases (which git ignores for built-in names).
 refuse 'git subtree push --prefix=lib origin main'
