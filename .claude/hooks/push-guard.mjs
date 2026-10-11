@@ -1,19 +1,25 @@
-// A pre-command hook for Bash and PowerShell. Pushes in this repository name one feature branch
-// explicitly; main changes only through a pull request. Rather than list forbidden forms, which
-// always misses one, it allows exactly
+// A pre-command hook for Bash and PowerShell. In this repository a push names one feature branch
+// explicitly, and main changes only through a pull request.
 //
-//   git [-C <dir>] push [-u | --set-upstream | -n | --dry-run]... <remote> <branch>[:<branch>]...
+// Parsing every way a shell can spell a command (quotes, escapes, continuations, cd, nested
+// shells, environment variables) is a race a hook cannot win, so this guard does not try. Any
+// command that mentions both git and push must be exactly one plain push, alone:
 //
-// where each branch is a plain name of an existing local branch that is not also a tag, not main
-// and not HEAD; both sides of a refspec are the same name; no configuration override is given on
-// the command line or in GIT_CONFIG_* variables; push.followTags is off; and a refspec without a
-// destination is refused when remote.<remote>.push could map it elsewhere. Commands are split the
-// way the shell would (quotes, escapes, separators), and a push inside a command string handed to
-// a shell (sh -c, bash -c, pwsh -Command, cmd /c) is checked the same way. Anything this hook
-// cannot parse with certainty, if it might be a push, is refused.
+//   git push [-u | --set-upstream | -n | --dry-run]... <remote> <branch>[:<branch>]...
 //
-// This guards what Claude runs directly. It is a guard rail, not a sandbox: a push from inside a
-// script file it never sees is out of its reach.
+// with nothing else on the line: no quotes, escapes, variables, separators, redirections or
+// continuations, and no -C or -c. It then runs in the session's working directory, so the guard's
+// own git calls see the same repository and the same effective configuration (environment
+// overrides included) as the push will. Each branch must be an existing local branch that is not
+// also a tag, not main and not HEAD; a destination must be the same name; push.followTags must be
+// off; and a branch without a destination is refused while remote.<remote>.push could map it
+// elsewhere.
+//
+// One exception keeps ordinary work possible: a single git command that is not a push (a commit
+// whose message mentions "git push", say) passes, because its quoted arguments are data.
+//
+// This guards what Claude runs directly. It is a guard rail, not a sandbox: a push from a script
+// file it never sees is out of its reach.
 //
 // Input is Claude Code's hook JSON on stdin. Exit 2 refuses the command; exit 0 lets it through.
 import { execFileSync } from "node:child_process";
@@ -30,149 +36,100 @@ const command = String(input?.tool_input?.command ?? "");
 const cwd = typeof input?.cwd === "string" && input.cwd ? input.cwd : process.cwd();
 const powershell = /powershell/i.test(String(input?.tool_name ?? ""));
 
-const reasons = [];
-const refuse = (why) => reasons.push(why);
-const mayBePush = (text) => /\bgit(?:\.exe)?\b[\s\S]*\bpush\b/i.test(text);
+if (!/\bgit\b/i.test(command) || !/\bpush\b/i.test(command)) process.exit(0);
 
-// tokenize splits a command line into simple commands, each a list of words, honouring quotes
-// and escapes: a backslash in Bash, a backtick in PowerShell. It returns null for an unbalanced
-// quote. Separators are ; & && || | and newlines outside quotes.
-function tokenize(text) {
-  const escape = powershell ? "`" : "\\";
-  const segments = [[]];
-  let word = null;
-  let quote = null;
-  const endWord = () => {
-    if (word !== null) segments[segments.length - 1].push(word);
-    word = null;
-  };
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (quote) {
-      if (c === quote) quote = null;
-      else if (c === escape && quote === '"' && i + 1 < text.length) word += text[++i];
-      else word += c;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      word = word ?? "";
-    } else if (c === escape && i + 1 < text.length) {
-      word = (word ?? "") + text[++i];
-    } else if (/\s/.test(c) && c !== "\n") {
-      endWord();
-    } else if (c === ";" || c === "&" || c === "|" || c === "\n") {
-      endWord();
-      if (segments[segments.length - 1].length > 0) segments.push([]);
-    } else {
-      word = (word ?? "") + c;
-    }
-  }
-  if (quote) return null;
-  endWord();
-  return segments.filter((s) => s.length > 0);
+function refuse(why) {
+  process.stderr.write(
+    `push refused by .claude/hooks/push-guard.mjs: ${why}. Run the push alone, as ` +
+      "git push -u origin <branch>, from the repository's directory; main changes only through a pull request.\n",
+  );
+  process.exit(2);
 }
 
-function git(dir, args) {
+function git(args) {
   try {
-    return { ok: true, out: execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() };
+    const out = execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10000,
+    });
+    return { ok: true, out: out.trim() };
   } catch {
     return { ok: false, out: "" };
   }
 }
 
-const shells = /^(?:.*[\\/])?(?:sh|bash|dash|zsh|pwsh|powershell|cmd)(?:\.exe)?$/i;
-const shellCommandFlag = /^(?:-c|-lc|-ic|-Command|-c(?:ommand)?|\/c|\/k)$/i;
-const isGit = (w) => /^(?:.*[\\/])?git(?:\.exe)?$/i.test(w);
-const allowedOptions = new Set(["-u", "--set-upstream", "-n", "--dry-run"]);
-const plainBranch = /^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._\/-]+(?<![.\/])$/;
+const words = command.trim().split(/ +/);
+const isPlainPush =
+  /^[A-Za-z0-9 ._:\/-]+$/.test(command.trim()) && words[0] === "git" && words[1] === "push";
 
-function checkCommandLine(text, depth) {
-  const segments = tokenize(text);
-  if (segments === null) {
-    if (mayBePush(text)) refuse("a command with an unbalanced quote that may push");
-    return;
-  }
-  for (const words of segments) {
-    // A command string handed to a shell is checked as a command line of its own.
-    if (shells.test(words[0] ?? "")) {
-      const flag = words.findIndex((w, i) => i > 0 && shellCommandFlag.test(w));
-      if (flag > 0 && flag + 1 < words.length) {
-        if (depth >= 3) refuse("shell commands nested too deeply to check");
-        else checkCommandLine(words.slice(flag + 1).join(" "), depth + 1);
-      } else if (words.slice(1).some(mayBePush)) {
-        refuse("a shell invocation this guard cannot read that may push");
-      }
-      continue;
-    }
-    const g = words.findIndex(isGit);
-    if (g < 0) continue;
-    let i = g + 1;
-    let dir = cwd;
-    let overrides = false;
-    let unknown = false;
-    while (i < words.length && words[i].startsWith("-")) {
-      if (words[i] === "-C" && i + 1 < words.length) {
-        dir = words[i + 1];
-        i += 2;
-      } else if (words[i] === "-c" || words[i].startsWith("--config-env")) {
-        overrides = true;
-        i += words[i] === "-c" ? 2 : 1;
-      } else if (words[i] === "--no-pager") {
-        i += 1;
-      } else {
-        unknown = true;
-        i += 1;
-      }
-    }
-    if (words[i] !== "push") continue;
-    if (unknown) refuse("a git option before push that this guard does not know");
-    if (overrides) refuse("a configuration override on the command line");
-    if (/GIT_CONFIG_(?:COUNT|PARAMETERS|KEY_|VALUE_|GLOBAL|SYSTEM)|GIT_DIR|GIT_WORK_TREE/.test(command)) {
-      refuse("GIT_CONFIG or GIT_DIR variables set for a push");
-    }
-    // Redirections (2>&1, > out.txt) belong to the shell, not to git.
-    const args = words.slice(i + 1).filter((w) => !/^\d*[<>]/.test(w));
-    for (const o of args.filter((a) => a.startsWith("-"))) {
-      if (!allowedOptions.has(o)) refuse(`the option ${o}`);
-    }
-    const positional = args.filter((a) => !a.startsWith("-"));
-    if (positional.length < 2) {
-      refuse("no remote and feature branch named (push as: git push -u origin <branch>)");
-      continue;
-    }
-    const [remote, ...refspecs] = positional;
-    if (!/^[A-Za-z0-9._-]+$/.test(remote)) refuse(`the remote ${remote}`);
-    const followTags = git(dir, ["config", "--type=bool", "--get", "push.followTags"]);
-    if (followTags.out === "true") refuse("push.followTags is on, so tags would go too");
-    const pushConfigured = git(dir, ["config", "--get-all", `remote.${remote}.push`]).out !== "";
-    for (const spec of refspecs) {
-      const parts = spec.split(":");
-      const shapeOK = parts.length <= 2 && (parts.length === 1 || parts[0] === parts[1]);
-      const name = parts[0];
-      if (!shapeOK || !plainBranch.test(name) || name === "main" || name === "HEAD" || name.startsWith("refs/")) {
-        refuse(`the refspec ${spec}`);
-        continue;
-      }
-      if (!git(dir, ["show-ref", "--verify", "--quiet", `refs/heads/${name}`]).ok) {
-        refuse(`${name}, which is not a local branch here`);
-      } else if (git(dir, ["show-ref", "--verify", "--quiet", `refs/tags/${name}`]).ok) {
-        refuse(`${name}, which is also a tag`);
-      }
-      if (parts.length === 1 && pushConfigured) {
-        refuse(`remote.${remote}.push is configured, so ${name} without an explicit destination may go elsewhere`);
-      }
-    }
-  }
+if (!isPlainPush) {
+  // The exception: one git command, not a push, whose only mention of push is in its arguments.
+  if (singleGitCommandThatIsNotAPush(command)) process.exit(0);
+  refuse("a command that mentions git and push is allowed only as one plain push on its own");
 }
 
-checkCommandLine(command, 0);
-
-if (reasons.length > 0) {
-  process.stderr.write(
-    `push refused by .claude/hooks/push-guard.mjs: ${reasons.join("; ")}. ` +
-      "Push one feature branch by name (git push -u origin <branch>); main changes only through a pull request.\n",
-  );
-  process.exit(2);
+const options = words.slice(2).filter((w) => w.startsWith("-"));
+const positional = words.slice(2).filter((w) => !w.startsWith("-"));
+for (const o of options) {
+  if (!["-u", "--set-upstream", "-n", "--dry-run"].includes(o)) refuse(`the option ${o}`);
+}
+if (positional.length < 2) refuse("no remote and feature branch named");
+const [remote, ...refspecs] = positional;
+if (!/^[A-Za-z0-9._-]+$/.test(remote)) refuse(`the remote ${remote}`);
+if (git(["config", "--type=bool", "--get", "push.followTags"]).out === "true") {
+  refuse("push.followTags is on, so tags would go too");
+}
+const pushConfigured = git(["config", "--get-all", `remote.${remote}.push`]).out !== "";
+const plainBranch = /^(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._\/-]+(?<![.\/])$/;
+for (const spec of refspecs) {
+  const parts = spec.split(":");
+  const name = parts[0];
+  if (parts.length > 2 || (parts.length === 2 && parts[1] !== name)) refuse(`the refspec ${spec}`);
+  if (!plainBranch.test(name) || name === "main" || name === "HEAD" || name.startsWith("refs/")) {
+    refuse(`the refspec ${spec}`);
+  }
+  if (!git(["show-ref", "--verify", "--quiet", `refs/heads/${name}`]).ok) refuse(`${name} is not a local branch here`);
+  if (git(["show-ref", "--verify", "--quiet", `refs/tags/${name}`]).ok) refuse(`${name} is also a tag`);
+  if (parts.length === 1 && pushConfigured) {
+    refuse(`remote.${remote}.push is configured, so ${name} without an explicit destination may go elsewhere`);
+  }
 }
 process.exit(0);
+
+// singleGitCommandThatIsNotAPush reports whether the command is one simple git command (no
+// separator, continuation or substitution outside quotes) whose subcommand is not push. Quotes
+// follow the shell: in Bash a backslash escapes outside single quotes; in PowerShell a backtick
+// does. Any doubt answers false.
+function singleGitCommandThatIsNotAPush(text) {
+  const escape = powershell ? "`" : "\\";
+  const out = [];
+  let word = null;
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else word += c;
+      continue;
+    }
+    if (c === escape || c === "$" || c === "(" || c === ")" || c === "`" || c === "\n") return false;
+    if (c === ";" || c === "&" || c === "|" || c === "<" || c === ">") return false;
+    if (c === "'" || c === '"') {
+      quote = c;
+      word = word ?? "";
+    } else if (/\s/.test(c)) {
+      if (word !== null) out.push(word);
+      word = null;
+    } else {
+      word = (word ?? "") + c;
+    }
+  }
+  if (quote) return false;
+  if (word !== null) out.push(word);
+  if (!/^git(?:\.exe)?$/i.test(out[0] ?? "")) return false;
+  const sub = out.slice(1).find((w) => !w.startsWith("-"));
+  // git's own options before the subcommand could change what runs; allow none.
+  if (out[1]?.startsWith("-")) return false;
+  return sub !== undefined && sub.toLowerCase() !== "push";
+}

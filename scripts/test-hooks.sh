@@ -93,7 +93,6 @@ git -C "$r" rm -q --cached desktop/hidden/inside.ts
 rm -rf "$r/desktop"
 
 # --- push-guard.mjs
-# The fixture's path has a space, so quoting around -C is exercised.
 g="$tmp/guard repo"
 new_repo "$g"
 git -C "$g" switch -q -c feature
@@ -109,71 +108,76 @@ guard_exit() { # guard_exit <cwd> <command> [tool]
   echo "$rc"
 }
 
-for cmd in \
-  "git status" \
-  "git push -u origin feature" \
-  "git push --set-upstream origin feature" \
-  "git push origin feature:feature" \
-  "git push -n origin feature" \
-  "git push -u origin feature 2>&1" \
-  "git commit -m 'msg' && git push -u origin feature" \
-  "git commit -m \"fix: git push docs\"" \
-  "sh -c \"git push -u origin feature\"" \
-  "echo main && git log"; do
-  expect 0 "$(guard_exit "$g" "$cmd")" "guard allows: $cmd"
-done
-# Inside a command string a path is not translated for Windows programs, so give git a native one.
-gpath=$(cygpath -m "$g" 2>/dev/null || printf '%s' "$g")
-expect 0 "$(guard_exit "$tmp" "git -C \"$gpath\" push -u origin feature")" "guard allows a quoted -C path with a space"
-expect 0 "$(guard_exit "$g" 'git push -u origin feature; echo `"done`"' PowerShell)" "guard allows a PowerShell push with backtick escapes"
+allow() { expect 0 "$(guard_exit "$g" "$1" "${2:-Bash}")" "guard allows (${2:-Bash}): $1"; }
+refuse() { expect 2 "$(guard_exit "$g" "$1" "${2:-Bash}")" "guard refuses (${2:-Bash}): $1"; }
 
-for cmd in \
-  "git push" \
-  "git push origin" \
-  "git push origin main" \
-  "git push origin HEAD" \
-  "git push origin HEAD:main" \
-  "git push origin HEAD:refs/heads/main" \
-  "git push origin feature:main" \
-  "git push origin feature:other" \
-  "git push origin :" \
-  "git push origin 'refs/heads/*:refs/heads/*'" \
-  "git push origin :feature" \
-  "git push -u origin main --dry-run" \
-  "git push -f" \
-  "git push -uf origin feature" \
-  "git push --force-with-lease origin feature" \
-  "git push origin +feature" \
-  "git push --tags" \
-  "git push --all origin" \
-  "git push origin refs/tags/v1" \
-  "git push --delete origin feature" \
-  "git push --mirror" \
-  "cd x && git push origin main" \
-  "git -C . push origin main" \
-  "git --git-dir=.git push origin feature" \
-  "git.exe push origin main; echo done" \
-  "git push origin v1" \
-  "git push origin both" \
-  "git push origin no-such-branch" \
-  "git -c remote.origin.push=refs/heads/feature:refs/heads/main push origin feature" \
-  "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=feature:main git push origin feature" \
-  "sh -c \"git push origin main\"" \
-  "bash -lc 'git push origin main'" \
-  "echo \"a;b\" && git push origin main" \
-  "git push origin \"main"; do
-  expect 2 "$(guard_exit "$g" "$cmd")" "guard refuses: $cmd"
-done
-expect 2 "$(guard_exit "$tmp" "git -C \"$gpath\" push origin main")" "guard refuses main behind a quoted -C path with a space"
-expect 2 "$(guard_exit "$g" "\$env:GIT_CONFIG_PARAMETERS=\"'remote.origin.push=feature:main'\"; git push origin feature" PowerShell)" "guard refuses a PowerShell config override in the environment"
+# Commands that do not push, or one plain push of a feature branch.
+allow 'git status'
+allow 'echo main && git log'
+allow 'git push -u origin feature'
+allow 'git push --set-upstream origin feature'
+allow 'git push origin feature:feature'
+allow 'git push -n origin feature'
+allow 'git push -u origin feature' PowerShell
+allow 'git commit -m "fix: git push docs"'
+allow "git commit -m 'push the fix'"
+allow 'git log --grep "push"' PowerShell
+
+# Anything else that mentions git and push: the push must run alone, as one plain command.
+refuse 'git push'
+refuse 'git push origin'
+refuse 'git push origin main'
+refuse 'git push origin HEAD'
+refuse 'git push origin HEAD:main'
+refuse 'git push origin HEAD:refs/heads/main'
+refuse 'git push origin feature:main'
+refuse 'git push origin feature:other'
+refuse 'git push origin :'
+refuse "git push origin 'refs/heads/*:refs/heads/*'"
+refuse 'git push origin :feature'
+refuse 'git push -u origin main --dry-run'
+refuse 'git push -f'
+refuse 'git push -uf origin feature'
+refuse 'git push --force-with-lease origin feature'
+refuse 'git push origin +feature'
+refuse 'git push --tags'
+refuse 'git push --all origin'
+refuse 'git push origin refs/tags/v1'
+refuse 'git push --delete origin feature'
+refuse 'git push --mirror'
+refuse 'git push origin v1'
+refuse 'git push origin both'
+refuse 'git push origin no-such-branch'
+refuse 'git push -u origin feature 2>&1'
+refuse "git commit -m 'msg' && git push -u origin feature"
+refuse 'cd x && git push origin main'
+refuse 'cd ../other && git push origin feature'
+refuse 'git -C . push origin feature'
+refuse 'git -C "some dir" push origin feature'
+refuse 'git --git-dir=.git push origin feature'
+refuse 'git -c remote.origin.push=refs/heads/feature:refs/heads/main push origin feature'
+refuse 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.followTags GIT_CONFIG_VALUE_0=true git push origin feature'
+refuse 'git.exe push origin main; echo done'
+refuse 'sh -c "git push -u origin feature"'
+refuse 'sh -c "git push origin main"'
+refuse "bash -lc 'git push origin main'"
+refuse 'echo "a;b" && git push origin main'
+refuse 'git push origin "main'
+refuse $'git \\\npush origin main'
+refuse $'git push origin \\\nmain'
+refuse $'git `\npush origin main' PowerShell
+refuse '$env:git_config_count=1; $env:git_config_key_0="push.followTags"; $env:git_config_value_0="true"; git push origin feature' PowerShell
+refuse 'pwsh -Command "git push origin main"' PowerShell
+refuse 'git push origin $(echo main)'
+refuse 'git push origin `echo main`'
 
 git -C "$g" config remote.origin.push refs/heads/feature:refs/heads/main
-expect 2 "$(guard_exit "$g" "git push -u origin feature")" "guard refuses a bare branch when remote.origin.push could redirect it"
-expect 0 "$(guard_exit "$g" "git push -u origin feature:feature")" "guard allows an explicit destination, which overrides remote.origin.push"
+refuse 'git push -u origin feature'
+allow 'git push -u origin feature:feature'
 git -C "$g" config --unset remote.origin.push
 
 git -C "$g" config push.followTags true
-expect 2 "$(guard_exit "$g" "git push -u origin feature")" "guard refuses while push.followTags would send tags too"
+refuse 'git push -u origin feature'
 git -C "$g" config --unset push.followTags
 
 if [ "$failures" -ne 0 ]; then
