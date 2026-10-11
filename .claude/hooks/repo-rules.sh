@@ -27,14 +27,22 @@ files() {
   git ls-files -z -co --exclude-standard -- "$@" >"$list" || cannot "git ls-files failed for: $*"
 }
 
-# each <shell snippet using $f>: runs the snippet for every listed file that exists (a deleted file
-# can still be listed). The snippet exits 0 when the file is fine, 1 when it matches, anything else
-# when the file could not be inspected; a match prints the file name.
+# each <shell snippet using $f>: runs the snippet for every listed file. A tracked file deleted from
+# disk is still listed and is skipped, but only when it is really gone: the nearest ancestor that
+# exists must be a directory this user can list and enter, so a file hidden behind a directory
+# without search permission is an inspection failure, not a deletion. The snippet exits 0 when the
+# file is fine, 1 when it matches, anything else when it could not be inspected; a match prints the
+# file name.
 each() {
   xargs -0 -r sh -c '
     snippet=$1; shift
     for f do
-      [ -e "$f" ] || continue
+      if [ ! -e "$f" ]; then
+        d=$(dirname -- "$f")
+        while [ ! -e "$d" ] && [ "$d" != "." ]; do d=$(dirname -- "$d"); done
+        [ -d "$d" ] && [ -r "$d" ] && [ -x "$d" ] && continue
+        exit 255
+      fi
       ( eval "$snippet" )
       rc=$?
       [ "$rc" -eq 0 ] && continue
