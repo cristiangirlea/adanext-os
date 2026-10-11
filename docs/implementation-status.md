@@ -50,7 +50,7 @@ unknown rather than guess when the stamp is absent.
 
 ### Ada bootstrap checks (2026-10-11)
 
-At `2dc2cdd`, the last code commit after six review rounds; the commits after it change only docs:
+At `8fb42c0`, the last code commit after six review rounds; the commits after it change only docs:
 
 | Where | Command | Result |
 |---|---|---|
@@ -187,9 +187,10 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 - **2026-10-11, one list of checks.** `scripts/check.sh` is run by both CI and `/check`, so the
   two cannot drift.
 - **2026-10-11, GitHub repository.** Creating `cristiangirlea/ada-os` was refused by the
-  permission check; the owner creates it. The bootstrap is built locally meanwhile, then replayed
-  onto the new `main` (`git rebase --onto origin/main --root m0/bootstrap`, keeping this README)
-  so its pull request shares history with `main`.
+  permission check, so the owner created it, private, with a README. The bootstrap, built locally
+  meanwhile, was replayed onto that `main` (`git rebase --onto origin/main --root m0/bootstrap`,
+  keeping this README) so its pull request shares history with `main`. The content was
+  byte-identical afterwards; commit ids changed, and the ids in this file are the new ones.
 - **2026-10-11, merging.** The owner started implementation with `/autonomous-delivery`, whose
   process merges through the pull request once CI on the owner's runner, the full local checks,
   an independent review and a security read all hold for the head being merged. That is the
@@ -227,17 +228,17 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 
 ## Owner actions pending
 
-1. Create the repository, private, with a README so `main` exists:
-   `gh repo create cristiangirlea/ada-os --private --add-readme --description "Ada OS"`
-2. Runners, in this order: add `ada-os` to the runners' GitHub App `cristiangirlea-lab-runners`;
-   merge the infra pull request that adds `lab-ada-os` (Flux applies it); add `"ada-os"` to
-   `ci_runner_repos` in the untracked `infra/tofu/terraform.tfvars`; then, from `infra/tofu` on
-   `origin/main`:
+1. ~~Create the repository~~ (done by the owner, 2026-10-11).
+2. Runners: infra #55 merged on 2026-10-11 (`290aa6e`), so Flux runs the `lab-ada-os` scale set.
+   Still the owner's: add `ada-os` to the runners' GitHub App at
+   https://github.com/settings/installations/166537844; add `"ada-os"` to `ci_runner_repos` in
+   the untracked `infra/tofu/terraform.tfvars`; then, from `infra/tofu` on `origin/main`:
    `GITHUB_TOKEN=$(gh auth token) tofu apply -target='module.runner_vars.github_actions_variable.ci_runner["ada-os"]'`.
 3. Decide whether Harness `antigravity-cli` lands through a reviewed pull request.
 4. Confirm the owner-decisions table in `docs/plan.md` section 1.
 5. Before M5: approve installing Packer and its VMware plugin at pinned versions, and choose the
    VM storage drive.
-6. Turn on branch protection for `main` in `ada-os` and `harness`: require a pull request, and
-   the CI check, before merging; no force pushes or deletions. That is the real boundary the
-   push guard only approximates, and it is an account setting only the owner can change.
+6. Branch protection for `main`: GitHub Free does not offer it for private repositories (the API
+   answers "Upgrade to GitHub Pro or make this repository public"). The owner keeps `ada-os`
+   private (2026-10-11), so until a plan change the protection is the deny rules, the push guard
+   and merging only through pull requests. Upgrading is the owner's paid decision.
