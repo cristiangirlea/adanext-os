@@ -48,7 +48,7 @@ records stay loadable, README and PLAN.md updated, tests first.
   cancel or timeout also ends grandchildren, and the run reports canceled only after the tree is
   gone. Acceptance: a helper process that starts a grandchild; after cancel the grandchild no longer
   runs, checked by PID and creation time; Windows and Linux.
-- [ ] **M1.4 `hrn exec --protocol v1`.** A versioned NDJSON protocol on stdin and stdout for a
+- [x] **M1.4 `hrn exec --protocol v1`.** Done: Harness #53, 2026-10-11, merge `8dd2659`. A versioned NDJSON protocol on stdin and stdout for a
   supervising program. Outline:
   - hrn speaks first: `hello` with the protocol version, hrn version and VCS revision, and per
     backend its availability, modes, effort levels, session support, enforced limits, and

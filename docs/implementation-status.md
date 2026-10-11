@@ -7,8 +7,8 @@ are in `docs/backlog.md`.
 | Milestone | Status | Where | Next |
 |---|---|---|---|
 | M0 Baseline | in progress | this repository, bootstrap branch | Repository on GitHub, CI runner, merge the bootstrap |
-| M1 Execution protocol | in progress | Harness issue #49, one pull request per slice | M1.1 to M1.3 merged (Harness #50, #51, #52; `75ba625`); M1.4 being finished |
-| M2 Durable coordinator | not started | | Starts after the bootstrap merges and M1.4 lands |
+| M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
+| M2 Durable coordinator | in progress | M2.1 store on a local branch stacked on the bootstrap | Its pull request opens once the bootstrap merges |
 | M3 Project workspaces | not started | | |
 | M4 First local workflow | not started | | |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -151,9 +151,27 @@ now end with the run; on Unix the CLI has its own process group and hrn stops on
 SIGHUP. Live, a Codex timeout ended a running `ping`, though the older hrn did too (Codex's own
 sandbox cleans up), so the fake-CLI tests are what show the change.
 
+### M1.4 and the new engine pin (2026-10-11)
+
+Harness #53 (`hrn exec --protocol v1`) merged as `8dd2659`, closing #49, after CI passed on
+`lab-harness` at its head, the full local checks ran again there, and `go test -race` passed in a
+Linux container. The protocol document came first; Codex implemented it in three runs; Claude Opus
+found case-variant field names slipping past the option gate and an oversized line that stopped
+stdin while labelled non-fatal, both fixed. Live through a protocol client on the owner's plans:
+codex and claude read-only runs (`ok`, contiguous `seq`, a session event, `resolved_model` empty
+for codex and `claude-sonnet-5-5` for claude), a codex start with `max_turns` rejected with no
+record, and a codex run cancelled during `ping -n 120` (`canceled`, no ping left).
+
+`engine/engine.json` now pins `8dd2659b953e9e5d9c593fa655254167ea9f8a8c`. `scripts/build-engine.sh`
+on a clean worktree at that commit built `hrn.exe` for windows/amd64 with go1.26.4, SHA-256
+`82523613251daf7624ca3a16b66826eb5c16a050e423c85f61aeb6d865fe5656`, which answers
+`hrn exec --protocol v1` with a v1 `hello` (revision reported as unknown, as expected without a VCS
+stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
+
 ## Decisions log
 
-- **2026-10-11, engine baseline.** Ada pins Harness `main` (`1ca5619`), not `8d521f0`. The
+- **2026-10-11, engine baseline.** Ada pinned Harness `main` (`1ca5619`), not `8d521f0`, and
+  moved the pin to `8dd2659` once M1.4 merged. The
   `antigravity-cli` branch is another session's unreviewed work and the owner has not decided
   whether it lands; nothing in M0 to M2 needs the Antigravity backend. M1 branches from `main`,
   and the pin moves to the `main` commit that contains M1.4. Revisit when the owner decides.
