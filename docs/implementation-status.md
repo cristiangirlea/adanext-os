@@ -170,6 +170,21 @@ on a clean worktree at that commit built `hrn.exe` for windows/amd64 with go1.26
 `hrn exec --protocol v1` with a v1 `hello` (revision reported as unknown, as expected without a VCS
 stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 
+### M2.1 store (2026-10-11, local branch `m2/store`, not yet a pull request)
+
+`internal/store` on modernc.org/sqlite v1.59.0, written by Codex (runs `20261011-165945-8a1560`,
+`20261011-171916-6142ca`) on a branch stacked on the bootstrap, at `6925b33`. Checks:
+`bash scripts/check.sh` on Windows passes; offline in a Linux container, `go vet ./...`,
+`go test -race -count=3 ./internal/store/` and `go test -race -count=1 ./...` pass. Claude Opus
+reviewed it twice (runs `20261011-171544-53b71d`, `20261011-173013-a06dc5`): the first found the
+refinement edge undocumented and the disk-full criterion unplaced (both decided below) and asked for
+a transaction handle for idempotent requests, migrations recorded in the database, and synced
+backups, all done; the second found nothing blocking. Follow-ups before its pull request: wrap the
+cause into the busy-retry timeout error; make the tamper tests match their error messages; remove a
+backup file whose sync failed; give the concurrent-backup test its own context; restore pragmas a
+test changes on pooled connections. Opening its pull request waits for the bootstrap to merge. A
+database created at its first commit (`77015e4`) will not open any more; none exists outside tests.
+
 ## Decisions log
 
 - **2026-10-11, engine baseline.** Ada pinned Harness `main` (`1ca5619`), not `8d521f0`, and
