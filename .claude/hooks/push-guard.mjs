@@ -24,8 +24,9 @@
 // pushes (commit, log, show, ...) passes even when push appears in its quoted arguments, such as a
 // commit message that mentions git push.
 //
-// This guards what Claude runs directly. It is a guard rail, not a sandbox: a push from a script
-// file it never sees is out of its reach.
+// This is a guard rail against Claude's own mistakes, not a security boundary: a push from a script
+// file it never sees, or a command crafted to defeat a text check, is out of its reach. The
+// boundary for main is the repository's branch protection on GitHub, which requires pull requests.
 //
 // Input is Claude Code's hook JSON on stdin. Exit 2 refuses the command; exit 0 lets it through.
 import { execFileSync } from "node:child_process";
@@ -64,10 +65,16 @@ function refuse(why) {
   process.exit(2);
 }
 
+// GIT_CONFIG redirects only the git config command, so the guard's lookups must not inherit it:
+// they have to read what the push itself will read.
+const inspectEnv = { ...process.env };
+delete inspectEnv.GIT_CONFIG;
+
 function git(args) {
   try {
     const out = execFileSync("git", ["-C", cwd, ...args], {
       encoding: "utf8",
+      env: inspectEnv,
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 10000,
     });
@@ -77,11 +84,29 @@ function git(args) {
   }
 }
 
-for (const m of command.matchAll(/\bgit(?:\.exe)?\s+(?:-\S+\s+)*([A-Za-z][\w.-]*)/gi)) {
-  const sub = m[1];
-  if (builtins.has(sub.toLowerCase())) continue;
-  const alias = git(["config", "--get", `alias.${sub}`]).out;
-  if (alias && (pushy.test(alias) || alias.startsWith("!"))) refuse(`git ${sub} is an alias for "${alias}"`);
+// Options that make git run a program of the caller's choosing can push from inside any command.
+if (/--(?:upload-pack|receive-pack|exec)\b/.test(command)) refuse("an option that makes git run another program");
+
+// Aliases. Git matches built-in names exactly (case-sensitive) and alias names case-insensitively,
+// follows an alias that names another alias, and reads them from the repository a -C points at or
+// from configuration a -c adds; an alias behind any git option is therefore refused rather than
+// resolved.
+for (const m of command.matchAll(/\bgit(?:\.exe)?\s+((?:-[Cc]\s+\S+\s+|-\S+\s+)*)([A-Za-z][\w.-]*)/gi)) {
+  const [, gitOptions, sub] = m;
+  if (builtins.has(sub)) continue;
+  if (gitOptions.trim() !== "" && gitOptions.trim() !== "--no-pager") {
+    refuse(`git ${sub} behind git options this guard does not resolve`);
+  }
+  let name = sub;
+  for (let depth = 0; depth < 10; depth++) {
+    const alias = git(["config", "--get", `alias.${name}`]);
+    if (!alias.ok) break; // not an alias: a git extension or a typo, which cannot push by this name
+    if (pushy.test(alias.out) || alias.out.startsWith("!")) refuse(`git ${sub} is an alias for "${alias.out}"`);
+    const next = alias.out.split(/\s+/)[0];
+    if (builtins.has(next)) break;
+    name = next;
+    if (depth === 9) refuse(`git ${sub} is an alias chain too long to check`);
+  }
 }
 
 if (!pushy.test(command)) process.exit(0);

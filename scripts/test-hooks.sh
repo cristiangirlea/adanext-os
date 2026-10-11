@@ -193,7 +193,19 @@ refuse 'git add . && git p origin main'
 refuse 'git sh'
 allow 'git st'
 allow 'git fetch origin'
+git -C "$g" config alias.p2 p
+git -C "$g" config alias.Lg push
+refuse 'git p2 origin main'
+refuse 'git Lg origin main'
+refuse 'git -C ../other p origin main'
+refuse 'git -c include.path=../aliases.conf p origin main'
+refuse "git fetch --upload-pack='git push --force origin HEAD:main; git-upload-pack' ."
+refuse 'git ls-remote --upload-pack=x origin'
+allow 'git --no-pager st'
+GIT_CONFIG=/dev/null expect 2 "$(GIT_CONFIG=/dev/null guard_exit "$g" 'git p origin main')" "guard refuses an alias even when GIT_CONFIG hides it from git config"
 git -C "$g" config --unset alias.p
+git -C "$g" config --unset alias.p2
+git -C "$g" config --unset alias.Lg
 git -C "$g" config --unset alias.sh
 git -C "$g" config --unset alias.st
 
