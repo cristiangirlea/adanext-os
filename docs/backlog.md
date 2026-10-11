@@ -34,7 +34,7 @@ $root=(Get-Location).Path; $h="$root\.hrn\sandbox"; New-Item -ItemType Directory
 Each slice branches from Harness `main` and follows Harness's AGENTS.md: standard library only,
 records stay loadable, README and PLAN.md updated, tests first.
 
-- [ ] **M1.1 Reasoning effort for Codex and Claude.** Codex gets `-c model_reasoning_effort=<level>`,
+- [x] **M1.1 Reasoning effort for Codex and Claude.** Done: Harness #50, 2026-10-11, merge `0c96142`. Codex gets `-c model_reasoning_effort=<level>`,
   Claude gets `--effort <level>`. Levels are validated before the CLI starts. Backends that cannot
   apply an effort say so in the run, as unenforced limits already do. Acceptance: argument tests
   for both adapters through the helper process; an unknown level fails before start; old records

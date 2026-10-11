@@ -7,7 +7,7 @@ are in `docs/backlog.md`.
 | Milestone | Status | Where | Next |
 |---|---|---|---|
 | M0 Baseline | in progress | this repository, bootstrap branch | Repository on GitHub, CI runner, merge the bootstrap |
-| M1 Execution protocol | in progress | Harness pull requests, one per slice | Slice M1.1, reasoning effort for Codex and Claude |
+| M1 Execution protocol | in progress | Harness issue #49, one pull request per slice | M1.1 merged (Harness #50, `0c96142`); M1.2 and M1.3 in review; M1.4 next |
 | M2 Durable coordinator | not started | | Starts after the bootstrap merges and M1.4 lands |
 | M3 Project workspaces | not started | | |
 | M4 First local workflow | not started | | |
@@ -128,6 +128,14 @@ Chosen on 2026-10-11 as the newest stable release published at least 14 days ear
 No runner exists for this repository yet. The workflow is gated on `vars.CI_RUNNER` and is
 skipped until then, which does not count as a pass. Local checks are the only evidence until the
 owner's steps below are done.
+
+### M1.1 (2026-10-11)
+
+Harness #50 merged as `0c96142`, after CI passed on the `lab-harness` runner at head `4117bed` and
+the full local checks ran again at that head. Codex wrote it (run `20261011-144813-af3194`); Claude
+Opus reviewed it (run `20261011-150534-0395ed`) and found the eval judge's effort unchecked, which
+was fixed with a test that failed first. Live: codex accepted `low`, `xhigh` and `max` and a forked
+session with `medium`; claude accepted `low` and `max`. The CLIs do not report the effective level.
 
 ## Decisions log
 
