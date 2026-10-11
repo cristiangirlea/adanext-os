@@ -1,0 +1,146 @@
+# Implementation status
+
+Updated 2026-10-11. Statuses: not started, in progress, implemented (code merged), verified
+(evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
+are in `docs/backlog.md`.
+
+| Milestone | Status | Where | Next |
+|---|---|---|---|
+| M0 Baseline | in progress | this repository, bootstrap branch | Repository on GitHub, CI runner, merge the bootstrap |
+| M1 Execution protocol | in progress | Harness pull requests, one per slice | Slice M1.1, reasoning effort for Codex and Claude |
+| M2 Durable coordinator | not started | | Starts after the bootstrap merges and M1.4 lands |
+| M3 Project workspaces | not started | | |
+| M4 First local workflow | not started | | |
+| M5 VMware execution | not started | | Packer and VM storage location, see below |
+| M6 Resume intelligence | not started | | |
+| M7 Review and integration | not started | | |
+| M8 Recovery and routing | not started | | |
+| M9 Packaging and dogfood | not started | | |
+
+## M0 evidence
+
+### Harness baseline (2026-10-11)
+
+Harness `main` at `1ca56193998ca0dd1f56e64ef86c67953771f74a`, in a fresh worktree, on the
+owner's Windows 11 Pro PC (build 26200), go1.26.4:
+
+| Check | Result |
+|---|---|
+| `go vet ./...` | pass |
+| `go build ./...` | pass |
+| `go test -count=1 ./...` | pass, 12 packages |
+| `go test -run='^$' -fuzz=FuzzParseSSE -fuzztime=10s -parallel=4 ./internal/agent` | pass |
+| `go test -run='^$' -fuzz=FuzzCodec -fuzztime=10s -parallel=4 ./internal/mcp` | pass |
+| `bash -n` on the release and api-check scripts | pass |
+| gofmt on tracked files | clean |
+| `go test -race` | not run: no cgo on this PC; Harness CI runs it on Linux |
+| release dry run | not run locally; Harness CI runs it |
+
+The candidate the plan names, `8d521f0` on `antigravity-cli`, is two unreviewed commits ahead of
+`main` and has never been pushed. See the decisions log.
+
+### Engine build (2026-10-11)
+
+`bash scripts/build-engine.sh` against that clean worktree built `.engine/hrn.exe` for
+windows/amd64 with go1.26.4 and `-trimpath`. Two builds gave the same SHA-256,
+`0d361f6e171ef7c1f861489b20fb2ecd1a3e5111cf080e2847aadb442b6fc8bb`. The script refused a checkout
+at another revision. Go embedded no VCS revision in these builds, so the script's own revision and
+cleanliness checks plus the hash are the evidence, and M1.4's handshake must report the revision as
+unknown rather than guess when the stamp is absent.
+
+### Model qualification (2026-10-11)
+
+All runs went through `hrn` on the owner's subscriptions, recorded under `~/.hrn/runs`.
+
+| Run | Backend and model | Mode | Outcome |
+|---|---|---|---|
+| `20261011-112105-4ae8ae` | codex, gpt-6-luna | readonly | ok in 17 s: the planning audit of continuation limits |
+| `20261011-112845-c19ad3` | claude, claude-opus-5-5 | readonly | error: weekly limit, reset 13:00 Europe/Bucharest; also warned that the workspace's permission entries were ignored because trust was not accepted |
+| `20261011-143545-cad2a6` | codex, gpt-6.1-sol | auto | `go build` failed: the workspace-write sandbox cannot create Go's build cache under `%LOCALAPPDATA%\go-build` |
+| `20261011-143731-840fed` | codex, gpt-6.1-sol | auto, cache and temp redirected into `.hrn/` | build ok; followup tests "Access is denied"; batch tests could not read `~/.config/git/ignore` |
+| `20261011-143933-1927df` | codex, gpt-6.1-sol | auto, cache, temp and home redirected | runlog, batch, agent and cmd/hrn tests ok; nine followup tests "Access is denied" |
+
+Effective reasoning effort for the Codex runs was the owner's Codex default (`high`), because the
+Harness revision used does not pass effort to Codex. Usage was reported in tokens only.
+
+Conclusion: Codex Sol is qualified as a sandboxed implementation worker when every Go or git
+command runs after the environment preamble in `docs/backlog.md`. Inside the sandbox it cannot run
+the followup package's tests, so the supervisor runs the full suite outside it before any review.
+Claude Opus is to be rechecked when the first review runs. Antigravity is not qualified: the
+installed `hrn` does not expose it, and its adapter is on the unmerged branch.
+
+### VMware host (2026-10-11, read-only checks)
+
+| Item | Observed |
+|---|---|
+| VMware Workstation | 17.6.4 build 24832109; `vmrun -T ws list` reports 0 running VMs |
+| Tools present | `vmrun`, `vmware-vdiskmanager`, OVF Tool |
+| CPU | AMD Ryzen 9 9950X, 16 cores, 32 threads, virtualization enabled in firmware |
+| Memory | 61.6 GiB |
+| Hypervisor and VBS | hypervisor present; virtualization-based security running, so VMware runs on the Windows Hypervisor Platform |
+| Networks | VMnet1 (host-only) and VMnet8 (NAT) up; VMware NAT and DHCP services running |
+| Free disk | C: 35 GiB, D: 255 GiB, E: 39 GiB, F: 224 GiB, I: 161 GiB |
+| Packer | not installed |
+
+Consequences for M5: the image factory needs Packer and its VMware plugin installed at pinned
+versions, which is the owner's call. With E: nearly full, Ada's VM storage should default to a
+configurable location on D: or F:. VBS stays on; Ada must not disable it, and VM performance is
+measured under it. Nested virtualization inside guests is not assumed. The Ubuntu host for the
+fourth release lane is still undecided.
+
+### Dependency pins
+
+Chosen on 2026-10-11 as the newest stable release published at least 14 days earlier, unless noted.
+
+| Component | Pin |
+|---|---|
+| Go | 1.26.4 (`go.mod`) |
+| Node for tooling | 22.16.0 (`desktop/.nvmrc`, `engines`) |
+| electron | 44.4.5 |
+| react, react-dom, @types/react, @types/react-dom | 19.3.0 |
+| typescript | 7.0.2 |
+| vite | 8.3.1 |
+| @vitejs/plugin-react | 6.1.1 |
+| vitest | 5.0.3 (11 days old; see the decisions log) |
+| @playwright/test | 1.63.0 |
+| electron-builder | 26.15.3 (the `latest` tag; 26.17.0 is on a side tag) |
+| @types/node | 22.20.4 |
+| modernc.org/sqlite | v1.59.0, added to `go.mod` in M2 when first imported (v1.60.x is younger than 14 days) |
+
+### CI
+
+No runner exists for this repository yet. The workflow is gated on `vars.CI_RUNNER` and is
+skipped until then, which does not count as a pass. Local checks are the only evidence until the
+owner's steps below are done.
+
+## Decisions log
+
+- **2026-10-11, engine baseline.** Ada pins Harness `main` (`1ca5619`), not `8d521f0`. The
+  `antigravity-cli` branch is another session's unreviewed work and the owner has not decided
+  whether it lands; nothing in M0 to M2 needs the Antigravity backend. M1 branches from `main`,
+  and the pin moves to the `main` commit that contains M1.4. Revisit when the owner decides.
+- **2026-10-11, M1 as four Harness slices.** Effort mapping, runlog write errors, CLI process
+  trees, and the `exec` protocol each get their own Harness pull request from `main`, merged in
+  that order. They run one at a time, as `docs/plan.md` section 8 requires for M0 to M2.
+- **2026-10-11, delegated workers.** Implementation slices go to `codex / gpt-6.1-sol` through
+  `hrn` in mode `auto` (Codex's workspace-write sandbox) with the environment preamble. Never
+  `yolo`, never a permission bypass. Reviews go to Claude Opus when available, otherwise a fresh
+  Codex Sol run.
+- **2026-10-11, vitest 5.0.3.** Versions 5.0.0 to 5.0.2 crash npm 10.9.2's peer resolver
+  (`Cannot read properties of null (reading 'edgesOut')`); 5.0.3 is the first that resolves.
+- **2026-10-11, one list of checks.** `scripts/check.sh` is run by both CI and `/check`, so the
+  two cannot drift.
+- **2026-10-11, GitHub repository.** Creating `cristiangirlea/ada-os` was refused by the
+  permission check; the owner creates it. The bootstrap is built locally meanwhile.
+
+## Owner actions pending
+
+1. Create the repository, private, with a README so `main` exists:
+   `gh repo create cristiangirlea/ada-os --private --add-readme --description "Ada OS"`
+2. Runners: merge the infra pull request that adds `lab-ada-os` (Flux applies it), add `ada-os`
+   to the runners' GitHub App `cristiangirlea-lab-runners`, then set the repository variable from
+   `infra/tofu`: `GITHUB_TOKEN=$(gh auth token) tofu apply -target=module.runner_vars`.
+3. Decide whether Harness `antigravity-cli` lands through a reviewed pull request.
+4. Confirm the owner-decisions table in `docs/plan.md` section 1.
+5. Before M5: approve installing Packer and its VMware plugin at pinned versions, and choose the
+   VM storage drive.
