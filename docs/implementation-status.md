@@ -50,19 +50,22 @@ unknown rather than guess when the stamp is absent.
 
 ### Ada bootstrap checks (2026-10-11)
 
-On the bootstrap branch after the review fixes, before the pull request:
+At `5c5bab878dbd07e73a63d352b662b8a673f68185`, the last code commit after two review rounds; the
+commits after it change only docs:
 
 | Where | Command | Result |
 |---|---|---|
-| Windows 11, go1.26.4, Node 22.16.0 | `bash scripts/check.sh` | pass; `-race` skipped (no cgo) |
-| Windows | `bash scripts/test-hooks.sh` | 28 of 28 pass; against the first hook version, 5 of its 7 rule tests fail, as the review predicted |
-| Linux container (`golang:1.26`, go1.26.8, no network) | `go vet`, `go build`, `go test -count=1`, `go test -race -count=1` | pass |
-| Linux container | `sh .claude/hooks/repo-rules.sh` under dash; `bash -n` on every script | pass |
-| Linux container | the engine's link and FIFO tests | failed before the fix, pass after |
-| Windows | `bash scripts/build-engine.sh` on a dirty checkout, a clean pinned worktree, and with go1.26.3 | refused, built the same SHA-256 as before, refused |
+| Windows 11, go1.26.4, Node 22.16.0 | `bash scripts/check.sh` | pass; `-race` skipped (no cgo); the unreadable-file hook test skipped (chmod cannot remove read access on Windows) |
+| Windows | `bash scripts/test-hooks.sh` | 42 pass, 1 skipped as above |
+| Linux container (`golang:1.26`, go1.26.8, uid 1000, no network) | `go vet`, `go build`, `go test -count=1`, `go test -race -count=1` | pass |
+| Linux container | `sh .claude/hooks/repo-rules.sh` under dash; `bash -n` on every script; the 9 rules tests of `test-hooks.sh`, including the unreadable file | pass |
+| Windows | `bash scripts/build-engine.sh` on a checkout at another revision, and on a clean worktree at the pin | refused; built the same SHA-256 as before |
 
-Not run: the hook tests and the desktop lockfile install on Linux (the container has no Node), and
-CI, which has no runner yet.
+Tests seen failing before their fix: the engine's link and FIFO tests and its two swap tests (on
+Linux); 5 of 7 rules tests against the first hook and the unreadable and deleted file tests against
+the second; 10 guard cases against the blocklist guard. Not run: the guard tests and the desktop
+lockfile install on Linux (the container has no Node); the engine's link tests on Windows (no
+symlink privilege); CI, which has no runner yet.
 
 ### Model qualification (2026-10-11)
 
@@ -171,6 +174,13 @@ session with `medium`; claude accepted `low` and `max`. The CLIs do not report t
   inspection errors, an engine identity check that followed links and could block on a FIFO, and
   this merge rule lacking a recorded decision. Its non-blocking points were taken too: the build
   script enforces the pinned toolchain, and the backlog's IPC is back to the plan's named pipe.
+- **2026-10-11, bootstrap re-review.** The second review (Codex Sol, run
+  `20261011-152631-5f6c59`) found three of the fixes incomplete, all fixed again: the push guard
+  became an allowlist (one named feature branch) after a blocklist missed `-uf`, `:` and wildcard
+  refspecs; the rules hook reads each file on its own because git grep reports an unreadable file
+  as no match; and the engine opens its binary without following links or blocking, so a swap
+  after the path check is refused. The build script pins the toolchain where the build runs, and
+  check.sh compares settings.json with its generator.
 
 ## Owner actions pending
 
