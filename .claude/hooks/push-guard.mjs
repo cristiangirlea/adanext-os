@@ -15,8 +15,14 @@
 // off; and a branch without a destination is refused while remote.<remote>.push could map it
 // elsewhere.
 //
-// One exception keeps ordinary work possible: a single git command that is not a push (a commit
-// whose message mentions "git push", say) passes, because its quoted arguments are data.
+// "Mentions a push" means the words push, send-pack or http-push anywhere on the line, which also
+// catches git subtree push. Every git subcommand on the line that is not a built-in is looked up
+// as an alias, and one that expands to a push or to a shell command is refused, so an alias cannot
+// hide a push from these words.
+//
+// One exception keeps ordinary work possible: a single git command from a short list that never
+// pushes (commit, log, show, ...) passes even when push appears in its quoted arguments, such as a
+// commit message that mentions git push.
 //
 // This guards what Claude runs directly. It is a guard rail, not a sandbox: a push from a script
 // file it never sees is out of its reach.
@@ -36,7 +42,19 @@ const command = String(input?.tool_input?.command ?? "");
 const cwd = typeof input?.cwd === "string" && input.cwd ? input.cwd : process.cwd();
 const powershell = /powershell/i.test(String(input?.tool_name ?? ""));
 
-if (!/\bgit\b/i.test(command) || !/\bpush\b/i.test(command)) process.exit(0);
+if (!/\bgit\b/i.test(command)) process.exit(0);
+
+// Words that name a way to push: push itself, its plumbing, and a subtree push.
+const pushy = /\b(?:push|send-pack|http-push)\b/i;
+
+// Git ignores an alias named like a built-in command, so only other names are looked up. An alias
+// that expands to a push, or to a shell command (which could do anything), is refused.
+const builtins = new Set(
+  ("add am apply archive bisect blame branch bundle checkout cherry-pick clean clone commit config " +
+    "describe diff fetch format-patch gc grep help init log ls-files ls-remote merge mv notes pull push " +
+    "range-diff rebase reflog remote reset restore revert rev-list rev-parse rm shortlog show sparse-checkout " +
+    "stash status submodule switch tag version worktree").split(" "),
+);
 
 function refuse(why) {
   process.stderr.write(
@@ -59,14 +77,24 @@ function git(args) {
   }
 }
 
+for (const m of command.matchAll(/\bgit(?:\.exe)?\s+(?:-\S+\s+)*([A-Za-z][\w.-]*)/gi)) {
+  const sub = m[1];
+  if (builtins.has(sub.toLowerCase())) continue;
+  const alias = git(["config", "--get", `alias.${sub}`]).out;
+  if (alias && (pushy.test(alias) || alias.startsWith("!"))) refuse(`git ${sub} is an alias for "${alias}"`);
+}
+
+if (!pushy.test(command)) process.exit(0);
+
 const words = command.trim().split(/ +/);
 const isPlainPush =
   /^[A-Za-z0-9 ._:\/-]+$/.test(command.trim()) && words[0] === "git" && words[1] === "push";
 
 if (!isPlainPush) {
-  // The exception: one git command, not a push, whose only mention of push is in its arguments.
-  if (singleGitCommandThatIsNotAPush(command)) process.exit(0);
-  refuse("a command that mentions git and push is allowed only as one plain push on its own");
+  // The exception: one git command that cannot push, whose mention of push is only in its
+  // arguments (a commit message, a log search).
+  if (singleNonPushingGitCommand(command)) process.exit(0);
+  refuse("a command that mentions a push is allowed only as one plain git push on its own");
 }
 
 const options = words.slice(2).filter((w) => w.startsWith("-"));
@@ -97,11 +125,12 @@ for (const spec of refspecs) {
 }
 process.exit(0);
 
-// singleGitCommandThatIsNotAPush reports whether the command is one simple git command (no
-// separator, continuation or substitution outside quotes) whose subcommand is not push. Quotes
-// follow the shell: in Bash a backslash escapes outside single quotes; in PowerShell a backtick
-// does. Any doubt answers false.
-function singleGitCommandThatIsNotAPush(text) {
+// singleNonPushingGitCommand reports whether the command is one simple git command (no separator,
+// continuation or substitution outside quotes, no git option before the subcommand) whose
+// subcommand is on a short list of commands that never push. Any doubt answers false.
+function singleNonPushingGitCommand(text) {
+  const neverPush = new Set(["add", "blame", "branch", "commit", "diff", "fetch", "grep", "log", "ls-files",
+    "restore", "rev-parse", "shortlog", "show", "stash", "status", "switch", "tag"]);
   const escape = powershell ? "`" : "\\";
   const out = [];
   let word = null;
@@ -131,5 +160,5 @@ function singleGitCommandThatIsNotAPush(text) {
   const sub = out.slice(1).find((w) => !w.startsWith("-"));
   // git's own options before the subcommand could change what runs; allow none.
   if (out[1]?.startsWith("-")) return false;
-  return sub !== undefined && sub.toLowerCase() !== "push";
+  return sub !== undefined && neverPush.has(sub.toLowerCase());
 }

@@ -171,6 +171,23 @@ refuse 'pwsh -Command "git push origin main"' PowerShell
 refuse 'git push origin $(echo main)'
 refuse 'git push origin `echo main`'
 
+# Other ways to push: plumbing, subtree, and aliases (which git ignores for built-in names).
+refuse 'git subtree push --prefix=lib origin main'
+refuse 'git send-pack origin main'
+refuse 'git http-push origin main'
+refuse 'git remote set-url --push origin x'
+git -C "$g" config alias.p push
+git -C "$g" config alias.sh '!git push origin main'
+git -C "$g" config alias.st status
+refuse 'git p origin main'
+refuse 'git add . && git p origin main'
+refuse 'git sh'
+allow 'git st'
+allow 'git fetch origin'
+git -C "$g" config --unset alias.p
+git -C "$g" config --unset alias.sh
+git -C "$g" config --unset alias.st
+
 git -C "$g" config remote.origin.push refs/heads/feature:refs/heads/main
 refuse 'git push -u origin feature'
 allow 'git push -u origin feature:feature'
