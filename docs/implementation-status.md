@@ -50,22 +50,21 @@ unknown rather than guess when the stamp is absent.
 
 ### Ada bootstrap checks (2026-10-11)
 
-At `5c5bab878dbd07e73a63d352b662b8a673f68185`, the last code commit after two review rounds; the
-commits after it change only docs:
+At `6b40412`, the last code commit after five review rounds; the commits after it change only docs:
 
 | Where | Command | Result |
 |---|---|---|
-| Windows 11, go1.26.4, Node 22.16.0 | `bash scripts/check.sh` | pass; `-race` skipped (no cgo); the unreadable-file hook test skipped (chmod cannot remove read access on Windows) |
-| Windows | `bash scripts/test-hooks.sh` | 42 pass, 1 skipped as above |
-| Linux container (`golang:1.26`, go1.26.8, uid 1000, no network) | `go vet`, `go build`, `go test -count=1`, `go test -race -count=1` | pass |
-| Linux container | `sh .claude/hooks/repo-rules.sh` under dash; `bash -n` on every script; the 9 rules tests of `test-hooks.sh`, including the unreadable file | pass |
+| Windows 11, go1.26.4, Node 22.16.0 | `bash scripts/check.sh` | pass; `-race` skipped (no cgo); the two permission tests skipped (chmod cannot remove access on Windows) |
+| Windows | `bash scripts/test-hooks.sh` | 84 pass, 2 skipped as above |
+| Linux container (`golang:1.26`, go1.26.8, uid 1000, no network) | `go vet`, `go test -race -count=1` | pass |
+| Linux container | `sh .claude/hooks/repo-rules.sh` under dash; the 10 rules tests of `test-hooks.sh`, including both permission cases | pass |
 | Windows | `bash scripts/build-engine.sh` on a checkout at another revision, and on a clean worktree at the pin | refused; built the same SHA-256 as before |
 
-Tests seen failing before their fix: the engine's link and FIFO tests and its two swap tests (on
-Linux); 5 of 7 rules tests against the first hook and the unreadable and deleted file tests against
-the second; 10 guard cases against the blocklist guard. Not run: the guard tests and the desktop
-lockfile install on Linux (the container has no Node); the engine's link tests on Windows (no
-symlink privilege); CI, which has no runner yet.
+Tests seen failing before their fix: the engine's link, FIFO and swap tests (Linux); the rules
+tests against each earlier hook; and, against each earlier push guard, the cases the next review
+named (10, then 11, then 7, then 7, then 3). Not run: the guard tests and the desktop lockfile
+install on Linux (the container has no Node), the engine's link tests on Windows (no symlink
+privilege), and CI, which has no runner yet.
 
 ### Model qualification (2026-10-11)
 
@@ -181,6 +180,16 @@ session with `medium`; claude accepted `low` and `max`. The CLIs do not report t
   as no match; and the engine opens its binary without following links or blocking, so a swap
   after the path check is refused. The build script pins the toolchain where the build runs, and
   check.sh compares settings.json with its generator.
+- **2026-10-11, the push guard's design.** Three more review rounds (Codex Sol, runs
+  `20261011-154345-0b857e`, `20261011-155721-4523e7`, `20261011-160325-a0e847`) each found new
+  ways to spell a push the guard missed: quoting, `-c` and `GIT_CONFIG_*` overrides, tags,
+  continuations, `cd`, nested shells, subtree, plumbing, aliases, substitutions inside double
+  quotes. Parsing every shell spelling cannot be won, so the guard stopped trying: a command that
+  mentions a push must be exactly one plain `git push <remote> <branch>` on its own, run in the
+  session's directory, with the branch checked against the effective git configuration; aliases
+  that push or run a shell are refused; a single non-pushing git command with literal arguments
+  still passes. It is a guard rail for commands Claude runs directly, not a sandbox: a push from a
+  script file is out of its reach, which the hook's header says.
 
 ## Owner actions pending
 
