@@ -18,14 +18,13 @@ type Event struct {
 }
 
 func (s *Store) AppendEvent(ctx context.Context, event Event) error {
+	return s.write(ctx, func(tx *Tx) error { return tx.AppendEvent(ctx, event) })
+}
+
+func appendEvent(ctx context.Context, tx *sql.Tx, event Event) error {
 	if !json.Valid(event.Payload) {
 		return errors.New("event payload must be valid JSON")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	var id string
 	if err := tx.QueryRowContext(ctx, "SELECT id FROM attempts WHERE id=?", event.Attempt).Scan(&id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -43,13 +42,13 @@ func (s *Store) AppendEvent(ctx context.Context, event Event) error {
 	if _, err := tx.ExecContext(ctx, "INSERT INTO events(attempt,seq,time,kind,payload) VALUES(?,?,?,?,?)", event.Attempt, event.Seq, event.Time, event.Kind, string(event.Payload)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 // Events returns events strictly after afterSeq, ordered by sequence. An unknown
 // attempt or an empty tail returns an empty slice.
-func (s *Store) Events(attempt string, afterSeq int64) ([]Event, error) {
-	rows, err := s.db.Query("SELECT attempt,seq,time,kind,payload FROM events WHERE attempt=? AND seq>? ORDER BY seq", attempt, afterSeq)
+func (s *Store) Events(ctx context.Context, attempt string, afterSeq int64) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT attempt,seq,time,kind,payload FROM events WHERE attempt=? AND seq>? ORDER BY seq", attempt, afterSeq)
 	if err != nil {
 		return nil, err
 	}

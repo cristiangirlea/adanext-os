@@ -54,14 +54,13 @@ func allowedTransition(from, to State) bool {
 // state and revision. A state mismatch is stale even if the revision matches.
 // Errors can be classified with errors.Is against the exported sentinels.
 func (s *Store) Transition(ctx context.Context, taskID string, from, to State, expectedRevision int64) error {
+	return s.write(ctx, func(tx *Tx) error { return tx.Transition(ctx, taskID, from, to, expectedRevision) })
+}
+
+func transition(ctx context.Context, tx *sql.Tx, taskID string, from, to State, expectedRevision int64) error {
 	if !allowedTransition(from, to) {
 		return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, from, to)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET state=?,revision=revision+1,updated=? WHERE id=? AND state=? AND revision=?`, to, now(), taskID, from, expectedRevision)
 	if err != nil {
 		return err
@@ -81,5 +80,5 @@ func (s *Store) Transition(ctx context.Context, taskID string, from, to State, e
 		}
 		return fmt.Errorf("%w: task %s, expected %d, current %d", ErrStaleRevision, taskID, expectedRevision, revision)
 	}
-	return tx.Commit()
+	return nil
 }

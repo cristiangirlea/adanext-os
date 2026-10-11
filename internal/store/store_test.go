@@ -25,7 +25,7 @@ var ctx = context.Background()
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestOpenAppliesAndReadsBackPragmasOnEveryConnection(t *testing.T) {
 }
 
 func TestOpenRefusesADatabaseThatCannotUseWAL(t *testing.T) {
-	s, err := Open(":memory:")
+	s, err := Open(ctx, ":memory:")
 	if s != nil {
 		s.Close()
 	}
@@ -92,7 +92,7 @@ func TestOpenRefusesADatabaseThatCannotUseWAL(t *testing.T) {
 }
 
 func TestOpenRefusesAMissingParentDirectory(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "missing", "state.sqlite"))
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "missing", "state.sqlite"))
 	if s != nil {
 		s.Close()
 	}
@@ -151,12 +151,12 @@ func TestConcurrentOpenersApplyTheInitialMigrationOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.sqlite")
 	start := make(chan struct{})
 	var wg sync.WaitGroup
-	for range 2 {
+	for range 6 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			s, err := Open(path)
+			s, err := Open(ctx, path)
 			if err != nil {
 				t.Error(err)
 				return
@@ -183,13 +183,13 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(path)
+	s, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	execute(t, s, "PRAGMA user_version=99")
 	s.Close()
-	s, err = Open(path)
+	s, err = Open(ctx, path)
 	if s != nil {
 		s.Close()
 	}
@@ -200,8 +200,12 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 
 func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 	s := openTestStore(t)
+	initial, err := migrationFiles.ReadFile("migrations/0001_initial.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	migrations := fstest.MapFS{
-		"migrations/0001_initial.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"migrations/0001_initial.sql": &fstest.MapFile{Data: initial},
 		"migrations/0002_good.sql":    &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
 		"migrations/0003_bad.sql":     &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
 	}
@@ -216,6 +220,10 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 		t.Fatalf("partial migration: %d, %v", count, err)
 	}
 	execute(t, s, "INSERT INTO committed VALUES(1)")
+	var recorded int
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 2 {
+		t.Fatalf("migration records: %d %v", recorded, err)
+	}
 }
 
 func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
@@ -316,7 +324,7 @@ func TestTransitionDistinguishesMissingAndStaleTasks(t *testing.T) {
 func TestConcurrentTransitionsAcrossStoresHaveExactlyOneWinner(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
-	other, err := Open(s.path)
+	other, err := Open(ctx, s.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,9 +359,9 @@ func TestConcurrentTransitionsAcrossStoresHaveExactlyOneWinner(t *testing.T) {
 func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	s := openTestStore(t)
 	var calls int
-	fn := func(tx *sql.Tx) ([]byte, error) {
+	fn := func(tx *Tx) ([]byte, error) {
 		calls++
-		_, err := tx.Exec("INSERT INTO projects VALUES('p','name','source','created')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('p','name','source','created')")
 		return []byte("response"), err
 	}
 	for range 2 {
@@ -365,20 +373,20 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("calls = %d", calls)
 	}
-	other, err := Open(s.path)
+	other, err := Open(ctx, s.path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if response, err := other.Do(ctx, "key", "hash", func(*sql.Tx) ([]byte, error) { t.Fatal("persisted key ran callback"); return nil, nil }); err != nil || string(response) != "response" {
+	if response, err := other.Do(ctx, "key", "hash", func(*Tx) ([]byte, error) { t.Fatal("persisted key ran callback"); return nil, nil }); err != nil || string(response) != "response" {
 		t.Fatalf("persisted response: %s %v", response, err)
 	}
 	if _, err := s.Do(ctx, "key", "other", fn); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatal(err)
 	}
 	failure := errors.New("callback failed")
-	if _, err := s.Do(ctx, "retry", "hash", func(tx *sql.Tx) ([]byte, error) {
-		_, err := tx.Exec("INSERT INTO projects VALUES('q','name','source','created')")
+	if _, err := s.Do(ctx, "retry", "hash", func(tx *Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('q','name','source','created')")
 		if err != nil {
 			return nil, err
 		}
@@ -386,8 +394,8 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	}); !errors.Is(err, failure) {
 		t.Fatal(err)
 	}
-	if _, err := s.Do(ctx, "retry", "hash", func(tx *sql.Tx) ([]byte, error) {
-		_, err := tx.Exec("INSERT INTO projects VALUES('q','name','source','created')")
+	if _, err := s.Do(ctx, "retry", "hash", func(tx *Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('q','name','source','created')")
 		return nil, err
 	}); err != nil {
 		t.Fatal(err)
@@ -396,7 +404,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 
 func TestConcurrentIdempotencyAcrossStoresExecutesOnce(t *testing.T) {
 	s := openTestStore(t)
-	other, err := Open(s.path)
+	other, err := Open(ctx, s.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +419,7 @@ func TestConcurrentIdempotencyAcrossStoresExecutesOnce(t *testing.T) {
 			if i%2 == 0 {
 				store = other
 			}
-			response, err := store.Do(ctx, "key", "hash", func(tx *sql.Tx) ([]byte, error) { calls.Add(1); return []byte("ok"), nil })
+			response, err := store.Do(ctx, "key", "hash", func(tx *Tx) ([]byte, error) { calls.Add(1); return []byte("ok"), nil })
 			if err != nil || string(response) != "ok" {
 				t.Errorf("%s %v", response, err)
 			}
@@ -438,14 +446,14 @@ func TestEventsRequireContiguousSequencesAndReadInOrder(t *testing.T) {
 			t.Fatalf("seq %d: %v", tc.seq, err)
 		}
 	}
-	events, err := s.Events("a", 0)
+	events, err := s.Events(ctx, "a", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 2 || events[0].Seq != 1 || events[1].Seq != 2 {
 		t.Fatalf("events: %+v", events)
 	}
-	tail, err := s.Events("a", 1)
+	tail, err := s.Events(ctx, "a", 1)
 	if err != nil || !reflect.DeepEqual(tail, events[1:]) {
 		t.Fatalf("tail: %+v %v", tail, err)
 	}
@@ -464,7 +472,7 @@ func TestEventsRequireContiguousSequencesAndReadInOrder(t *testing.T) {
 func TestConcurrentEventAppendsHaveExactlyOneWinner(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
-	other, err := Open(s.path)
+	other, err := Open(ctx, s.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +510,7 @@ func TestBackupRestoresAllCommittedRowsFromALiveWALDatabase(t *testing.T) {
 	if err := s.AppendEvent(ctx, Event{Attempt: "a", Seq: 1, Time: "now", Kind: "output", Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Do(ctx, "key", "hash", func(tx *sql.Tx) ([]byte, error) { return []byte("response"), nil }); err != nil {
+	if _, err := s.Do(ctx, "key", "hash", func(tx *Tx) ([]byte, error) { return []byte("response"), nil }); err != nil {
 		t.Fatal(err)
 	}
 	// Keep a write transaction open during the snapshot. Its uncommitted row
@@ -512,14 +520,14 @@ func TestBackupRestoresAllCommittedRowsFromALiveWALDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec("INSERT INTO projects VALUES('pending','name','source','created')"); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('pending','name','source','created')"); err != nil {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(t.TempDir(), "backup's %#.sqlite")
 	if err := s.Backup(ctx, dest); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := Open(dest)
+	restored, err := Open(ctx, dest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,13 +613,13 @@ kill:
 	}
 	<-done
 	waited = true
-	reopened, err := Open(path)
+	reopened, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
 	var count int
-	if err := reopened.db.QueryRow("SELECT count(*) FROM projects WHERE id LIKE 'crash-%'").Scan(&count); err != nil || (count != 0 && count != 2) {
+	if err := reopened.db.QueryRow("SELECT count(*) FROM projects WHERE id LIKE 'crash-%'").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("partial write: %d %v", count, err)
 	}
 	var integrity string
@@ -624,7 +632,7 @@ func TestHelperInterruptedWriter(t *testing.T) {
 	if os.Getenv("ADA_STORE_HELPER") != "1" {
 		return
 	}
-	s, err := Open(os.Getenv("ADA_STORE_PATH"))
+	s, err := Open(ctx, os.Getenv("ADA_STORE_PATH"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -632,11 +640,11 @@ func TestHelperInterruptedWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec("PRAGMA cache_size=1"); err != nil {
+	if _, err := tx.ExecContext(ctx, "PRAGMA cache_size=1"); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"crash-1", "crash-2"} {
-		if _, err := tx.Exec("INSERT INTO projects VALUES(?,?,'source','created')", id, strings.Repeat("x", 128*1024)); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES(?,?,'source','created')", id, strings.Repeat("x", 128*1024)); err != nil {
 			t.Fatal(err)
 		}
 	}

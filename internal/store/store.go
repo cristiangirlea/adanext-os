@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
 	"embed"
@@ -13,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,7 +41,7 @@ type Store struct {
 
 // Open requires a file database in an existing directory. It refuses databases
 // where durability settings cannot be applied or the schema is newer than Ada.
-func Open(path string) (*Store, error) {
+func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("database path is empty")
 	}
@@ -64,11 +66,15 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(4)
 	s := &Store{db: db, path: path}
-	if err := db.PingContext(context.Background()); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open store: %w", err)
 	}
-	if err := s.migrate(context.Background(), migrationFiles); err != nil {
+	if err := s.migrate(ctx, migrationFiles); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open store: %w", err)
+	}
+	if err := s.validateSchema(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open store: %w", err)
 	}
@@ -135,11 +141,23 @@ func configure(ctx context.Context, conn sqlite.ExecQuerierContext) error {
 func setPragma(ctx context.Context, conn sqlite.ExecQuerierContext, query string) error {
 	// SQLite can report BUSY immediately when two new databases switch to WAL,
 	// even with busy_timeout set. Retry that lock conflict within the same bound.
-	deadline := time.Now().Add(5 * time.Second)
+	return retryBusy(ctx, 5*time.Second, isBusy, func(ctx context.Context) error { _, err := conn.ExecContext(ctx, query, nil); return err })
+}
+
+func isBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&255 == 5
+}
+
+func retryBusy(ctx context.Context, timeout time.Duration, busy func(error) bool, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for {
-		_, err := conn.ExecContext(ctx, query, nil)
-		var sqliteErr *sqlite.Error
-		if !errors.As(err, &sqliteErr) || sqliteErr.Code()&255 != 5 || !time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := fn(ctx)
+		if !busy(err) {
 			return err
 		}
 		timer := time.NewTimer(10 * time.Millisecond)
@@ -191,11 +209,22 @@ func migrateNext(ctx context.Context, tx *sql.Tx, files fs.FS, entries []fs.DirE
 	if version > len(entries) {
 		return false, fmt.Errorf("database schema version %d is newer than supported version %d", version, len(entries))
 	}
-	if version == len(entries) {
-		return true, nil
-	}
 	if version < 0 {
 		return false, fmt.Errorf("invalid database schema version %d", version)
+	}
+	if version == 0 {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY CHECK (version > 0),
+            sha256 TEXT NOT NULL
+        )`); err != nil {
+			return false, err
+		}
+	}
+	if err := verifyMigrations(ctx, tx, files, entries, version); err != nil {
+		return false, err
+	}
+	if version == len(entries) {
+		return true, nil
 	}
 	name := "migrations/" + entries[version].Name()
 	data, err := fs.ReadFile(files, name)
@@ -205,17 +234,100 @@ func migrateNext(ctx context.Context, tx *sql.Tx, files fs.FS, entries []fs.DirE
 	if _, err := tx.ExecContext(ctx, string(data)); err != nil {
 		return false, fmt.Errorf("migration %s: %w", name, err)
 	}
+	if err := foreignKeyCheck(ctx, tx); err != nil {
+		return false, fmt.Errorf("migration %s: %w", name, err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version,sha256) VALUES(?,?)", version+1, fmt.Sprintf("%x", sha256.Sum256(data))); err != nil {
+		return false, err
+	}
 	if _, err := tx.ExecContext(ctx, "PRAGMA user_version="+strconv.Itoa(version+1)); err != nil {
 		return false, err
 	}
 	return false, nil
 }
 
+func verifyMigrations(ctx context.Context, tx *sql.Tx, files fs.FS, entries []fs.DirEntry, version int) error {
+	rows, err := tx.QueryContext(ctx, "SELECT version,sha256 FROM schema_migrations ORDER BY version")
+	if err != nil {
+		return fmt.Errorf("read recorded migrations for schema version %d: %w", version, err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var recorded int
+		var checksum string
+		if err := rows.Scan(&recorded, &checksum); err != nil {
+			return err
+		}
+		count++
+		if recorded != count || recorded > version {
+			return fmt.Errorf("recorded migration version %d is inconsistent with schema version %d", recorded, version)
+		}
+		data, err := fs.ReadFile(files, "migrations/"+entries[recorded-1].Name())
+		if err != nil {
+			return err
+		}
+		if want := fmt.Sprintf("%x", sha256.Sum256(data)); checksum != want {
+			return fmt.Errorf("migration %d checksum differs: recorded %s, embedded %s", recorded, checksum, want)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if count != version {
+		return fmt.Errorf("schema version %d requires %d migration records, found %d", version, version, count)
+	}
+	return nil
+}
+
+func foreignKeyCheck(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("foreign key check: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var table, parent string
+		var rowID any
+		var foreignKey int
+		if err := rows.Scan(&table, &rowID, &parent, &foreignKey); err != nil {
+			return err
+		}
+		return fmt.Errorf("foreign key check failed: table %s row %v references %s (key %d)", table, rowID, parent, foreignKey)
+	}
+	return rows.Err()
+}
+
+func (s *Store) validateSchema(ctx context.Context) error {
+	// Migration records establish provenance, but a manually dropped table must
+	// also be refused instead of leaving a partially usable coordinator store.
+	for _, query := range []string{
+		"SELECT id,name,source_path,created FROM projects LIMIT 0",
+		"SELECT id,project,objective,acceptance_criteria,state,revision,created,updated FROM tasks LIMIT 0",
+		"SELECT id,task,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended FROM attempts LIMIT 0",
+		"SELECT attempt,seq,time,kind,payload FROM events LIMIT 0",
+		"SELECT key,request_hash,response,created FROM idempotency LIMIT 0",
+	} {
+		rows, err := s.db.QueryContext(ctx, query)
+		if err != nil {
+			return fmt.Errorf("invalid store schema: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Do commits a callback's writes and its response atomically. Repeats with the
-// same hash return the original bytes without running fn. The callback must use
-// only tx for database work, must not commit or roll it back, and must not make
-// external side effects. A callback error rolls back both writes and the key.
-func (s *Store) Do(ctx context.Context, key, requestHash string, fn func(*sql.Tx) ([]byte, error)) ([]byte, error) {
+// same hash return the original bytes without running fn. The callback must be
+// short and have no effect outside the transaction. Use only tx for database
+// work, including transitions and events; do not call Store mutation methods.
+// A callback error rolls back both writes and the key.
+func (s *Store) Do(ctx context.Context, key, requestHash string, fn func(*Tx) ([]byte, error)) ([]byte, error) {
+	if key == "" || requestHash == "" {
+		return nil, errors.New("idempotency key and request hash must be nonempty")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -233,7 +345,7 @@ func (s *Store) Do(ctx context.Context, key, requestHash string, fn func(*sql.Tx
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	response, err = fn(tx)
+	response, err = fn(&Tx{tx: tx})
 	if err != nil {
 		return nil, err
 	}
@@ -249,14 +361,32 @@ func (s *Store) Do(ctx context.Context, key, requestHash string, fn func(*sql.Tx
 	return response, nil
 }
 
-// Backup uses SQLite's live, consistent snapshot. destPath must not already
-// contain a database. VACUUM INTO does not change the source or checkpoint it.
+// Backup uses SQLite's live, consistent snapshot and syncs the destination file
+// and its directory on Unix. destPath must be an absolute filesystem path, not
+// a file: URI, and must not already contain a database.
 func (s *Store) Backup(ctx context.Context, destPath string) error {
-	if destPath == "" {
-		return errors.New("backup path is empty")
+	if strings.HasPrefix(strings.ToLower(destPath), "file:") || !filepath.IsAbs(destPath) {
+		return errors.New("backup destination must be an absolute filesystem path, not a file: URI")
 	}
-	_, err := s.db.ExecContext(ctx, "VACUUM INTO ?", destPath)
-	return err
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", destPath); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(destPath, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open backup for sync: %w", err)
+	}
+	err = file.Sync()
+	closeErr := file.Close()
+	if err != nil {
+		return fmt.Errorf("sync backup: %w", err)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := syncBackupDirectory(filepath.Dir(destPath)); err != nil {
+		return fmt.Errorf("sync backup directory: %w", err)
+	}
+	return nil
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
