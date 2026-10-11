@@ -48,6 +48,22 @@ at another revision. Go embedded no VCS revision in these builds, so the script'
 cleanliness checks plus the hash are the evidence, and M1.4's handshake must report the revision as
 unknown rather than guess when the stamp is absent.
 
+### Ada bootstrap checks (2026-10-11)
+
+On the bootstrap branch after the review fixes, before the pull request:
+
+| Where | Command | Result |
+|---|---|---|
+| Windows 11, go1.26.4, Node 22.16.0 | `bash scripts/check.sh` | pass; `-race` skipped (no cgo) |
+| Windows | `bash scripts/test-hooks.sh` | 28 of 28 pass; against the first hook version, 5 of its 7 rule tests fail, as the review predicted |
+| Linux container (`golang:1.26`, go1.26.8, no network) | `go vet`, `go build`, `go test -count=1`, `go test -race -count=1` | pass |
+| Linux container | `sh .claude/hooks/repo-rules.sh` under dash; `bash -n` on every script | pass |
+| Linux container | the engine's link and FIFO tests | failed before the fix, pass after |
+| Windows | `bash scripts/build-engine.sh` on a dirty checkout, a clean pinned worktree, and with go1.26.3 | refused, built the same SHA-256 as before, refused |
+
+Not run: the hook tests and the desktop lockfile install on Linux (the container has no Node), and
+CI, which has no runner yet.
+
 ### Model qualification (2026-10-11)
 
 All runs went through `hrn` on the owner's subscriptions, recorded under `~/.hrn/runs`.
@@ -131,15 +147,32 @@ owner's steps below are done.
 - **2026-10-11, one list of checks.** `scripts/check.sh` is run by both CI and `/check`, so the
   two cannot drift.
 - **2026-10-11, GitHub repository.** Creating `cristiangirlea/ada-os` was refused by the
-  permission check; the owner creates it. The bootstrap is built locally meanwhile.
+  permission check; the owner creates it. The bootstrap is built locally meanwhile, then replayed
+  onto the new `main` (`git rebase --onto origin/main --root m0/bootstrap`, keeping this README)
+  so its pull request shares history with `main`.
+- **2026-10-11, merging.** The owner started implementation with `/autonomous-delivery`, whose
+  process merges through the pull request once CI on the owner's runner, the full local checks,
+  an independent review and a security read all hold for the head being merged. That is the
+  owner's standing rule for their repositories, and this repository's AGENTS.md follows it; it
+  replaces the stricter per-merge authorization `docs/plan.md` section 8 kept "until the owner says
+  otherwise". Infra merges still need the owner's yes, because they deploy.
+- **2026-10-11, bootstrap review.** The independent review (Codex Sol, read-only, run
+  `20261011-144717-71996c`) found five blocking problems, all fixed: push-to-main and force forms
+  the deny patterns missed (now also a pre-command hook with tests), scripts that could read a
+  failed command as success, a post-edit hook that split file names with spaces and ignored
+  inspection errors, an engine identity check that followed links and could block on a FIFO, and
+  this merge rule lacking a recorded decision. Its non-blocking points were taken too: the build
+  script enforces the pinned toolchain, and the backlog's IPC is back to the plan's named pipe.
 
 ## Owner actions pending
 
 1. Create the repository, private, with a README so `main` exists:
    `gh repo create cristiangirlea/ada-os --private --add-readme --description "Ada OS"`
-2. Runners: merge the infra pull request that adds `lab-ada-os` (Flux applies it), add `ada-os`
-   to the runners' GitHub App `cristiangirlea-lab-runners`, then set the repository variable from
-   `infra/tofu`: `GITHUB_TOKEN=$(gh auth token) tofu apply -target=module.runner_vars`.
+2. Runners, in this order: add `ada-os` to the runners' GitHub App `cristiangirlea-lab-runners`;
+   merge the infra pull request that adds `lab-ada-os` (Flux applies it); add `"ada-os"` to
+   `ci_runner_repos` in the untracked `infra/tofu/terraform.tfvars`; then, from `infra/tofu` on
+   `origin/main`:
+   `GITHUB_TOKEN=$(gh auth token) tofu apply -target='module.runner_vars.github_actions_variable.ci_runner["ada-os"]'`.
 3. Decide whether Harness `antigravity-cli` lands through a reviewed pull request.
 4. Confirm the owner-decisions table in `docs/plan.md` section 1.
 5. Before M5: approve installing Packer and its VMware plugin at pinned versions, and choose the

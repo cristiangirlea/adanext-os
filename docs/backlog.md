@@ -83,14 +83,17 @@ records stay loadable, README and PLAN.md updated, tests first.
   transition; duplicate requests with one idempotency key; a stale expected revision refused; a
   helper process killed mid-transaction leaves a consistent database; restore from a backup;
   disk-full on the artifact writer surfaces and stops the task.
-- [ ] **M2.2 `adad`, singleton and IPC.** `cmd/adad` listens on an owner-only socket in the
-  per-user state directory (AF_UNIX, which Go supports on Windows 10 and later as well as Linux).
+- [ ] **M2.2 `adad`, singleton and IPC.** `cmd/adad` listens, as `docs/plan.md` section 2 says,
+  on a per-user Windows named pipe whose security descriptor grants only the current user, or an
+  owner-only Unix socket (mode 0600 in a 0700 directory) on Linux. How the pipe is created
+  (direct Windows calls or a vetted library) is decided in the slice; a test reads the
+  descriptor back and finds no other principal.
   A second `adad` finds the first and exits; a stale lock from a dead process (PID and creation
   time) is recovered. Versioned NDJSON requests: create, start, cancel, get and list tasks, and
   subscribe to events from a sequence number. Every mutating request carries an idempotency key
   and the expected task revision. Acceptance: duplicate start, concurrent clients, a client
-  disconnecting mid-stream, reconnect from the last sequence, a malformed request, and the socket's
-  permissions.
+  disconnecting mid-stream, reconnect from the last sequence, a malformed request, and the pipe's
+  or socket's permissions.
 - [ ] **M2.3 Local executor.** `internal/executor` runs the pinned engine (`hrn exec --protocol v1`)
   per attempt, verified by hash, records the attempt intent before launch, ingests events in
   order, and holds an ownership generation. Cancel reports canceled only after the engine exits.
