@@ -61,6 +61,23 @@ rm -f "$r/broken.go"
 mkdir -p "$tmp/not-a-repo"
 expect 1 "$(rules_exit "$tmp/not-a-repo")" "rules: outside a repository the check fails instead of passing"
 
+printf 'package gone\n' > "$r/gone.go"
+git -C "$r" add gone.go
+rm -f "$r/gone.go"
+expect 0 "$(rules_exit "$r")" "rules: a tracked file deleted from disk is not an inspection error"
+git -C "$r" rm -q --cached gone.go
+
+mkdir -p "$r/desktop/src"
+printf 'const ok = { contextIsolation: true }\n' > "$r/desktop/src/locked.ts"
+chmod 000 "$r/desktop/src/locked.ts"
+if cat "$r/desktop/src/locked.ts" >/dev/null 2>&1; then
+  echo "skip: rules: an unreadable desktop file is an error (chmod cannot remove read access here)"
+else
+  expect 1 "$(rules_exit "$r")" "rules: an unreadable desktop file is an error, not a pass"
+fi
+chmod 644 "$r/desktop/src/locked.ts"
+rm -rf "$r/desktop"
+
 # --- push-guard.mjs
 g="$tmp/guard"
 new_repo "$g"
@@ -77,33 +94,47 @@ guard_exit() { # guard_exit <cwd> <command>
 for cmd in \
   "git status" \
   "git push -u origin feature" \
+  "git push --set-upstream origin feature" \
   "git push origin feature:feature" \
-  "git push" \
+  "git push -n origin feature" \
+  "git push -u origin feature 2>&1" \
+  "git commit -m 'msg' && git push -u origin feature" \
   "echo main && git log"; do
-  expect 0 "$(guard_exit "$g" "$cmd")" "guard allows on a feature branch: $cmd"
+  expect 0 "$(guard_exit "$g" "$cmd")" "guard allows: $cmd"
 done
 
 for cmd in \
+  "git push" \
+  "git push origin" \
   "git push origin main" \
+  "git push origin HEAD" \
   "git push origin HEAD:main" \
   "git push origin HEAD:refs/heads/main" \
+  "git push origin feature:main" \
+  "git push origin feature:other" \
+  "git push origin :" \
+  "git push origin 'refs/heads/*:refs/heads/*'" \
+  "git push origin :feature" \
   "git push -u origin main --dry-run" \
   "git push -f" \
+  "git push -uf origin feature" \
   "git push --force-with-lease origin feature" \
   "git push origin +feature" \
   "git push --tags" \
+  "git push --all origin" \
   "git push origin refs/tags/v1" \
   "git push --delete origin feature" \
   "git push --mirror" \
   "cd x && git push origin main" \
   "git -C . push origin main" \
+  "git --git-dir=.git push origin feature" \
   "git.exe push origin main; echo done"; do
   expect 2 "$(guard_exit "$g" "$cmd")" "guard refuses: $cmd"
 done
 
-git -C "$g" switch -q main
-expect 2 "$(guard_exit "$g" "git push")" "guard refuses a bare push while main is checked out"
-expect 2 "$(guard_exit "$g" "git push -u origin HEAD")" "guard refuses pushing HEAD while main is checked out"
+git -C "$g" config remote.origin.push refs/heads/feature:refs/heads/main
+expect 2 "$(guard_exit "$g" "git push -u origin feature")" "guard refuses when remote.origin.push could redirect the branch"
+git -C "$g" config --unset remote.origin.push
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures hook test(s) failed"

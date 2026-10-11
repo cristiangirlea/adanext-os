@@ -28,16 +28,19 @@ want_go=$(sed -n 's/.*"go"[[:space:]]*:[[:space:]]*"\(go[0-9][0-9.]*\)".*/\1/p' 
 [ -n "$want" ] || die "no 40-character revision in $pin"
 [ -n "$want_go" ] || die "no go toolchain in $pin"
 
-have_go=$(go env GOVERSION)
-[ "$have_go" = "$want_go" ] || die "go is $have_go; engine/engine.json pins $want_go (set GOTOOLCHAIN=$want_go)"
-
 have=$(git -C "$src" rev-parse --verify HEAD)
 [ "$have" = "$want" ] || die "$src is at $have; engine/engine.json pins $want"
 dirty=$(git -C "$src" status --porcelain --untracked-files=normal)
 [ -z "$dirty" ] || die "$src has modified or untracked files; build the engine from a clean checkout"
 
-goos=$(go env GOOS)
-goarch=$(go env GOARCH)
+# The toolchain is chosen per directory (go.mod, go.work, GOTOOLCHAIN), so pin it for the build and
+# ask which one is in effect from inside the Harness checkout, where the build runs.
+export GOTOOLCHAIN="$want_go"
+have_go=$(cd "$src" && go env GOVERSION)
+[ "$have_go" = "$want_go" ] || die "the build in $src would use $have_go; engine/engine.json pins $want_go"
+
+goos=$(cd "$src" && go env GOOS)
+goarch=$(cd "$src" && go env GOARCH)
 exe=hrn
 [ "$goos" = windows ] && exe=hrn.exe
 mkdir -p "$repo_root/.engine"

@@ -15,7 +15,10 @@ step "go test"
 go test -count=1 ./...
 
 step "go test -race"
-if [ "$(go env CGO_ENABLED)" = "1" ] && command -v "$(go env CC)" >/dev/null 2>&1; then
+# Captured in assignments so a failing go env stops the script instead of looking like "no cgo".
+cgo=$(go env CGO_ENABLED)
+cc=$(go env CC)
+if [ "$cgo" = "1" ] && command -v "$cc" >/dev/null 2>&1; then
   go test -race -count=1 ./...
 else
   echo "skipped here: the race detector needs cgo and a C compiler; CI runs it on Linux"
@@ -34,6 +37,24 @@ node --check .claude/hooks/push-guard.mjs
 
 step "hook tests"
 bash scripts/test-hooks.sh
+
+step ".claude/settings.json matches scripts/gen-settings.py"
+py=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    py=$candidate
+    break
+  fi
+done
+[ -n "$py" ] || { echo "python is needed to check .claude/settings.json against its generator"; exit 1; }
+generated=$(mktemp)
+"$py" -I scripts/gen-settings.py "$generated" >/dev/null
+if ! cmp -s "$generated" .claude/settings.json; then
+  rm -f "$generated"
+  echo ".claude/settings.json differs from what scripts/gen-settings.py writes: edit the lists there and run it"
+  exit 1
+fi
+rm -f "$generated"
 
 step "desktop lockfile installs"
 (cd desktop && npm ci --ignore-scripts --no-audit --no-fund)
