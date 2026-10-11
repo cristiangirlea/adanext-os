@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pull requests test on Linux only; every push to main tests both once a Windows runner is
+        # installed for this repository. The Windows runner sits on a desktop with no container
+        # around the job, so only merged code may reach it; pull requests include branches written
+        # by agents. Without CI_RUNNER_WINDOWS there is no Windows leg.
+        os: ${{ github.event_name == 'push' && vars.CI_RUNNER_WINDOWS != '' && fromJSON('["linux", "windows"]') || fromJSON('["linux"]') }}
+    # Only the owner's runners, never GitHub's: Linux on the local cluster's lab-ada-os scale set
+    # (CI_RUNNER), Windows on the runner on the owner's PC (CI_RUNNER_WINDOWS). Without CI_RUNNER
+    # the job is skipped, and a skipped job is not a pass.
+    if: ${{ vars.CI_RUNNER != '' }}
+    runs-on: ${{ matrix.os == 'linux' && vars.CI_RUNNER || vars.CI_RUNNER_WINDOWS }}
+    env:
+      # The lab runner's container sees the node's 24 CPUs within a 3 GiB memory limit; the SQLite
+      # driver is a large package to compile, so build at most four packages at once.
+      GOFLAGS: -p=4
+    # bash on every OS, so a self-hosted Windows runner with only Windows PowerShell 5.1 does not
+    # refuse the step scripts. Git Bash is on that runner's PATH.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+      - name: everything scripts/check.sh runs
+        run: bash scripts/check.sh
