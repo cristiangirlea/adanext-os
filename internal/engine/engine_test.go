@@ -89,6 +89,17 @@ func TestIdentifyRefusesADirectoryAndAMissingFile(t *testing.T) {
 	}
 }
 
+func TestIdentifyRefusesALinkEvenToARegularFile(t *testing.T) {
+	target := writeFile(t, "hrn", "engine bytes")
+	link := filepath.Join(t.TempDir(), "hrn-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create a symbolic link here: %v", err)
+	}
+	if _, err := Identify(link); err == nil {
+		t.Fatal("Identify followed a symbolic link to the engine")
+	}
+}
+
 func TestVerifyComparesTheHashCaseInsensitively(t *testing.T) {
 	p := writeFile(t, "hrn", "engine bytes")
 	id, err := Identify(p)

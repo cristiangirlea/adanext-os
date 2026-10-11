@@ -67,12 +67,21 @@ type Identity struct {
 	Size   int64  `json:"size"`
 }
 
-// Identify hashes the binary at path. It refuses a directory or anything that is not a regular
-// file, so a link to somewhere unexpected is not hashed in place of the engine.
+// Identify hashes the binary at path. It refuses anything that is not a regular file itself: a
+// directory, a symbolic link or reparse point (even one leading to a regular file), a FIFO or a
+// device. The path is checked without following it before it is opened, so a FIFO cannot block
+// the open, and the opened file must be the one checked, so a swap in between is refused.
 func Identify(path string) (Identity, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return Identity{}, err
+	}
+	before, err := os.Lstat(abs)
+	if err != nil {
+		return Identity{}, err
+	}
+	if !before.Mode().IsRegular() {
+		return Identity{}, fmt.Errorf("%s is not a regular file (%s)", abs, before.Mode().Type())
 	}
 	f, err := os.Open(abs)
 	if err != nil {
@@ -83,8 +92,8 @@ func Identify(path string) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	if !info.Mode().IsRegular() {
-		return Identity{}, fmt.Errorf("%s is not a regular file", abs)
+	if !info.Mode().IsRegular() || !os.SameFile(before, info) {
+		return Identity{}, fmt.Errorf("%s changed while it was being opened", abs)
 	}
 	h := sha256.New()
 	n, err := io.Copy(h, f)
