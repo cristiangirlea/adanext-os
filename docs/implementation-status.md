@@ -189,7 +189,11 @@ session with `medium`; claude accepted `low` and `max`. The CLIs do not report t
   session's directory, with the branch checked against the effective git configuration; aliases
   that push or run a shell are refused; a single non-pushing git command with literal arguments
   still passes. It is a guard rail for commands Claude runs directly, not a sandbox: a push from a
-  script file is out of its reach, which the hook's header says.
+  script file is out of its reach, which the hook's header says. A sixth review (run
+  `20261011-161646-3924a6`) found `--upload-pack` running a shell and gaps in alias resolution;
+  fixed, but it confirms the point: a text check is a guard rail against mistakes, not a security
+  boundary. The boundary for `main` is branch protection on GitHub (owner action 6). Review rounds
+  on the guard stop here; anything further is recorded as a known limit.
 
 ## Owner actions pending
 
@@ -204,3 +208,6 @@ session with `medium`; claude accepted `low` and `max`. The CLIs do not report t
 4. Confirm the owner-decisions table in `docs/plan.md` section 1.
 5. Before M5: approve installing Packer and its VMware plugin at pinned versions, and choose the
    VM storage drive.
+6. Turn on branch protection for `main` in `ada-os` and `harness`: require a pull request, and
+   the CI check, before merging; no force pushes or deletions. That is the real boundary the
+   push guard only approximates, and it is an account setting only the owner can change.
