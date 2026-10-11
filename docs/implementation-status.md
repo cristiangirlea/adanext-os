@@ -50,19 +50,19 @@ unknown rather than guess when the stamp is absent.
 
 ### Ada bootstrap checks (2026-10-11)
 
-At `6b40412`, the last code commit after five review rounds; the commits after it change only docs:
+At `2dc2cdd`, the last code commit after six review rounds; the commits after it change only docs:
 
 | Where | Command | Result |
 |---|---|---|
 | Windows 11, go1.26.4, Node 22.16.0 | `bash scripts/check.sh` | pass; `-race` skipped (no cgo); the two permission tests skipped (chmod cannot remove access on Windows) |
-| Windows | `bash scripts/test-hooks.sh` | 84 pass, 2 skipped as above |
-| Linux container (`golang:1.26`, go1.26.8, uid 1000, no network) | `go vet`, `go test -race -count=1` | pass |
+| Windows | `bash scripts/test-hooks.sh` | 92 pass, 2 skipped as above |
+| Linux container (`golang:1.26`, go1.26.8, uid 1000, no network) | `go vet`, `go build`, `go test -count=1`, `go test -race -count=1` | pass |
 | Linux container | `sh .claude/hooks/repo-rules.sh` under dash; the 10 rules tests of `test-hooks.sh`, including both permission cases | pass |
 | Windows | `bash scripts/build-engine.sh` on a checkout at another revision, and on a clean worktree at the pin | refused; built the same SHA-256 as before |
 
 Tests seen failing before their fix: the engine's link, FIFO and swap tests (Linux); the rules
 tests against each earlier hook; and, against each earlier push guard, the cases the next review
-named (10, then 11, then 7, then 7, then 3). Not run: the guard tests and the desktop lockfile
+named (10, then 11, then 7, then 7, then 3, then 6). Not run: the guard tests and the desktop lockfile
 install on Linux (the container has no Node), the engine's link tests on Windows (no symlink
 privilege), and CI, which has no runner yet.
 
