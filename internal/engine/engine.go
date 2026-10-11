@@ -60,6 +60,10 @@ func LoadPin(path string) (Pin, error) {
 	return pin, nil
 }
 
+// beforeOpen runs between Identify's check of the path and its open. Tests replace it to swap the
+// file in that window; it does nothing otherwise.
+var beforeOpen = func(path string) {}
+
 // Identity is what a run's evidence records about the engine binary it used.
 type Identity struct {
 	Path   string `json:"path"`
@@ -69,8 +73,9 @@ type Identity struct {
 
 // Identify hashes the binary at path. It refuses anything that is not a regular file itself: a
 // directory, a symbolic link or reparse point (even one leading to a regular file), a FIFO or a
-// device. The path is checked without following it before it is opened, so a FIFO cannot block
-// the open, and the opened file must be the one checked, so a swap in between is refused.
+// device. The path is checked without following it, then opened without following a link and
+// without blocking (openNoFollow, per platform), and the opened file must be a regular file and
+// the very one checked, so a swap in between is refused rather than hashed or waited on.
 func Identify(path string) (Identity, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -83,7 +88,8 @@ func Identify(path string) (Identity, error) {
 	if !before.Mode().IsRegular() {
 		return Identity{}, fmt.Errorf("%s is not a regular file (%s)", abs, before.Mode().Type())
 	}
-	f, err := os.Open(abs)
+	beforeOpen(abs)
+	f, err := openNoFollow(abs)
 	if err != nil {
 		return Identity{}, err
 	}
