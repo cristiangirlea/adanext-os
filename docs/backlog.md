@@ -39,11 +39,11 @@ records stay loadable, README and PLAN.md updated, tests first.
   apply an effort say so in the run, as unenforced limits already do. Acceptance: argument tests
   for both adapters through the helper process; an unknown level fails before start; old records
   load; a bounded live smoke on each CLI recorded in this file.
-- [ ] **M1.2 Run records surface write failures.** `runlog.Writer` keeps the first event write
+- [x] **M1.2 Run records surface write failures.** Done: Harness #51, 2026-10-11, merge `b9f1733`. `runlog.Writer` keeps the first event write
   error and counts lost events; `Close` returns them; the result record carries them in an
   additive field; `hrn run` and the MCP run tool report them. Acceptance: a writer whose events file
   fails mid-run reports the error and the count; records without the field still load.
-- [ ] **M1.3 Agent CLIs run in a process tree.** CLI backends start their child in the Job Object
+- [x] **M1.3 Agent CLIs run in a process tree.** Done: Harness #52, 2026-10-11, merge `75ba625`. CLI backends start their child in the Job Object
   on Windows and a process group on Unix that `internal/tools` already uses for commands, so a
   cancel or timeout also ends grandchildren, and the run reports canceled only after the tree is
   gone. Acceptance: a helper process that starts a grandchild; after cancel the grandchild no longer

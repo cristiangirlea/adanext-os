@@ -7,7 +7,7 @@ are in `docs/backlog.md`.
 | Milestone | Status | Where | Next |
 |---|---|---|---|
 | M0 Baseline | in progress | this repository, bootstrap branch | Repository on GitHub, CI runner, merge the bootstrap |
-| M1 Execution protocol | in progress | Harness issue #49, one pull request per slice | M1.1 merged (Harness #50, `0c96142`); M1.2 and M1.3 in review; M1.4 next |
+| M1 Execution protocol | in progress | Harness issue #49, one pull request per slice | M1.1 to M1.3 merged (Harness #50, #51, #52; `75ba625`); M1.4 being finished |
 | M2 Durable coordinator | not started | | Starts after the bootstrap merges and M1.4 lands |
 | M3 Project workspaces | not started | | |
 | M4 First local workflow | not started | | |
@@ -138,6 +138,18 @@ the full local checks ran again at that head. Codex wrote it (run `20261011-1448
 Opus reviewed it (run `20261011-150534-0395ed`) and found the eval judge's effort unchecked, which
 was fixed with a test that failed first. Live: codex accepted `low`, `xhigh` and `max` and a forked
 session with `medium`; claude accepted `low` and `max`. The CLIs do not report the effective level.
+
+### M1.2 and M1.3 (2026-10-11)
+
+Harness #51 (run records surface write failures) merged as `b9f1733` and #52 (contained process
+trees) as `75ba625`, each after CI passed on `lab-harness` at its head and the full local checks
+ran again there, with `go test -race` on the touched packages in a Linux container. Codex wrote
+both; Claude Opus reviewed each twice. #51's review found a short write that corrupted the next
+event; #52's found zombies counted as survivors, a missing explicit kill, and a /proc scan that
+gave up under `hidepid`. All were fixed with tests that failed first. On Windows a CLI's leftovers
+now end with the run; on Unix the CLI has its own process group and hrn stops on SIGTERM and
+SIGHUP. Live, a Codex timeout ended a running `ping`, though the older hrn did too (Codex's own
+sandbox cleans up), so the fake-CLI tests are what show the change.
 
 ## Decisions log
 
