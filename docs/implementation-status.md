@@ -213,6 +213,12 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
   as no match; and the engine opens its binary without following links or blocking, so a swap
   after the path check is refused. The build script pins the toolchain where the build runs, and
   check.sh compares settings.json with its generator.
+- **2026-10-11, refinement goes back to ready.** The plan's state diagram ends at `refinement`, but
+  section 3 says refinement "stays in the task lineage and preserves work", so the store allows
+  `refinement` to `ready` and nothing else out of it. The review of M2.1 (Claude Opus, run
+  `20261011-171544-53b71d`) asked for this to be recorded.
+- **2026-10-11, disk-full on the artifact writer moves to M2.3.** There is no artifact writer in
+  M2.1; artifacts arrive with the executor, so the criterion moved with them.
 - **2026-10-11, the push guard's design.** Three more review rounds (Codex Sol, runs
   `20261011-154345-0b857e`, `20261011-155721-4523e7`, `20261011-160325-a0e847`) each found new
   ways to spell a push the guard missed: quoting, `-c` and `GIT_CONFIG_*` overrides, tags,

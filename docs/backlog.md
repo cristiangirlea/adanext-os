@@ -94,7 +94,7 @@ records stay loadable, README and PLAN.md updated, tests first.
   every allowed and refused transition; duplicate requests with one idempotency key; a stale
   expected revision refused; a task listed only to its project's members and a permission prompt
   addressed to the task's actor; a helper process killed mid-transaction leaves a consistent
-  database; restore from a backup; disk-full on the artifact writer surfaces and stops the task.
+  database; restore from a backup.
 - [ ] **M2.2 `adad`, singleton and IPC.** `cmd/adad` listens, as `docs/plan.md` section 2 says,
   on a per-user Windows named pipe whose security descriptor grants only the current user, or an
   owner-only Unix socket (mode 0600 in a 0700 directory) on Linux. How the pipe is created
@@ -109,10 +109,12 @@ records stay loadable, README and PLAN.md updated, tests first.
   or socket's permissions.
 - [ ] **M2.3 Local executor.** `internal/executor` runs the pinned engine (`hrn exec --protocol v1`)
   per attempt, verified by hash, records the attempt intent before launch, ingests events in
-  order, and holds an ownership generation. Cancel reports canceled only after the engine exits.
+  order, and holds an ownership generation. Artifacts are written outside the database by content
+  hash, and only then referenced. Cancel reports canceled only after the engine exits.
   After an `adad` crash, an attempt that was running becomes `interrupted` and then
   `recovery_required`; it is never replayed. Acceptance: a fake engine speaking the protocol;
-  cancel, engine crash, `adad` crash and restart, truncated stream, duplicate start.
+  cancel, engine crash, `adad` crash and restart, truncated stream, duplicate start; disk-full on
+  the artifact writer surfaces and stops the task.
 - [ ] **M2.4 The window can close.** A minimal Electron shell (main and preload in `desktop/`, one
   React view of tasks and events in `ui/`, the app `adad` serves in M4b) that connects to `adad`,
   or starts it independently of its own process tree.
