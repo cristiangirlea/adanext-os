@@ -141,6 +141,11 @@
       "Bash(git push *--mirror*)",
       "Bash(git push *--delete*)",
       "Bash(git push *--follow-tags*)",
+      "Bash(git push -f)",
+      "Bash(git push --force)",
+      "Bash(git push *refs/heads/main*)",
+      "Bash(git push * main *)",
+      "Bash(git push *:refs/tags/*)",
       "Bash(gh pr merge *--auto*)",
       "Bash(gh pr merge *--admin*)",
       "Bash(gh api *-X PUT*)",
@@ -148,6 +153,11 @@
       "Bash(gh api *-XPUT*)",
       "Bash(gh api *-X DELETE*)",
       "Bash(gh api *--method DELETE*)",
+      "Bash(gh api *-XDELETE*)",
+      "Bash(gh api *--method=PUT*)",
+      "Bash(gh api *--method=DELETE*)",
+      "Bash(gh api *-X=PUT*)",
+      "Bash(gh api *-X=DELETE*)",
       "Bash(go env -w*)",
       "Bash(go env -u*)",
       "Bash(npx electron-builder *--publish*)",
@@ -170,6 +180,11 @@
       "PowerShell(git push *--mirror*)",
       "PowerShell(git push *--delete*)",
       "PowerShell(git push *--follow-tags*)",
+      "PowerShell(git push -f)",
+      "PowerShell(git push --force)",
+      "PowerShell(git push *refs/heads/main*)",
+      "PowerShell(git push * main *)",
+      "PowerShell(git push *:refs/tags/*)",
       "PowerShell(gh pr merge *--auto*)",
       "PowerShell(gh pr merge *--admin*)",
       "PowerShell(gh api *-X PUT*)",
@@ -177,6 +192,11 @@
       "PowerShell(gh api *-XPUT*)",
       "PowerShell(gh api *-X DELETE*)",
       "PowerShell(gh api *--method DELETE*)",
+      "PowerShell(gh api *-XDELETE*)",
+      "PowerShell(gh api *--method=PUT*)",
+      "PowerShell(gh api *--method=DELETE*)",
+      "PowerShell(gh api *-X=PUT*)",
+      "PowerShell(gh api *-X=DELETE*)",
       "PowerShell(go env -w*)",
       "PowerShell(go env -u*)",
       "PowerShell(npx electron-builder *--publish*)",
@@ -194,6 +214,18 @@
     ]
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/push-guard.mjs",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",

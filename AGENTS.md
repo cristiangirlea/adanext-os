@@ -14,6 +14,8 @@ decision.
 | `engine/engine.json` | The Harness revision Ada runs. Change it only in a slice that says why. |
 | `desktop/` | The Electron, React and TypeScript shell. Versions are pinned; code arrives in M2 and M4. |
 | `scripts/check.sh` | Everything CI runs, in order. |
+| `scripts/test-hooks.sh` | Tests for the two Claude hooks, run by `check.sh`. |
+| `scripts/gen-settings.py` | Writes `.claude/settings.json`, giving every Bash rule its PowerShell twin. Edit the lists there, not the JSON. |
 | `scripts/build-engine.sh` | Builds `hrn` from a clean Harness checkout at the pinned revision into `.engine/`. |
 | `docs/` | Plan, status and backlog. |
 
@@ -30,8 +32,9 @@ bash scripts/check.sh
 ```
 
 It runs `go vet`, `go build`, `go test -count=1`, `go test -race` where cgo and a C compiler exist,
-gofmt on tracked files, the Harness-internal import ban, `bash -n` on every script, and
-`npm ci --ignore-scripts` in `desktop/`. The owner's Windows PC has no cgo: there, `-race` is
+the repository rules (`.claude/hooks/repo-rules.sh`: gofmt, the Harness-internal import ban,
+Electron isolation), a syntax check of every script, the hook tests, and `npm ci --ignore-scripts`
+in `desktop/`. The owner's Windows PC has no cgo: there, `-race` is
 left to CI.
 
 CI runs only on the owner's runners: pull requests on Linux (`vars.CI_RUNNER`, the cluster's

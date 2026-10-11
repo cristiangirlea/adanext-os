@@ -21,23 +21,19 @@ else
   echo "skipped here: the race detector needs cgo and a C compiler; CI runs it on Linux"
 fi
 
-step "gofmt"
-unformatted=$(git ls-files -co --exclude-standard -- '*.go' | xargs -r gofmt -l)
-if [ -n "$unformatted" ]; then
-  printf 'gofmt would change:\n%s\n' "$unformatted"
-  exit 1
-fi
-
-step "no Harness internal imports"
-if git grep -n 'cristiangirlea/harness/internal' -- '*.go'; then
-  echo "Ada runs the pinned hrn binary; it must not import Harness's private packages"
-  exit 1
-fi
+step "repo rules (gofmt, no Harness internal imports, Electron isolation)"
+# The same script Claude's post-edit hook runs. It exits non-zero when a rule is broken or a file
+# could not be inspected, and set -e stops here either way.
+sh .claude/hooks/repo-rules.sh
 
 step "scripts parse"
 for f in scripts/*.sh .claude/hooks/*.sh; do
   bash -n "$f"
 done
+node --check .claude/hooks/push-guard.mjs
+
+step "hook tests"
+bash scripts/test-hooks.sh
 
 step "desktop lockfile installs"
 (cd desktop && npm ci --ignore-scripts --no-audit --no-fund)
