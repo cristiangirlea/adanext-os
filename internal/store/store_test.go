@@ -296,7 +296,7 @@ func TestTransitionsAllowExactlyThePlanEdgesAndBumpRevision(t *testing.T) {
 		{Draft, Ready}: true, {Ready, Preparing}: true, {Preparing, Running}: true, {Preparing, Failed}: true, {Preparing, Interrupted}: true, {Running, Verifying}: true,
 		{Verifying, AwaitingReview}: true, {AwaitingReview, Accepted}: true, {Running, Failed}: true,
 		{Verifying, Failed}: true, {AwaitingReview, Refinement}: true, {Refinement, Ready}: true,
-		{Running, CancelRequested}: true, {CancelRequested, Canceled}: true, {Running, Interrupted}: true,
+		{Running, CancelRequested}: true, {CancelRequested, Canceled}: true, {CancelRequested, Interrupted}: true, {Running, Interrupted}: true,
 		{Interrupted, RecoveryRequired}: true,
 	}
 	for _, from := range states {

@@ -147,13 +147,7 @@ func (s *Store) BumpAndRecover(ctx context.Context) (int64, []string, error) {
 		if state != Preparing && state != Running && state != CancelRequested {
 			return 0, nil, fmt.Errorf("recover attempt %s: task is %s", a.id, state)
 		}
-		if state == CancelRequested {
-			// This is reconciliation of an unknown process outcome, not a normal
-			// task transition. Never report cancellation without observing exit.
-			if _, err := tx.ExecContext(ctx, "UPDATE tasks SET state='interrupted',revision=revision+1,updated=? WHERE id=? AND state='cancel_requested' AND revision=?", now(), a.task, rev); err != nil {
-				return 0, nil, err
-			}
-		} else if err := transition(ctx, tx, a.task, state, Interrupted, rev); err != nil {
+		if err := transition(ctx, tx, a.task, state, Interrupted, rev); err != nil {
 			return 0, nil, err
 		}
 		if err := transition(ctx, tx, a.task, Interrupted, RecoveryRequired, rev+1); err != nil {

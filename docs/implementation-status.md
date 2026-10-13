@@ -401,6 +401,8 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   cancellation whose process exit was not observed, with the old generation in an event; it never
   relaunches them. These choices make launch intent durable,
   distinguish an engine exit from accepted work, and prevent a stale coordinator from writing.
+  CancelRequested may move to Interrupted: an unobserved cancel cannot be reported canceled because
+  the plan requires the process tree to be confirmed stopped.
 
 ## Owner actions pending
 

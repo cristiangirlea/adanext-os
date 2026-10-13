@@ -42,7 +42,7 @@ func allowedTransition(from, to State) bool {
 	case Refinement:
 		return to == Ready
 	case CancelRequested:
-		return to == Canceled
+		return to == Canceled || to == Interrupted
 	case Interrupted:
 		return to == RecoveryRequired
 	default:
