@@ -58,6 +58,11 @@ func New(cfg Config) *Executor {
 	return &Executor{cfg: cfg, active: make(map[string]*active)}
 }
 
+// StopBudget includes the shutdown timers, the stderr WaitDelay, and state persistence.
+func (e *Executor) StopBudget() time.Duration {
+	return 3*e.cfg.CancelGrace + 5*time.Second
+}
+
 func (e *Executor) LaunchAttempt(id string) {
 	a, err := e.cfg.Store.AttemptByID(context.Background(), id)
 	if err != nil || a.State != "pending" || a.OwnershipGeneration != e.cfg.Generation {
@@ -218,38 +223,36 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		e.fail(a, err)
 		return
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		stdin.Close()
 		e.fail(a, err)
 		return
 	}
+	cmd.Stdout = stdoutWriter
 	if err := engine.Verify(enginePath, e.cfg.EngineSHA256); err != nil {
 		stdin.Close()
 		stdout.Close()
+		stdoutWriter.Close()
 		e.fail(a, fmt.Errorf("engine verification: %w", err))
 		return
 	}
 	if err := cmd.Start(); err != nil {
 		stdin.Close()
 		stdout.Close()
+		stdoutWriter.Close()
 		e.fail(a, fmt.Errorf("launch: %w", err))
 		return
 	}
+	_ = stdoutWriter.Close()
+	defer stdout.Close()
 	var inputMu sync.Mutex
 	write := func(v any) error { inputMu.Lock(); defer inputMu.Unlock(); return json.NewEncoder(stdin).Encode(v) }
 	var processMu sync.Mutex
 	var exited, killRequested bool
-	var exitState *os.ProcessState
 	var exitErr error
+	var exitTime time.Time
 	processDone := make(chan struct{})
-	go func() {
-		state, err := cmd.Process.Wait()
-		processMu.Lock()
-		exitState, exitErr, exited = state, err, true
-		processMu.Unlock()
-		close(processDone)
-	}()
 	kill := func() {
 		processMu.Lock()
 		if !exited && cmd.Process.Kill() == nil {
@@ -282,21 +285,24 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			killTimer.Stop()
 		}
 	}
-	// The reader calls cmd.Wait only after its final read has returned.
+	go func() {
+		err := cmd.Wait()
+		processMu.Lock()
+		exitErr, exited, exitTime = err, true, time.Now()
+		processMu.Unlock()
+		startShutdown()
+		close(processDone)
+	}()
 	waitExit := func() (bool, error) {
 		<-processDone
-		_ = cmd.Wait() // Process.Wait above supplies the exit status.
 		stopShutdown()
 		processMu.Lock()
 		defer processMu.Unlock()
 		if exitErr != nil {
 			return killRequested, exitErr
 		}
-		if exitState == nil {
+		if cmd.ProcessState == nil || exitTime.IsZero() {
 			return killRequested, errors.New("engine exit state missing")
-		}
-		if !exitState.Success() {
-			return killRequested, fmt.Errorf("exit status %d", exitState.ExitCode())
 		}
 		return killRequested, nil
 	}
@@ -330,15 +336,23 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}()
 	reader := bufio.NewReaderSize(stdout, 64*1024)
 	read := func() (message, []byte, error) {
-		line, err := reader.ReadBytes('\n')
-		if len(line) > 4<<20 {
-			return message{}, nil, errors.New("protocol line exceeds 4 MiB")
-		}
-		if errors.Is(err, io.EOF) && len(line) != 0 {
-			return message{}, nil, errors.New("truncated protocol line")
-		}
-		if err != nil {
-			return message{}, nil, err
+		var line []byte
+		for {
+			part, err := reader.ReadSlice('\n')
+			if len(line)+len(part) > 4<<20 {
+				return message{}, nil, errors.New("line too long")
+			}
+			line = append(line, part...)
+			if errors.Is(err, bufio.ErrBufferFull) {
+				continue
+			}
+			if errors.Is(err, io.EOF) && len(line) != 0 {
+				return message{}, nil, errors.New("truncated protocol line")
+			}
+			if err != nil {
+				return message{}, nil, err
+			}
+			break
 		}
 		line = bytes.TrimSuffix(line, []byte{'\n'})
 		var m message
@@ -370,15 +384,18 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		for {
 			_, _, err := read()
 			if err != nil {
+				if !errors.Is(err, io.EOF) {
+					_, _ = io.Copy(io.Discard, reader)
+				}
 				killed, waitErr := waitExit()
 				return err, killed, waitErr
 			}
 		}
 	}
 	abort := func(cause error) {
-		e.recordCause(a, cause)
+		causeRecorded := e.recordCause(a, cause)
 		_, killed, _ := drain()
-		e.failFinal(a, cause, true, killed)
+		e.failFinal(a, cause, causeRecorded, killed)
 	}
 	hello, _, err := next("hello", false)
 	if err != nil {
@@ -454,10 +471,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	for {
 		m, line, err := next("", true)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				if fatalCause == nil {
-					e.recordCause(a, errors.New("engine exited without result"))
-				}
+			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 				startShutdown()
 				killed, waitErr := waitExit()
 				cause := fmt.Errorf("engine exited without result: %v", waitErr)
@@ -502,18 +516,19 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 			if !errors.Is(tailErr, io.EOF) {
 				cause := fmt.Errorf("result tail: %w", tailErr)
+				causeRecorded := false
 				if !errors.Is(tailErr, os.ErrClosed) {
-					e.recordCause(a, cause)
+					causeRecorded = e.recordCause(a, cause)
 				}
 				killed, _ := waitExit()
 				if killed {
 					if fatalCause != nil {
 						e.failFinal(a, fatalCause, true, true)
 					} else {
-						e.failFinal(a, cause, !errors.Is(tailErr, os.ErrClosed), true)
+						e.failFinal(a, cause, causeRecorded, true)
 					}
 				} else {
-					e.failFinal(a, cause, !errors.Is(tailErr, os.ErrClosed), false)
+					e.failFinal(a, cause, causeRecorded, false)
 				}
 				return
 			}
@@ -687,9 +702,9 @@ func (e *Executor) fail(a store.Attempt, cause error) {
 	e.failFinal(a, cause, false, false)
 }
 
-func (e *Executor) recordCause(a store.Attempt, cause error) {
+func (e *Executor) recordCause(a store.Attempt, cause error) bool {
 	payload, _ := json.Marshal(map[string]any{"error": cause.Error()})
-	_ = e.append(a, "error", payload, "")
+	return e.append(a, "error", payload, "") == nil
 }
 
 func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed bool) {

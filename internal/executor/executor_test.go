@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,8 +28,18 @@ func TestHelperFakeEngine(t *testing.T) {
 		return
 	}
 	if script == "grandchild" {
-		time.Sleep(5 * time.Second)
-		return
+		identity, err := processIdentity(os.Getpid())
+		if err != nil {
+			os.Exit(3)
+		}
+		f, err := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			os.Exit(3)
+		}
+		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
+		f.Close()
+		time.Sleep(2 * time.Second)
+		os.Exit(0)
 	}
 	marker := os.Getenv("ADA_FAKE_MARKER")
 	mark := func(value string) {
@@ -172,7 +183,40 @@ func TestHelperFakeEngine(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(3)
 		}
-		mark(fmt.Sprintf("child_pid:%d", child.Process.Pid))
+	}
+	if script == "exit_with_child_stdout" || script == "child_stderr" {
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild")
+		if script == "child_stderr" {
+			child.Stderr = os.Stderr
+		} else {
+			child.Stdout = os.Stdout
+		}
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		// Wait until the child has written its identity before the parent exits.
+		for i := 0; i < 100; i++ {
+			if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if script == "exit_with_child_stdout" {
+			os.Exit(0)
+		}
+	}
+	if script == "malformed_burst" {
+		fmt.Fprintln(os.Stdout, "not json")
+		chunk := []byte(strings.Repeat("x", 64<<10))
+		for i := 0; i < 128; i++ {
+			_, _ = os.Stdout.Write(chunk)
+		}
+		return
+	}
+	if script == "unterminated_long_line" {
+		_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 5<<20))
+		return
 	}
 	final := "done"
 	if script == "big" || script == "big_block" {
@@ -296,6 +340,7 @@ func TestHappyEngineRunRecordsOrderedEventsAndVerifiesTask(t *testing.T) {
 func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		e, s, _, _ := testExecutor(t, "delayed_exit")
+		e.cfg.CancelGrace = 200 * time.Millisecond
 		e.LaunchAttempt("attempt")
 		waitAttempt(t, s, "ended_ok")
 	}
@@ -674,18 +719,7 @@ func TestStderrIsCappedAndPrivate(t *testing.T) {
 
 func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "child_stdout")
-	t.Cleanup(func() {
-		for _, line := range markerLines(t, marker) {
-			if strings.HasPrefix(line, "child_pid:") {
-				var pid int
-				if _, err := fmt.Sscanf(line, "child_pid:%d", &pid); err == nil {
-					if child, err := os.FindProcess(pid); err == nil {
-						_ = child.Kill()
-					}
-				}
-			}
-		}
-	})
+	cleanupGrandchild(t, marker)
 	started := time.Now()
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
@@ -700,6 +734,128 @@ func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
 		if strings.Contains(string(event.Payload), "engine was killed after the grace period") {
 			t.Fatalf("exited parent marked killed: %+v", event)
 		}
+	}
+}
+
+func cleanupGrandchild(t *testing.T, marker string) {
+	t.Helper()
+	t.Cleanup(func() {
+		data, err := os.ReadFile(marker)
+		if err != nil {
+			return
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var pid int
+			var identity string
+			if _, err := fmt.Sscanf(line, "child:%d:%s", &pid, &identity); err != nil || pid <= 0 {
+				continue
+			}
+			current, err := processIdentity(pid)
+			if err != nil || current != identity {
+				continue
+			}
+			if child, err := os.FindProcess(pid); err == nil {
+				_ = child.Kill()
+			}
+		}
+	})
+}
+
+func waitGrandchildMarker(t *testing.T, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("grandchild did not record its process identity")
+}
+
+func TestExitedEngineWithDescendantStdoutEndsPromptly(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "exit_with_child_stdout")
+	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = 200 * time.Millisecond
+	started := time.Now()
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	waitGrandchildMarker(t, marker)
+	if elapsed := time.Since(started); elapsed > 3*e.cfg.CancelGrace+time.Second {
+		t.Fatalf("attempt took %s", elapsed)
+	}
+	errorEventContains(t, s, "engine exited without result")
+}
+
+func TestStderrDescendantFitsStopBudget(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "child_stderr")
+	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = 200 * time.Millisecond
+	if got, want := e.StopBudget(), 3*e.cfg.CancelGrace+5*time.Second; got != want {
+		t.Fatalf("stop budget = %s, want %s", got, want)
+	}
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "running")
+	waitGrandchildMarker(t, marker)
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
+	defer cancel()
+	if err := e.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecordCauseReportsAppendFailure(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "happy")
+	a, err := s.AttemptByID(context.Background(), "attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.Generation++
+	if e.recordCause(a, fmt.Errorf("lost ownership")) {
+		t.Fatal("reported a cause recorded under stale ownership")
+	}
+}
+
+func TestMalformedLineDrainsBurstWithoutKill(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "malformed_burst")
+	e.cfg.CancelGrace = 500 * time.Millisecond
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	errorEventContains(t, s, "malformed protocol line")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if strings.Contains(string(event.Payload), "killed after the grace") {
+			t.Fatalf("engine was marked killed: %+v", events)
+		}
+	}
+}
+
+func TestUnterminatedOversizedLineFailsPromptly(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "unterminated_long_line")
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	errorEventContains(t, s, "line too long")
+}
+
+func TestEOFRecordsOneMissingResultCause(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "crash")
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Kind == "error" && strings.Contains(string(event.Payload), "engine exited without result") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("missing result causes = %d: %+v", count, events)
 	}
 }
 

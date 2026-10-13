@@ -124,7 +124,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation})
 		execution = api.Execution{EngineSHA256: *engineHash, Generation: generation, Runner: local}
 		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
 			defer cancel()
 			if err := local.Stop(stopCtx); err != nil {
 				fmt.Fprintln(stderr, "adad: stop executor:", err)
@@ -154,7 +154,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if local != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
 		defer cancel()
 		if err := local.Stop(stopCtx); err != nil {
 			fmt.Fprintln(stderr, "adad: stop executor:", err)
