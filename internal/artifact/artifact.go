@@ -36,6 +36,35 @@ type file interface {
 	Name() string
 }
 
+// TempFile is the narrow writable-file boundary used for filesystem fault tests.
+type TempFile interface {
+	io.Writer
+	Sync() error
+	Close() error
+	Name() string
+}
+
+type tempFileFS struct {
+	filesystem
+	create func(string, string) (TempFile, error)
+}
+
+func (f tempFileFS) createTemp(dir, pattern string) (file, error) { return f.create(dir, pattern) }
+
+// OpenWithTempFileCreator keeps directory and publication operations on the OS
+// filesystem while allowing a caller to inject a failing temporary file.
+func OpenWithTempFileCreator(dir string, create func(string, string) (TempFile, error)) (*Store, error) {
+	if create == nil {
+		return nil, errors.New("temporary file creator is nil")
+	}
+	s, err := Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	s.fs = tempFileFS{filesystem: s.fs, create: create}
+	return s, nil
+}
+
 type filesystem interface {
 	createTemp(dir, pattern string) (file, error)
 	mkdirAll(path string, mode os.FileMode) error
