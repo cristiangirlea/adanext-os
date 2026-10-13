@@ -32,7 +32,7 @@ func allowedTransition(from, to State) bool {
 	case Ready:
 		return to == Preparing
 	case Preparing:
-		return to == Running
+		return to == Running || to == Failed || to == Interrupted
 	case Running:
 		return to == Verifying || to == Failed || to == CancelRequested || to == Interrupted
 	case Verifying:

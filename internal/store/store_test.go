@@ -23,6 +23,15 @@ import (
 
 var ctx = context.Background()
 
+func mustMigration(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := migrationFiles.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
@@ -50,7 +59,7 @@ func seed(t *testing.T, s *Store) {
 	execute(t, s, `INSERT INTO projects VALUES ('p', 'project', '/source', '2026-10-11T00:00:00Z')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('p', 'u', 'owner', 'added')`)
 	execute(t, s, `INSERT INTO tasks VALUES ('t', 'p', 'u', 'objective', 'criteria', 'draft', 0, 'created', 'updated')`)
-	execute(t, s, `INSERT INTO attempts VALUES ('a', 't', 'u', 'codex', 'model', 'low', 'local', 1, 'hash', 'run', 'session', 'running', 'started', NULL)`)
+	execute(t, s, `INSERT INTO attempts(id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended) VALUES ('a', 't', 'u', 'codex', 'model', 'low', 'local', 1, 'hash', 'run', 'session', 'running', 'started', NULL)`)
 }
 
 func TestOpenAppliesAndReadsBackPragmasOnEveryConnection(t *testing.T) {
@@ -165,7 +174,7 @@ func TestConcurrentOpenersApplyTheInitialMigrationOnce(t *testing.T) {
 			}
 			defer s.Close()
 			var version int
-			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
 				t.Errorf("version: %d %v", version, err)
 			}
 		}()
@@ -178,7 +187,7 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	path := s.path
@@ -195,7 +204,7 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	if s != nil {
 		s.Close()
 	}
-	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "3") {
+	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "4") {
 		t.Fatalf("future schema: %v", err)
 	}
 }
@@ -218,14 +227,15 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 		"migrations/0001_initial.sql":             &fstest.MapFile{Data: initial},
 		"migrations/0002_idempotency_project.sql": &fstest.MapFile{Data: second},
 		"migrations/0003_artifacts.sql":           &fstest.MapFile{Data: third},
-		"migrations/0004_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
-		"migrations/0005_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
+		"migrations/0004_execution.sql":           &fstest.MapFile{Data: mustMigration(t, "migrations/0004_execution.sql")},
+		"migrations/0005_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
+		"migrations/0006_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
 	}
 	if err := s.migrate(ctx, migrations); err == nil {
 		t.Fatal("bad migration succeeded")
 	}
 	var version, count int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	if err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='rolled_back'").Scan(&count); err != nil || count != 0 {
@@ -233,13 +243,13 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 	}
 	execute(t, s, "INSERT INTO committed VALUES(1)")
 	var recorded int
-	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 4 {
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 5 {
 		t.Fatalf("migration records: %d %v", recorded, err)
 	}
 }
 
 func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
-	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5"}
+	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5", "migrations/0004_execution.sql": "74a497b8e4f143e143e0d32f99cd763a157ba1742c2b5929d363e50e17f140be"}
 	files, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -283,7 +293,7 @@ func TestTransitionsAllowExactlyThePlanEdgesAndBumpRevision(t *testing.T) {
 	seed(t, s)
 	states := []State{Draft, Ready, Preparing, Running, Verifying, AwaitingReview, Accepted, Refinement, Failed, CancelRequested, Canceled, Interrupted, RecoveryRequired, "unknown"}
 	allowed := map[[2]State]bool{
-		{Draft, Ready}: true, {Ready, Preparing}: true, {Preparing, Running}: true, {Running, Verifying}: true,
+		{Draft, Ready}: true, {Ready, Preparing}: true, {Preparing, Running}: true, {Preparing, Failed}: true, {Preparing, Interrupted}: true, {Running, Verifying}: true,
 		{Verifying, AwaitingReview}: true, {AwaitingReview, Accepted}: true, {Running, Failed}: true,
 		{Verifying, Failed}: true, {AwaitingReview, Refinement}: true, {Refinement, Ready}: true,
 		{Running, CancelRequested}: true, {CancelRequested, Canceled}: true, {Running, Interrupted}: true,
@@ -477,7 +487,7 @@ func TestEventsRequireContiguousSequencesAndReadInOrder(t *testing.T) {
 	if err := s.AppendEvent(ctx, "u", Event{Attempt: "a", Seq: 3, Payload: json.RawMessage(`invalid`)}); err == nil {
 		t.Fatal("invalid JSON stored")
 	}
-	execute(t, s, `INSERT INTO attempts SELECT 'b',task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended FROM attempts WHERE id='a'`)
+	execute(t, s, `INSERT INTO attempts(id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended,mode) SELECT 'b',task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended,mode FROM attempts WHERE id='a'`)
 	if err := s.AppendEvent(ctx, "u", Event{Attempt: "b", Seq: 1, Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
