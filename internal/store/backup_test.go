@@ -1,11 +1,53 @@
 package store
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestBackupRefusesAnExistingDestinationWithoutChangingIt(t *testing.T) {
+	for _, contents := range [][]byte{nil, []byte("existing backup contents")} {
+		name := "empty"
+		if len(contents) != 0 {
+			name = "nonempty"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := openTestStore(t)
+			seed(t, s)
+			dest := filepath.Join(t.TempDir(), "backup.sqlite")
+			if err := os.WriteFile(dest, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Backup(ctx, dest); !errors.Is(err, os.ErrExist) {
+				t.Fatalf("backup of an existing destination: got %v, want os.ErrExist", err)
+			}
+			got, err := os.ReadFile(dest)
+			if err != nil {
+				t.Fatalf("existing destination was removed: %v", err)
+			}
+			if !bytes.Equal(got, contents) {
+				t.Fatalf("existing destination changed: got %q, want %q", got, contents)
+			}
+		})
+	}
+}
+
+func TestBackupRemovesItsDestinationWhenVacuumFails(t *testing.T) {
+	s := openTestStore(t)
+	dest := filepath.Join(t.TempDir(), "backup.sqlite")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Backup(ctx, dest); err == nil {
+		t.Fatal("backup of a closed store succeeded")
+	}
+	if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed backup destination remains: %v", err)
+	}
+}
 
 type failingBackupFile struct {
 	syncErr, closeErr error
