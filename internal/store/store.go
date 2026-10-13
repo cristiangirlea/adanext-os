@@ -302,11 +302,13 @@ func (s *Store) validateSchema(ctx context.Context) error {
 	// Migration records establish provenance, but a manually dropped table must
 	// also be refused instead of leaving a partially usable coordinator store.
 	for _, query := range []string{
+		"SELECT id,name,created FROM users LIMIT 0",
+		"SELECT project,user,role,added FROM project_members LIMIT 0",
 		"SELECT id,name,source_path,created FROM projects LIMIT 0",
-		"SELECT id,project,objective,acceptance_criteria,state,revision,created,updated FROM tasks LIMIT 0",
-		"SELECT id,task,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended FROM attempts LIMIT 0",
+		"SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated FROM tasks LIMIT 0",
+		"SELECT id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended FROM attempts LIMIT 0",
 		"SELECT attempt,seq,time,kind,payload FROM events LIMIT 0",
-		"SELECT key,request_hash,response,created FROM idempotency LIMIT 0",
+		"SELECT user,key,request_hash,response,created FROM idempotency LIMIT 0",
 	} {
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {
@@ -320,11 +322,11 @@ func (s *Store) validateSchema(ctx context.Context) error {
 }
 
 // Do commits a callback's writes and its response atomically. Repeats with the
-// same hash return the original bytes without running fn. The callback must be
+// same user and hash return the original bytes without running fn. The callback must be
 // short and have no effect outside the transaction. Use only tx for database
 // work, including transitions and events; do not call Store mutation methods.
 // A callback error rolls back both writes and the key.
-func (s *Store) Do(ctx context.Context, key, requestHash string, fn func(*Tx) ([]byte, error)) ([]byte, error) {
+func (s *Store) Do(ctx context.Context, userID, key, requestHash string, fn func(*Tx) ([]byte, error)) ([]byte, error) {
 	if key == "" || requestHash == "" {
 		return nil, errors.New("idempotency key and request hash must be nonempty")
 	}
@@ -335,7 +337,7 @@ func (s *Store) Do(ctx context.Context, key, requestHash string, fn func(*Tx) ([
 	defer tx.Rollback()
 	var hash string
 	var response []byte
-	err = tx.QueryRowContext(ctx, "SELECT request_hash,response FROM idempotency WHERE key=?", key).Scan(&hash, &response)
+	err = tx.QueryRowContext(ctx, "SELECT request_hash,response FROM idempotency WHERE user=? AND key=?", userID, key).Scan(&hash, &response)
 	if err == nil {
 		if hash != requestHash {
 			return nil, ErrIdempotencyConflict
@@ -345,14 +347,14 @@ func (s *Store) Do(ctx context.Context, key, requestHash string, fn func(*Tx) ([
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	response, err = fn(&Tx{tx: tx})
+	response, err = fn(&Tx{tx: tx, userID: userID})
 	if err != nil {
 		return nil, err
 	}
 	if response == nil {
 		response = []byte{}
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO idempotency(key,request_hash,response,created) VALUES(?,?,?,?)", key, requestHash, response, now()); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO idempotency(user,key,request_hash,response,created) VALUES(?,?,?,?,?)", userID, key, requestHash, response, now()); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

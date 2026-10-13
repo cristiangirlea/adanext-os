@@ -53,8 +53,8 @@ func allowedTransition(from, to State) bool {
 // Transition checks the plan's edges and atomically compares both the current
 // state and revision. A state mismatch is stale even if the revision matches.
 // Errors can be classified with errors.Is against the exported sentinels.
-func (s *Store) Transition(ctx context.Context, taskID string, from, to State, expectedRevision int64) error {
-	return s.write(ctx, func(tx *Tx) error { return tx.Transition(ctx, taskID, from, to, expectedRevision) })
+func (s *Store) Transition(ctx context.Context, userID, taskID string, from, to State, expectedRevision int64) error {
+	return s.write(ctx, userID, func(tx *Tx) error { return tx.Transition(ctx, taskID, from, to, expectedRevision) })
 }
 
 func transition(ctx context.Context, tx *sql.Tx, taskID string, from, to State, expectedRevision int64) error {

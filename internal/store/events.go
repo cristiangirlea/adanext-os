@@ -17,8 +17,8 @@ type Event struct {
 	Payload json.RawMessage
 }
 
-func (s *Store) AppendEvent(ctx context.Context, event Event) error {
-	return s.write(ctx, func(tx *Tx) error { return tx.AppendEvent(ctx, event) })
+func (s *Store) AppendEvent(ctx context.Context, userID string, event Event) error {
+	return s.write(ctx, userID, func(tx *Tx) error { return tx.AppendEvent(ctx, event) })
 }
 
 func appendEvent(ctx context.Context, tx *sql.Tx, event Event) error {
@@ -47,8 +47,19 @@ func appendEvent(ctx context.Context, tx *sql.Tx, event Event) error {
 
 // Events returns events strictly after afterSeq, ordered by sequence. An unknown
 // attempt or an empty tail returns an empty slice.
-func (s *Store) Events(ctx context.Context, attempt string, afterSeq int64) ([]Event, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT attempt,seq,time,kind,payload FROM events WHERE attempt=? AND seq>? ORDER BY seq", attempt, afterSeq)
+func (s *Store) Events(ctx context.Context, userID, attempt string, afterSeq int64) ([]Event, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := requireAttemptMember(ctx, tx, userID, attempt); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return []Event{}, nil
+		}
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT attempt,seq,time,kind,payload FROM events WHERE attempt=? AND seq>? ORDER BY seq", attempt, afterSeq)
 	if err != nil {
 		return nil, err
 	}

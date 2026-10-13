@@ -46,9 +46,11 @@ func execute(t *testing.T, s *Store, query string, args ...any) {
 
 func seed(t *testing.T, s *Store) {
 	t.Helper()
+	execute(t, s, `INSERT INTO users VALUES ('u', 'user', 'created')`)
 	execute(t, s, `INSERT INTO projects VALUES ('p', 'project', '/source', '2026-10-11T00:00:00Z')`)
-	execute(t, s, `INSERT INTO tasks VALUES ('t', 'p', 'objective', 'criteria', 'draft', 0, 'created', 'updated')`)
-	execute(t, s, `INSERT INTO attempts VALUES ('a', 't', 'codex', 'model', 'low', 'local', 1, 'hash', 'run', 'session', 'running', 'started', NULL)`)
+	execute(t, s, `INSERT INTO project_members VALUES ('p', 'u', 'owner', 'added')`)
+	execute(t, s, `INSERT INTO tasks VALUES ('t', 'p', 'u', 'objective', 'criteria', 'draft', 0, 'created', 'updated')`)
+	execute(t, s, `INSERT INTO attempts VALUES ('a', 't', 'u', 'codex', 'model', 'low', 'local', 1, 'hash', 'run', 'session', 'running', 'started', NULL)`)
 }
 
 func TestOpenAppliesAndReadsBackPragmasOnEveryConnection(t *testing.T) {
@@ -227,7 +229,7 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 }
 
 func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
-	want := map[string]string{"migrations/0001_initial.sql": "a1a84edab3d87fff24258656ba57cb8546cb90d9bfb9e6de23a27f057985f353"}
+	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82"}
 	files, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +252,7 @@ func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
 func TestForeignKeysPreventOrphansAndDeletingEvidence(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
-	if err := s.AppendEvent(ctx, Event{Attempt: "a", Seq: 1, Time: "now", Kind: "output", Payload: json.RawMessage(`{"text":"evidence"}`)}); err != nil {
+	if err := s.AppendEvent(ctx, "u", Event{Attempt: "a", Seq: 1, Time: "now", Kind: "output", Payload: json.RawMessage(`{"text":"evidence"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	for _, query := range []string{
@@ -285,7 +287,7 @@ func TestTransitionsAllowExactlyThePlanEdgesAndBumpRevision(t *testing.T) {
 				} else {
 					execute(t, s, "UPDATE tasks SET state='draft', revision=7, updated='before' WHERE id='t'")
 				}
-				err := s.Transition(ctx, "t", from, to, 7)
+				err := s.Transition(ctx, "u", "t", from, to, 7)
 				var state, updated string
 				var revision int64
 				if scanErr := s.db.QueryRow("SELECT state,revision,updated FROM tasks WHERE id='t'").Scan(&state, &revision, &updated); scanErr != nil {
@@ -308,14 +310,14 @@ func TestTransitionsAllowExactlyThePlanEdgesAndBumpRevision(t *testing.T) {
 func TestTransitionDistinguishesMissingAndStaleTasks(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
-	if err := s.Transition(ctx, "missing", Draft, Ready, 0); !errors.Is(err, ErrNotFound) {
+	if err := s.Transition(ctx, "u", "missing", Draft, Ready, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
 		from, to State
 		revision int64
 	}{{Draft, Ready, 1}, {Ready, Preparing, 0}} {
-		if err := s.Transition(ctx, "t", tc.from, tc.to, tc.revision); !errors.Is(err, ErrStaleRevision) {
+		if err := s.Transition(ctx, "u", "t", tc.from, tc.to, tc.revision); !errors.Is(err, ErrStaleRevision) {
 			t.Fatal(err)
 		}
 	}
@@ -341,7 +343,7 @@ func TestConcurrentTransitionsAcrossStoresHaveExactlyOneWinner(t *testing.T) {
 			if i%2 == 0 {
 				store = other
 			}
-			err := store.Transition(ctx, "t", Draft, Ready, 0)
+			err := store.Transition(ctx, "u", "t", Draft, Ready, 0)
 			if err == nil {
 				wins.Add(1)
 			} else if !errors.Is(err, ErrStaleRevision) {
@@ -358,6 +360,7 @@ func TestConcurrentTransitionsAcrossStoresHaveExactlyOneWinner(t *testing.T) {
 
 func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	s := openTestStore(t)
+	execute(t, s, "INSERT INTO users VALUES('u','user','created')")
 	var calls int
 	fn := func(tx *Tx) ([]byte, error) {
 		calls++
@@ -365,7 +368,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 		return []byte("response"), err
 	}
 	for range 2 {
-		response, err := s.Do(ctx, "key", "hash", fn)
+		response, err := s.Do(ctx, "u", "key", "hash", fn)
 		if err != nil || string(response) != "response" {
 			t.Fatalf("%s %v", response, err)
 		}
@@ -378,14 +381,14 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if response, err := other.Do(ctx, "key", "hash", func(*Tx) ([]byte, error) { t.Fatal("persisted key ran callback"); return nil, nil }); err != nil || string(response) != "response" {
+	if response, err := other.Do(ctx, "u", "key", "hash", func(*Tx) ([]byte, error) { t.Fatal("persisted key ran callback"); return nil, nil }); err != nil || string(response) != "response" {
 		t.Fatalf("persisted response: %s %v", response, err)
 	}
-	if _, err := s.Do(ctx, "key", "other", fn); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, err := s.Do(ctx, "u", "key", "other", fn); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatal(err)
 	}
 	failure := errors.New("callback failed")
-	if _, err := s.Do(ctx, "retry", "hash", func(tx *Tx) ([]byte, error) {
+	if _, err := s.Do(ctx, "u", "retry", "hash", func(tx *Tx) ([]byte, error) {
 		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('q','name','source','created')")
 		if err != nil {
 			return nil, err
@@ -394,7 +397,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	}); !errors.Is(err, failure) {
 		t.Fatal(err)
 	}
-	if _, err := s.Do(ctx, "retry", "hash", func(tx *Tx) ([]byte, error) {
+	if _, err := s.Do(ctx, "u", "retry", "hash", func(tx *Tx) ([]byte, error) {
 		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('q','name','source','created')")
 		return nil, err
 	}); err != nil {
@@ -404,6 +407,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 
 func TestConcurrentIdempotencyAcrossStoresExecutesOnce(t *testing.T) {
 	s := openTestStore(t)
+	execute(t, s, "INSERT INTO users VALUES('u','user','created')")
 	other, err := Open(ctx, s.path)
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +423,7 @@ func TestConcurrentIdempotencyAcrossStoresExecutesOnce(t *testing.T) {
 			if i%2 == 0 {
 				store = other
 			}
-			response, err := store.Do(ctx, "key", "hash", func(tx *Tx) ([]byte, error) { calls.Add(1); return []byte("ok"), nil })
+			response, err := store.Do(ctx, "u", "key", "hash", func(tx *Tx) ([]byte, error) { calls.Add(1); return []byte("ok"), nil })
 			if err != nil || string(response) != "ok" {
 				t.Errorf("%s %v", response, err)
 			}
@@ -438,7 +442,7 @@ func TestEventsRequireContiguousSequencesAndReadInOrder(t *testing.T) {
 		seq   int64
 		valid bool
 	}{{0, false}, {2, false}, {1, true}, {1, false}, {3, false}, {2, true}} {
-		err := s.AppendEvent(ctx, Event{Attempt: "a", Seq: tc.seq, Time: "now", Kind: "output", Payload: json.RawMessage(`{"ok":true}`)})
+		err := s.AppendEvent(ctx, "u", Event{Attempt: "a", Seq: tc.seq, Time: "now", Kind: "output", Payload: json.RawMessage(`{"ok":true}`)})
 		if tc.valid && err != nil {
 			t.Fatal(err)
 		}
@@ -446,25 +450,25 @@ func TestEventsRequireContiguousSequencesAndReadInOrder(t *testing.T) {
 			t.Fatalf("seq %d: %v", tc.seq, err)
 		}
 	}
-	events, err := s.Events(ctx, "a", 0)
+	events, err := s.Events(ctx, "u", "a", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 2 || events[0].Seq != 1 || events[1].Seq != 2 {
 		t.Fatalf("events: %+v", events)
 	}
-	tail, err := s.Events(ctx, "a", 1)
+	tail, err := s.Events(ctx, "u", "a", 1)
 	if err != nil || !reflect.DeepEqual(tail, events[1:]) {
 		t.Fatalf("tail: %+v %v", tail, err)
 	}
-	if err := s.AppendEvent(ctx, Event{Attempt: "missing", Seq: 1, Payload: json.RawMessage(`{}`)}); !errors.Is(err, ErrNotFound) {
+	if err := s.AppendEvent(ctx, "u", Event{Attempt: "missing", Seq: 1, Payload: json.RawMessage(`{}`)}); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
 	}
-	if err := s.AppendEvent(ctx, Event{Attempt: "a", Seq: 3, Payload: json.RawMessage(`invalid`)}); err == nil {
+	if err := s.AppendEvent(ctx, "u", Event{Attempt: "a", Seq: 3, Payload: json.RawMessage(`invalid`)}); err == nil {
 		t.Fatal("invalid JSON stored")
 	}
-	execute(t, s, `INSERT INTO attempts SELECT 'b',task,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended FROM attempts WHERE id='a'`)
-	if err := s.AppendEvent(ctx, Event{Attempt: "b", Seq: 1, Payload: json.RawMessage(`{}`)}); err != nil {
+	execute(t, s, `INSERT INTO attempts SELECT 'b',task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended FROM attempts WHERE id='a'`)
+	if err := s.AppendEvent(ctx, "u", Event{Attempt: "b", Seq: 1, Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -489,7 +493,7 @@ func TestConcurrentEventAppendsHaveExactlyOneWinner(t *testing.T) {
 			if i%2 == 0 {
 				store = other
 			}
-			err := store.AppendEvent(ctx, Event{Attempt: "a", Seq: 1, Payload: json.RawMessage(`{}`)})
+			err := store.AppendEvent(ctx, "u", Event{Attempt: "a", Seq: 1, Payload: json.RawMessage(`{}`)})
 			if err == nil {
 				wins.Add(1)
 			} else if !errors.Is(err, ErrEventSequence) {
@@ -507,10 +511,10 @@ func TestConcurrentEventAppendsHaveExactlyOneWinner(t *testing.T) {
 func TestBackupRestoresAllCommittedRowsFromALiveWALDatabase(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
-	if err := s.AppendEvent(ctx, Event{Attempt: "a", Seq: 1, Time: "now", Kind: "output", Payload: json.RawMessage(`{}`)}); err != nil {
+	if err := s.AppendEvent(ctx, "u", Event{Attempt: "a", Seq: 1, Time: "now", Kind: "output", Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Do(ctx, "key", "hash", func(tx *Tx) ([]byte, error) { return []byte("response"), nil }); err != nil {
+	if _, err := s.Do(ctx, "u", "key", "hash", func(tx *Tx) ([]byte, error) { return []byte("response"), nil }); err != nil {
 		t.Fatal(err)
 	}
 	// Keep a write transaction open during the snapshot. Its uncommitted row

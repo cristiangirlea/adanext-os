@@ -1,3 +1,9 @@
+CREATE TABLE users (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL UNIQUE,
+    created TEXT NOT NULL
+);
+
 CREATE TABLE projects (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
@@ -5,9 +11,19 @@ CREATE TABLE projects (
     created TEXT NOT NULL
 );
 
+CREATE TABLE project_members (
+    project TEXT NOT NULL REFERENCES projects(id),
+    user TEXT NOT NULL REFERENCES users(id),
+    role TEXT NOT NULL CHECK (role IN ('owner','member')),
+    added TEXT NOT NULL,
+    PRIMARY KEY (project, user)
+);
+CREATE INDEX project_members_user ON project_members(user);
+
 CREATE TABLE tasks (
     id TEXT PRIMARY KEY NOT NULL,
     project TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+    created_by TEXT NOT NULL REFERENCES users(id),
     objective TEXT NOT NULL,
     acceptance_criteria TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN (
@@ -24,6 +40,7 @@ CREATE INDEX tasks_project ON tasks(project);
 CREATE TABLE attempts (
     id TEXT PRIMARY KEY NOT NULL,
     task TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    actor TEXT NOT NULL REFERENCES users(id),
     backend TEXT NOT NULL,
     model TEXT NOT NULL,
     effort TEXT NOT NULL,
@@ -48,8 +65,10 @@ CREATE TABLE events (
 );
 
 CREATE TABLE idempotency (
-    key TEXT PRIMARY KEY NOT NULL,
+    user TEXT NOT NULL REFERENCES users(id),
+    key TEXT NOT NULL,
     request_hash TEXT NOT NULL,
     response BLOB NOT NULL,
-    created TEXT NOT NULL
+    created TEXT NOT NULL,
+    PRIMARY KEY (user, key)
 );
