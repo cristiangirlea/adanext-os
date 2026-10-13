@@ -3,6 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+)
+
+var (
+	ErrInvalidArtifact  = errors.New("invalid artifact metadata")
+	ErrArtifactConflict = errors.New("artifact size conflict")
 )
 
 // Tx is the transaction-scoped handle passed to Do. It is valid only during the
@@ -38,6 +45,38 @@ func (tx *Tx) AppendEvent(ctx context.Context, event Event) error {
 		return err
 	}
 	return appendEvent(ctx, tx.tx, event)
+}
+
+// ReferenceArtifact records an artifact only after its content write has returned
+// successfully. The caller enforces that ordering; this method only writes the
+// reference in the current transaction.
+func (tx *Tx) ReferenceArtifact(ctx context.Context, hash string, size int64, origin string) error {
+	if !validArtifactHash(hash) || size < 0 || origin == "" {
+		return fmt.Errorf("%w: hash, size, or origin", ErrInvalidArtifact)
+	}
+	if _, err := tx.tx.ExecContext(ctx, "INSERT INTO artifacts(hash,size,origin,created) VALUES(?,?,?,?) ON CONFLICT(hash) DO NOTHING", hash, size, origin, now()); err != nil {
+		return err
+	}
+	var storedSize int64
+	if err := tx.tx.QueryRowContext(ctx, "SELECT size FROM artifacts WHERE hash=?", hash).Scan(&storedSize); err != nil {
+		return err
+	}
+	if storedSize != size {
+		return fmt.Errorf("%w: artifact %s has size %d, requested %d", ErrArtifactConflict, hash, storedSize, size)
+	}
+	return nil
+}
+
+func validArtifactHash(hash string) bool {
+	if len(hash) != 64 {
+		return false
+	}
+	for i := 0; i < len(hash); i++ {
+		if c := hash[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) write(ctx context.Context, userID string, fn func(*Tx) error) error {

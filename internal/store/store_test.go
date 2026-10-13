@@ -165,7 +165,7 @@ func TestConcurrentOpenersApplyTheInitialMigrationOnce(t *testing.T) {
 			}
 			defer s.Close()
 			var version int
-			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 				t.Errorf("version: %d %v", version, err)
 			}
 		}()
@@ -178,7 +178,7 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	path := s.path
@@ -195,7 +195,7 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	if s != nil {
 		s.Close()
 	}
-	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "2") {
+	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "3") {
 		t.Fatalf("future schema: %v", err)
 	}
 }
@@ -210,17 +210,22 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	third, err := migrationFiles.ReadFile("migrations/0003_artifacts.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	migrations := fstest.MapFS{
 		"migrations/0001_initial.sql":             &fstest.MapFile{Data: initial},
 		"migrations/0002_idempotency_project.sql": &fstest.MapFile{Data: second},
-		"migrations/0003_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
-		"migrations/0004_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
+		"migrations/0003_artifacts.sql":           &fstest.MapFile{Data: third},
+		"migrations/0004_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
+		"migrations/0005_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
 	}
 	if err := s.migrate(ctx, migrations); err == nil {
 		t.Fatal("bad migration succeeded")
 	}
 	var version, count int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	if err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='rolled_back'").Scan(&count); err != nil || count != 0 {
@@ -228,13 +233,13 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 	}
 	execute(t, s, "INSERT INTO committed VALUES(1)")
 	var recorded int
-	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 3 {
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 4 {
 		t.Fatalf("migration records: %d %v", recorded, err)
 	}
 }
 
 func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
-	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7"}
+	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5"}
 	files, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)
