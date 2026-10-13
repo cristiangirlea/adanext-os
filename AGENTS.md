@@ -37,13 +37,15 @@ Electron isolation), a syntax check of every script, the hook tests, and `npm ci
 in `desktop/`. The owner's Windows PC has no cgo: there, `-race` is
 left to CI.
 
-The repository is public (since 2026-10-13, MIT). CI runs on the owner's runners: pull requests
-from this repository on Linux (`vars.CI_RUNNER`, the cluster's `lab-adanext-os` scale set), pushes
-to `main` also on Windows (`vars.CI_RUNNER_WINDOWS`). A pull request from a fork never reaches
-them: the workflow sends it to GitHub's runner, and the cluster holds fork runs for the owner's
-approval. Without `CI_RUNNER` the job is skipped, which is not a pass. Never route this
-repository's own branches to a GitHub-hosted runner. The lab runner sees 24 CPUs under a 3 GiB
-memory limit: keep `GOFLAGS=-p=4`, and cap Vitest and Playwright workers when they arrive.
+The repository is public (since 2026-10-13, MIT). Linux CI runs on the owner's runner
+(`vars.CI_RUNNER`, the cluster's `lab-adanext-os` scale set): this repository's pull requests
+and pushes to `main`. Two legs go to GitHub's runners, free for public repositories: a pull
+request from a fork, which never reaches the owner's runner and which the cluster holds for the
+owner's approval, and the Windows leg on pushes to `main`, since the owner's Windows runner
+serves private repositories only. Without `CI_RUNNER` the job is skipped, which is not a pass.
+Never route this repository's own Linux jobs to a GitHub-hosted runner. The lab runner sees 24
+CPUs under a 3 GiB memory limit: keep `GOFLAGS=-p=4`, and cap Vitest and Playwright workers when
+they arrive.
 
 ## Rules of this repository
 
