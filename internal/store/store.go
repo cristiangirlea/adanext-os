@@ -54,6 +54,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return nil, err
 		}
 		path = absolute
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("open store file: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return nil, fmt.Errorf("close store file: %w", err)
+		}
 		uriPath := filepath.ToSlash(path)
 		if filepath.VolumeName(path) != "" {
 			uriPath = "/" + uriPath
@@ -385,14 +392,30 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 
 // Backup uses SQLite's live, consistent snapshot and syncs the destination file
 // and its directory on Unix. destPath must be an absolute filesystem path, not
-// a file: URI, and must not already contain a database.
-func (s *Store) Backup(ctx context.Context, destPath string) error {
+// a file: URI, and must not already exist.
+func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	if strings.HasPrefix(strings.ToLower(destPath), "file:") || !filepath.IsAbs(destPath) {
 		return errors.New("backup destination must be an absolute filesystem path, not a file: URI")
+	}
+	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	cleanup := true
+	defer func() {
+		if cleanup && err != nil {
+			if removeErr := os.Remove(destPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("remove failed backup: %w", removeErr))
+			}
+		}
+	}()
+	if err := file.Close(); err != nil {
+		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", destPath); err != nil {
 		return err
 	}
+	cleanup = false // finishBackup removes this call's destination on sync failure.
 	return finishBackup(destPath, func(path string) (backupFile, error) {
 		return os.OpenFile(path, os.O_RDWR, 0)
 	}, syncBackupDirectory)
