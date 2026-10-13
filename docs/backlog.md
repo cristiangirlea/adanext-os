@@ -88,13 +88,16 @@ records stay loadable, README and PLAN.md updated, tests first.
 - [ ] **M2.1 Store.** `internal/store` on modernc.org/sqlite v1.59.0: WAL, foreign keys,
   `synchronous=FULL`, numbered migrations each in a transaction, a refusal to open a newer schema.
   Tables for users, projects and their members, tasks, attempts, events and idempotency keys, with
-  an actor on tasks, attempts, reviews and permission decisions (decisions log, 2026-10-13); the
-  task state machine of `docs/plan.md` section 2 with a revision per task; consistent backups
+  an actor on tasks and attempts (decisions log, 2026-10-13; reviews arrive in M7 and permission
+  decisions in M2.3); the task state machine of `docs/plan.md` section 2 with a revision per task;
+  consistent backups
   through the SQLite backup path. Acceptance: migrations from empty; refusing a future schema;
-  every allowed and refused transition; duplicate requests with one idempotency key; a stale
-  expected revision refused; a task listed only to its project's members and a permission prompt
-  addressed to the task's actor; a helper process killed mid-transaction leaves a consistent
-  database; restore from a backup.
+  every allowed and refused transition; duplicate requests with one idempotency key per user;
+  the same key from two users is two requests; a stale expected revision refused; tasks and events
+  listed or read only by the task project's members, including after membership removal; unknown
+  actors refused by foreign keys; an attempt's actor is a member at creation. A permission prompt
+  addressed to the task's actor is M2.3's acceptance, where permission decisions arrive. A helper
+  process killed mid-transaction leaves a consistent database; restore from a backup.
 - [ ] **M2.2 `adad`, singleton and IPC.** `cmd/adad` listens, as `docs/plan.md` section 2 says,
   on a per-user Windows named pipe whose security descriptor grants only the current user, or an
   owner-only Unix socket (mode 0600 in a 0700 directory) on Linux. How the pipe is created

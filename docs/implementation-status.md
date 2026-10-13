@@ -185,6 +185,16 @@ backup file whose sync failed; give the concurrent-backup test its own context; 
 test changes on pooled connections. Opening its pull request waits for the bootstrap to merge. A
 database created at its first commit (`77015e4`) will not open any more; none exists outside tests.
 
+2026-10-13: the branch was rebased onto `main` (`e4a2c14`, after the amendment of #13), and
+Codex (run `20261013-183524-47c2e9`, mode auto) added users, project membership, task and attempt
+actors, membership-scoped task and event calls and per-user idempotency (`88f0a7a`) and the five
+review follow-ups (`8dbc89a`); the identity tests failed before the schema and API existed, the
+busy-timeout cause and failed-backup removal tests before their fixes. Inside the sandbox
+`go test -count=3 ./...` passed and the commits could not be written (the worktree's index lock);
+outside it `bash scripts/check.sh` passed on the owner's PC (`-race` skipped, no cgo; the two
+chmod hook tests skipped on Windows). The pull request is still to open, after an independent
+review; nothing is verified or ticked.
+
 ## Decisions log
 
 - **2026-10-11, engine baseline.** Ada pinned Harness `main` (`1ca5619`), not `8d521f0`, and
@@ -345,6 +355,16 @@ database created at its first commit (`77015e4`) will not open any more; none ex
   authorization semantics, the SSE cursor contract, the browser boundary of the shared UI, LAN
   session security, the provider sign-in relay and approval prompts, the Cloudflare token's blast
   radius and renewal, stopping a shared coordinator, and the images compatibility manifest.
+
+- **2026-10-13, identity in the store (issue #3, part one).** An actor is a `users` row,
+  always supplied by the caller from its authenticated context, never from request bodies. The
+  desktop form will create one implicit local user when `adad` first opens; the web form's accounts
+  come in M4b. A project has members with role owner or member, and every task, attempt, event and
+  listing is reached only through membership of the task's project. Idempotency keys are per user.
+  An attempt's actor is a member at creation, and a continuation keeps the actor of the attempt it
+  continues. Who may cancel, review or approve, and what a revoked membership does to a pending
+  permission prompt, are decided with the executor (M2.3) and review (M7) slices, where those
+  records arrive.
 
 ## Owner actions pending
 
