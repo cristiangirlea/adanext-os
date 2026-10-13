@@ -38,13 +38,18 @@ func New(s *store.Store, hub *Hub, auth Authenticator) http.Handler {
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.transition(store.Running, store.CancelRequested))
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		var allowed []string
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			probe := r.Clone(r.Context())
 			probe.Method = method
 			if _, pattern := mux.Handler(probe); pattern != "/" {
-				writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-				return
+				allowed = append(allowed, method)
 			}
+		}
+		if len(allowed) != 0 {
+			w.Header().Set("Allow", strings.Join(allowed, ", "))
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
 		}
 		writeError(w, http.StatusNotFound, "not_found")
 	})

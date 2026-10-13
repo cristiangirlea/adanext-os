@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net"
@@ -22,20 +23,29 @@ func TestHelperServesCoordinator(t *testing.T) {
 	if os.Getenv("ADA_ADAD_HELPER") != "1" {
 		return
 	}
-	os.Exit(run(context.Background(), []string{"-state-dir", os.Getenv("ADA_ADAD_STATE")}, os.Stdout, os.Stderr))
+	os.Exit(run(context.Background(), []string{"-state-dir", os.Getenv("ADA_ADAD_STATE"), "-name", os.Getenv("ADA_ADAD_NAME")}, os.Stdout, os.Stderr))
 }
 
-func startHelper(t *testing.T, dir string) *exec.Cmd {
+func testEndpointName(t *testing.T) string {
+	t.Helper()
+	var id [4]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("a%x", id)
+}
+
+func startHelper(t *testing.T, dir, name string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperServesCoordinator$")
-	cmd.Env = append(os.Environ(), "ADA_ADAD_HELPER=1", "ADA_ADAD_STATE="+dir)
+	cmd.Env = append(os.Environ(), "ADA_ADAD_HELPER=1", "ADA_ADAD_STATE="+dir, "ADA_ADAD_NAME="+name)
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	cfg := ipc.Config{StateDir: dir, Name: "adad"}
+	cfg := ipc.Config{StateDir: dir, Name: name}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(filepath.Join(dir, "adanext.db")); err != nil {
@@ -59,7 +69,8 @@ func startHelper(t *testing.T, dir string) *exec.Cmd {
 
 func TestSecondCoordinatorReportsPIDAndStaleLockRecovers(t *testing.T) {
 	dir := t.TempDir()
-	first := startHelper(t, dir)
+	name := testEndpointName(t)
+	first := startHelper(t, dir, name)
 	defer func() {
 		if first.ProcessState == nil {
 			first.Process.Kill()
@@ -83,13 +94,13 @@ func TestSecondCoordinatorReportsPIDAndStaleLockRecovers(t *testing.T) {
 	}
 	s.Close()
 	var out, stderr bytes.Buffer
-	code := run(context.Background(), []string{"-state-dir", dir}, &out, &stderr)
+	code := run(context.Background(), []string{"-state-dir", dir, "-name", name}, &out, &stderr)
 	if code != 0 || !strings.Contains(stderr.String(), fmt.Sprintf("already running as PID %d", first.Process.Pid)) {
 		t.Fatalf("second run: %d %q", code, stderr.String())
 	}
 	first.Process.Kill()
 	first.Wait()
-	second := startHelper(t, dir)
+	second := startHelper(t, dir, name)
 	second.Process.Kill()
 	second.Wait()
 }
@@ -129,9 +140,10 @@ func TestShutdownClosesOpenSSEStream(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan int, 1)
+	name := testEndpointName(t)
 	var output bytes.Buffer
-	go func() { done <- run(runCtx, []string{"-state-dir", dir}, &output, &output) }()
-	cfg := ipc.Config{StateDir: dir, Name: "adad"}
+	go func() { done <- run(runCtx, []string{"-state-dir", dir, "-name", name}, &output, &output) }()
+	cfg := ipc.Config{StateDir: dir, Name: name}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		probeCtx, probeCancel := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -142,11 +154,12 @@ func TestShutdownClosesOpenSSEStream(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("adad did not listen: %v %s", dialErr, output.String())
+			t.Fatalf("adad did not listen: %v", dialErr)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return ipc.Dial(ctx, cfg) }}}
+	t.Cleanup(client.CloseIdleConnections)
 	request, err := http.NewRequest("GET", "http://ipc/v1/attempts/attempt/events", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -171,5 +184,9 @@ func TestShutdownClosesOpenSSEStream(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("run did not stop within two seconds with an open SSE stream")
 	}
-	<-streamDone
+	select {
+	case <-streamDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE reader did not stop within two seconds")
+	}
 }

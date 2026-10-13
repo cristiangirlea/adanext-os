@@ -47,6 +47,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("adad", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	stateDir := flags.String("state-dir", defaultStateDir(), "coordinator state directory")
+	name := flags.String("name", "adad", "coordinator endpoint name")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -58,7 +59,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "adad: create state directory:", err)
 		return 1
 	}
-	lock, err := ipc.Acquire(ipc.Config{StateDir: *stateDir, Name: "adad"})
+	lock, err := ipc.Acquire(ipc.Config{StateDir: *stateDir, Name: *name})
 	if err != nil {
 		var running *ipc.AlreadyRunningError
 		if errors.As(err, &running) {

@@ -63,7 +63,11 @@ func newFixture(t *testing.T) *fixture {
 	if err := s.AddMember(ctx, "b", "bob", "owner"); err != nil {
 		t.Fatal(err)
 	}
-	cfg := ipc.Config{StateDir: dir, Name: "a"}
+	id, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ipc.Config{StateDir: dir, Name: "a" + id[:8]}
 	lock, err := ipc.Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -77,9 +81,11 @@ func newFixture(t *testing.T) *fixture {
 	hub.PollInterval = 10 * time.Millisecond
 	hub.HeartbeatInterval = 50 * time.Millisecond
 	server := &http.Server{Handler: New(s, hub, func(*http.Request) (string, error) { return "alice", nil })}
+	server.RegisterOnShutdown(hub.Close)
 	go server.Serve(l)
 	t.Cleanup(func() { server.Shutdown(context.Background()) })
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return ipc.Dial(ctx, cfg) }}}
+	t.Cleanup(client.CloseIdleConnections)
 	return &fixture{s: s, hub: hub, client: client, cfg: cfg, server: server}
 }
 
@@ -407,13 +413,27 @@ func TestRouterErrorsAreJSON(t *testing.T) {
 		method, path string
 		status       int
 		code         string
+		allow        string
 	}{
-		{"GET", "/v1/unknown", 404, "not_found"},
-		{"PUT", "/v1/tasks", 405, "method_not_allowed"},
+		{"GET", "/v1/unknown", 404, "not_found", ""},
+		{"PUT", "/v1/tasks", 405, "method_not_allowed", "GET, POST"},
+		{"PUT", "/v1/tasks/example/ready", 405, "method_not_allowed", "POST"},
 	} {
-		status, body := f.request(t, tc.method, tc.path, "", "", nil)
-		if status != tc.status || !bytes.Contains(body, []byte(`"error":"`+tc.code+`"`)) {
-			t.Fatalf("%s %s: %d %s", tc.method, tc.path, status, body)
+		req, err := http.NewRequest(tc.method, "http://ipc"+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := f.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != tc.status || resp.Header.Get("Content-Type") != "application/json" || !bytes.Contains(body, []byte(`"error":"`+tc.code+`"`)) || resp.Header.Get("Allow") != tc.allow {
+			t.Fatalf("%s %s: %d Allow=%q %s", tc.method, tc.path, resp.StatusCode, resp.Header.Get("Allow"), body)
 		}
 	}
 }
