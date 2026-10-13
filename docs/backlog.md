@@ -88,13 +88,16 @@ records stay loadable, README and PLAN.md updated, tests first.
 - [ ] **M2.1 Store.** `internal/store` on modernc.org/sqlite v1.59.0: WAL, foreign keys,
   `synchronous=FULL`, numbered migrations each in a transaction, a refusal to open a newer schema.
   Tables for users, projects and their members, tasks, attempts, events and idempotency keys, with
-  an actor on tasks, attempts, reviews and permission decisions (decisions log, 2026-10-13); the
-  task state machine of `docs/plan.md` section 2 with a revision per task; consistent backups
+  an actor on tasks and attempts (decisions log, 2026-10-13; reviews arrive in M7 and permission
+  decisions in M2.3); the task state machine of `docs/plan.md` section 2 with a revision per task;
+  consistent backups
   through the SQLite backup path. Acceptance: migrations from empty; refusing a future schema;
-  every allowed and refused transition; duplicate requests with one idempotency key; a stale
-  expected revision refused; a task listed only to its project's members and a permission prompt
-  addressed to the task's actor; a helper process killed mid-transaction leaves a consistent
-  database; restore from a backup; disk-full on the artifact writer surfaces and stops the task.
+  every allowed and refused transition; duplicate requests with one idempotency key per user;
+  the same key from two users is two requests; a stale expected revision refused; tasks and events
+  listed or read only by the task project's members, including after membership removal; unknown
+  actors refused by foreign keys; an attempt's actor is a member at creation. A permission prompt
+  addressed to the task's actor is M2.3's acceptance, where permission decisions arrive. A helper
+  process killed mid-transaction leaves a consistent database; restore from a backup.
 - [ ] **M2.2 `adad`, singleton and IPC.** `cmd/adad` listens, as `docs/plan.md` section 2 says,
   on a per-user Windows named pipe whose security descriptor grants only the current user, or an
   owner-only Unix socket (mode 0600 in a 0700 directory) on Linux. How the pipe is created
@@ -109,10 +112,12 @@ records stay loadable, README and PLAN.md updated, tests first.
   or socket's permissions.
 - [ ] **M2.3 Local executor.** `internal/executor` runs the pinned engine (`hrn exec --protocol v1`)
   per attempt, verified by hash, records the attempt intent before launch, ingests events in
-  order, and holds an ownership generation. Cancel reports canceled only after the engine exits.
+  order, and holds an ownership generation. Artifacts are written outside the database by content
+  hash, and only then referenced. Cancel reports canceled only after the engine exits.
   After an `adad` crash, an attempt that was running becomes `interrupted` and then
   `recovery_required`; it is never replayed. Acceptance: a fake engine speaking the protocol;
-  cancel, engine crash, `adad` crash and restart, truncated stream, duplicate start.
+  cancel, engine crash, `adad` crash and restart, truncated stream, duplicate start; disk-full on
+  the artifact writer surfaces and stops the task.
 - [ ] **M2.4 The window can close.** A minimal Electron shell (main and preload in `desktop/`, one
   React view of tasks and events in `ui/`, the app `adad` serves in M4b) that connects to `adad`,
   or starts it independently of its own process tree.

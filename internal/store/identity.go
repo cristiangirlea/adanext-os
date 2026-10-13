@@ -1,0 +1,151 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+)
+
+var ErrNotMember = errors.New("user is not a project member")
+
+// NotMemberError identifies the denied project and supports errors.Is.
+type NotMemberError struct{ UserID, ProjectID string }
+
+func (e *NotMemberError) Error() string {
+	return fmt.Sprintf("%s: user %s, project %s", ErrNotMember, e.UserID, e.ProjectID)
+}
+func (e *NotMemberError) Unwrap() error { return ErrNotMember }
+
+// Identity arguments come from the coordinator's authenticated context, never
+// request bodies. Membership management is a trusted coordinator operation;
+// the executor and review slices decide role-specific authorization.
+func (s *Store) CreateUser(ctx context.Context, id, name string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT INTO users(id,name,created) VALUES(?,?,?)", id, name, now())
+	return err
+}
+
+func (s *Store) AddMember(ctx context.Context, project, user, role string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT INTO project_members(project,user,role,added) VALUES(?,?,?,?)", project, user, role, now())
+	return err
+}
+
+func (s *Store) RemoveMember(ctx context.Context, project, user string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM project_members WHERE project=? AND user=?", project, user)
+	return err
+}
+
+type rowQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func requireMember(ctx context.Context, q rowQuerier, user, project string) error {
+	var exists int
+	if err := q.QueryRowContext(ctx, "SELECT 1 FROM project_members WHERE project=? AND user=?", project, user).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return &NotMemberError{UserID: user, ProjectID: project}
+		}
+		return err
+	}
+	return nil
+}
+
+func requireTaskMember(ctx context.Context, q rowQuerier, user, task string) error {
+	var project string
+	if err := q.QueryRowContext(ctx, "SELECT project FROM tasks WHERE id=?", task).Scan(&project); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: task %s", ErrNotFound, task)
+		}
+		return err
+	}
+	return requireMember(ctx, q, user, project)
+}
+
+func requireAttemptMember(ctx context.Context, q rowQuerier, user, attempt string) error {
+	var task string
+	if err := q.QueryRowContext(ctx, "SELECT task FROM attempts WHERE id=?", attempt).Scan(&task); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: attempt %s", ErrNotFound, attempt)
+		}
+		return err
+	}
+	return requireTaskMember(ctx, q, user, task)
+}
+
+type Task struct {
+	ID, Project, CreatedBy, Objective, AcceptanceCriteria string
+	State                                                 State
+	Revision                                              int64
+	Created, Updated                                      string
+}
+
+const taskColumns = "id,project,created_by,objective,acceptance_criteria,state,revision,created,updated"
+
+func scanTask(row interface{ Scan(...any) error }) (Task, error) {
+	var task Task
+	err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
+	return task, err
+}
+
+func (s *Store) ListTasks(ctx context.Context, userID string) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT "+taskColumns+" FROM tasks WHERE project IN (SELECT project FROM project_members WHERE user=?) ORDER BY id", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tasks := []Task{}
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func (s *Store) Task(ctx context.Context, userID, taskID string) (Task, error) {
+	// A single query includes the access check, avoiding a write lock for reads.
+	var task Task
+	var member bool
+	err := s.db.QueryRowContext(ctx, "SELECT "+taskColumns+",EXISTS(SELECT 1 FROM project_members WHERE project=tasks.project AND user=?) FROM tasks WHERE id=?", userID, taskID).Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &member)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrNotFound
+	}
+	if err != nil {
+		return Task{}, err
+	}
+	if !member {
+		return Task{}, &NotMemberError{UserID: userID, ProjectID: task.Project}
+	}
+	return task, nil
+}
+
+func (s *Store) CreateTask(ctx context.Context, userID, id, project, objective, criteria string) error {
+	return s.write(ctx, userID, func(tx *Tx) error {
+		if err := requireMember(ctx, tx, userID, project); err != nil {
+			return err
+		}
+		time := now()
+		_, err := tx.ExecContext(ctx, "INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,created,updated) VALUES(?,?,?,?,?,'draft',?,?)", id, project, userID, objective, criteria, time, time)
+		return err
+	})
+}
+
+type Attempt struct {
+	ID, Task, Actor, Backend, Model, Effort, Executor string
+	OwnershipGeneration                               int64
+	EngineSHA256, State                               string
+}
+
+// CreateAttempt records intent with the authenticated actor. Continuations must
+// retain their previous attempt's actor; lineage arrives with the executor.
+func (s *Store) CreateAttempt(ctx context.Context, attempt Attempt) error {
+	return s.write(ctx, attempt.Actor, func(tx *Tx) error {
+		if err := requireTaskMember(ctx, tx, attempt.Actor, attempt.Task); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "INSERT INTO attempts(id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,state,started) VALUES(?,?,?,?,?,?,?,?,?,?,?)", attempt.ID, attempt.Task, attempt.Actor, attempt.Backend, attempt.Model, attempt.Effort, attempt.Executor, attempt.OwnershipGeneration, attempt.EngineSHA256, attempt.State, now())
+		return err
+	})
+}

@@ -170,6 +170,32 @@ on a clean worktree at that commit built `hrn.exe` for windows/amd64 with go1.26
 `hrn exec --protocol v1` with a v1 `hello` (revision reported as unknown, as expected without a VCS
 stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 
+### M2.1 store (2026-10-11, local branch `m2/store`, not yet a pull request)
+
+`internal/store` on modernc.org/sqlite v1.59.0, written in runs `20261011-165945-8a1560`,
+`20261011-171916-6142ca` on a branch stacked on the bootstrap, at `6925b33`. Checks:
+`bash scripts/check.sh` on Windows passes; offline in a Linux container, `go vet ./...`,
+`go test -race -count=3 ./internal/store/` and `go test -race -count=1 ./...` pass. Claude Opus
+reviewed it twice (runs `20261011-171544-53b71d`, `20261011-173013-a06dc5`): the first found the
+refinement edge undocumented and the disk-full criterion unplaced (both decided below) and asked for
+a transaction handle for idempotent requests, migrations recorded in the database, and synced
+backups, all done; the second found nothing blocking. Follow-ups before its pull request: wrap the
+cause into the busy-retry timeout error; make the tamper tests match their error messages; remove a
+backup file whose sync failed; give the concurrent-backup test its own context; restore pragmas a
+test changes on pooled connections. Opening its pull request waits for the bootstrap to merge. A
+database created at its first commit (`77015e4`) will not open any more; none exists outside tests.
+
+2026-10-13: the branch was rebased onto `main` (`e4a2c14`, after the amendment of #13), and
+run `20261013-183524-47c2e9` (mode auto) added users, project membership, task and attempt
+actors, membership-scoped task and event calls and per-user idempotency (`88f0a7a`) and the five
+review follow-ups (`8dbc89a`); the identity tests failed before the schema and API existed, the
+busy-timeout cause and failed-backup removal tests before their fixes. Inside the sandbox
+`go test -count=3 ./...` passed and the commits could not be written (the worktree's index lock);
+outside it `bash scripts/check.sh` passed on the owner's PC (`-race` skipped, no cgo; the two
+chmod hook tests skipped on Windows). The pull request is still to open, after an independent
+review; nothing is verified or ticked. Review run `20261013-185055-ec8024` found the replay gap,
+fixed with the scope gate and its regression test; its two other findings are #15 and #16.
+
 ## Decisions log
 
 - **2026-10-11, engine baseline.** Ada pinned Harness `main` (`1ca5619`), not `8d521f0`, and
@@ -213,6 +239,12 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
   as no match; and the engine opens its binary without following links or blocking, so a swap
   after the path check is refused. The build script pins the toolchain where the build runs, and
   check.sh compares settings.json with its generator.
+- **2026-10-11, refinement goes back to ready.** The plan's state diagram ends at `refinement`, but
+  section 3 says refinement "stays in the task lineage and preserves work", so the store allows
+  `refinement` to `ready` and nothing else out of it. The review of M2.1 (Claude Opus, run
+  `20261011-171544-53b71d`) asked for this to be recorded.
+- **2026-10-11, disk-full on the artifact writer moves to M2.3.** There is no artifact writer in
+  M2.1; artifacts arrive with the executor, so the criterion moved with them.
 - **2026-10-11, the push guard's design.** Three more review rounds (Codex Sol, runs
   `20261011-154345-0b857e`, `20261011-155721-4523e7`, `20261011-160325-a0e847`) each found new
   ways to spell a push the guard missed: quoting, `-c` and `GIT_CONFIG_*` overrides, tags,
@@ -324,6 +356,16 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
   authorization semantics, the SSE cursor contract, the browser boundary of the shared UI, LAN
   session security, the provider sign-in relay and approval prompts, the Cloudflare token's blast
   radius and renewal, stopping a shared coordinator, and the images compatibility manifest.
+
+- **2026-10-13, identity in the store (issue #3, part one).** An actor is a `users` row,
+  always supplied by the caller from its authenticated context, never from request bodies. The
+  desktop form will create one implicit local user when `adad` first opens; the web form's accounts
+  come in M4b. A project has members with role owner or member, and every task, attempt, event and
+  listing is reached only through membership of the task's project. Idempotency keys are per user.
+  An attempt's actor is a member at creation, and a continuation keeps the actor of the attempt it
+  continues. Who may cancel, review or approve, and what a revoked membership does to a pending
+  permission prompt, are decided with the executor (M2.3) and review (M7) slices, where those
+  records arrive.
 
 ## Owner actions pending
 
