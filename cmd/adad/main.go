@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
@@ -45,6 +45,11 @@ func defaultStateDir() string {
 	return filepath.Join(home, ".local", "state", "adanext")
 }
 
+func isLowerHex(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
+}
+
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	_ = stdout
 	flags := flag.NewFlagSet("adad", flag.ContinueOnError)
@@ -58,6 +63,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if *stateDir == "" || flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "adad: invalid state directory or arguments")
+		return 2
+	}
+	if (*enginePath == "") != (*engineHash == "") || (*engineHash != "" && (len(*engineHash) != 64 || !isLowerHex(*engineHash))) {
+		fmt.Fprintln(stderr, "adad: -engine and -engine-sha256 must be paired; SHA-256 must be 64 lowercase hex characters")
 		return 2
 	}
 	if err := os.MkdirAll(*stateDir, 0700); err != nil {
@@ -107,7 +116,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var execution api.Execution
 	var local *executor.Executor
 	if *enginePath != "" && *engineHash != "" {
-		*engineHash = strings.ToLower(*engineHash)
 		artifacts, err := artifact.Open(filepath.Join(*stateDir, "artifacts"))
 		if err != nil {
 			fmt.Fprintln(stderr, "adad: open artifacts:", err)

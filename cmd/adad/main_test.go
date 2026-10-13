@@ -95,6 +95,27 @@ func TestRunAcceptsEngineFlagsAndStopsWithItsContext(t *testing.T) {
 	}
 }
 
+func TestEngineFlagsRequirePairAndLowercaseSHA256(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"path only", []string{"-engine", "engine"}},
+		{"hash only", []string{"-engine-sha256", strings.Repeat("a", 64)}},
+		{"short hash", []string{"-engine", "engine", "-engine-sha256", "abc"}},
+		{"uppercase hash", []string{"-engine", "engine", "-engine-sha256", strings.Repeat("A", 64)}},
+		{"nonhex hash", []string{"-engine", "engine", "-engine-sha256", strings.Repeat("g", 64)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			args := append([]string{"-state-dir", t.TempDir()}, tc.args...)
+			if code := run(context.Background(), args, &output, &output); code != 2 || !strings.Contains(output.String(), "engine") {
+				t.Fatalf("run = %d: %s", code, output.String())
+			}
+		})
+	}
+}
+
 func TestHelperServesCoordinator(t *testing.T) {
 	if os.Getenv("ADA_ADAD_HELPER") != "1" {
 		return
