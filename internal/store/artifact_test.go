@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -31,8 +32,36 @@ func TestReferenceArtifactInsertsOnceAndRefusesADifferentSize(t *testing.T) {
 	}
 	if err := s.write(ctx, "u", func(tx *Tx) error {
 		return tx.ReferenceArtifact(ctx, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", 13, "test")
-	}); err == nil {
-		t.Fatal("accepted different size")
+	}); !errors.Is(err, ErrArtifactConflict) {
+		t.Fatalf("size conflict: %v", err)
+	}
+}
+
+func TestReferenceArtifactAndMigrationRefuseInvalidMetadata(t *testing.T) {
+	s := openTestStore(t)
+	valid := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name, hash, origin string
+	}{
+		{"uppercase hash", strings.Repeat("A", 64), "test"},
+		{"nonhex hash", strings.Repeat("g", 64), "test"},
+		{"empty origin", valid, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.write(ctx, "u", func(tx *Tx) error {
+				return tx.ReferenceArtifact(ctx, tc.hash, 1, tc.origin)
+			})
+			if !errors.Is(err, ErrInvalidArtifact) {
+				t.Fatalf("ReferenceArtifact: %v", err)
+			}
+			err = s.write(ctx, "u", func(tx *Tx) error {
+				_, err := tx.ExecContext(ctx, "INSERT INTO artifacts(hash,size,origin,created) VALUES(?,?,?,?)", tc.hash, 1, tc.origin, "now")
+				return err
+			})
+			if err == nil {
+				t.Fatal("direct INSERT accepted invalid metadata")
+			}
+		})
 	}
 }
 

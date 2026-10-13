@@ -38,3 +38,16 @@ func TestFilesArePrivateAndASymlinkDirectoryIsRefused(t *testing.T) {
 		t.Fatal("accepted symlink")
 	}
 }
+
+func TestSymlinkedTemporaryDirectoryIsRefused(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "tmp")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); err == nil {
+		t.Fatal("accepted symlinked tmp directory")
+	}
+}

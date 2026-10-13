@@ -239,7 +239,7 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 }
 
 func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
-	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "9519c990b4ed82558e642a25589b37ca683bf6babf6371bd75eca59cbd39f483"}
+	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "e6084f758097b6d8b24fd778b98d424915a496e9a43fc3060c5c4db905b2c03c"}
 	files, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)

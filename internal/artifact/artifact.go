@@ -182,6 +182,12 @@ func (s *Store) Write(ctx context.Context, r io.Reader, limit int64) (ref Ref, e
 		if err := s.fs.remove(tmpPath); err != nil {
 			return Ref{}, classify(err)
 		}
+		if err := s.fs.syncDir(fanout); err != nil {
+			return Ref{}, classify(err)
+		}
+		if err := s.fs.syncDir(s.dir); err != nil {
+			return Ref{}, classify(err)
+		}
 		return ref, nil
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return Ref{}, classify(statErr)
