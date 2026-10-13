@@ -13,7 +13,12 @@ import (
 
 func TestPipeDescriptorGrantsOnlyTheCurrentUser(t *testing.T) {
 	cfg := Config{StateDir: t.TempDir(), Name: "descriptor"}
-	listener, err := Listen(cfg)
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	listener, err := lock.Listen()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +65,46 @@ func TestPipeDescriptorGrantsOnlyTheCurrentUser(t *testing.T) {
 	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != 0x1f01ff || aceSID.String() != sid {
 		t.Fatalf("unexpected ACE: type=%d mask=%x sid=%s", ace.Header.AceType, ace.Mask, aceSID.String())
 	}
-	owner, _, err := sd.Owner()
-	if err != nil || owner == nil || owner.String() != sid {
-		t.Fatalf("unexpected owner: %v, %v", owner, err)
+	owner, defaulted, err := sd.Owner()
+	if err != nil || owner == nil || owner.String() != sid || defaulted {
+		t.Fatalf("unexpected owner: sid=%v defaulted=%v err=%v", owner, defaulted, err)
+	}
+}
+
+func TestPipeServerSIDAllowsOnlyTheCurrentUser(t *testing.T) {
+	sid, err := currentSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := allowPipeServerSID(sid, sid); err != nil {
+		t.Fatalf("current user refused: %v", err)
+	}
+	for _, other := range []string{"S-1-5-18", "S-1-1-0"} {
+		if err := allowPipeServerSID(other, sid); err == nil {
+			t.Fatalf("server SID %s was allowed", other)
+		}
+	}
+}
+
+func TestASecondListenOnTheSameNameFails(t *testing.T) {
+	firstLock, err := Acquire(Config{StateDir: t.TempDir(), Name: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstLock.Release()
+	first, err := firstLock.Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	secondLock, err := Acquire(Config{StateDir: t.TempDir(), Name: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondLock.Release()
+	second, err := secondLock.Listen()
+	if err == nil {
+		second.Close()
+		t.Fatal("second listener succeeded")
 	}
 }

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type lockRecord struct {
@@ -15,7 +17,11 @@ type lockRecord struct {
 }
 
 // Lock holds the coordinator's process lock until Release or process exit.
-type Lock struct{ file *os.File }
+type Lock struct {
+	mu   sync.Mutex
+	file *os.File
+	cfg  Config
+}
 
 // Acquire takes over an unlocked stale record, or reports the live holder.
 func Acquire(cfg Config) (*Lock, error) {
@@ -65,12 +71,30 @@ func Acquire(cfg Config) (*Lock, error) {
 		f.Close()
 		return nil, err
 	}
-	return &Lock{file: f}, nil
+	return &Lock{file: f, cfg: cfg}, nil
+}
+
+// Listen binds the endpoint while the coordinator lock is held.
+func (l *Lock) Listen() (net.Listener, error) {
+	if l == nil {
+		return nil, errors.New("ipc: coordinator lock is not held")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		return nil, errors.New("ipc: coordinator lock is not held")
+	}
+	return listen(l.cfg)
 }
 
 // Release gives up the OS lock, leaving the record for stale recovery.
 func (l *Lock) Release() error {
-	if l == nil || l.file == nil {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
 		return nil
 	}
 	f := l.file

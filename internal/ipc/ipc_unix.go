@@ -24,7 +24,11 @@ func privateSocketDir(cfg Config, create bool) (string, error) {
 	}
 	dir := socketDir(cfg)
 	if create {
-		if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		if os.Getenv("XDG_RUNTIME_DIR") == "" {
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				return "", err
+			}
+		} else if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 			return "", err
 		}
 	}
@@ -39,8 +43,8 @@ func privateSocketDir(cfg Config, create bool) (string, error) {
 	return dir, nil
 }
 
-// Listen binds an owner-only Unix socket in a verified private directory.
-func Listen(cfg Config) (net.Listener, error) {
+// listen binds an owner-only Unix socket in a verified private directory.
+func listen(cfg Config) (net.Listener, error) {
 	dir, err := privateSocketDir(cfg, true)
 	if err != nil {
 		return nil, err
@@ -49,11 +53,6 @@ func Listen(cfg Config) (net.Listener, error) {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("ipc: existing endpoint is not a socket")
-		}
-		probe, dialErr := net.Dial("unix", path)
-		if dialErr == nil {
-			probe.Close()
-			return nil, fmt.Errorf("ipc: socket already has a listener")
 		}
 		if err := os.Remove(path); err != nil {
 			return nil, err
@@ -90,11 +89,24 @@ func (l *ownerListener) Accept() (net.Conn, error) {
 
 func allowPeerUID(uid uint32) bool { return uid == uint32(os.Getuid()) }
 
-// Dial checks the socket directory before connecting to the coordinator.
+// Dial checks the socket directory and server UID before returning a connection.
 func Dial(ctx context.Context, cfg Config) (net.Conn, error) {
 	dir, err := privateSocketDir(cfg, false)
 	if err != nil {
 		return nil, err
 	}
-	return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dir, cfg.Name+".sock"))
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dir, cfg.Name+".sock"))
+	if err != nil {
+		return nil, err
+	}
+	uid, err := peerUID(conn.(*net.UnixConn))
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ipc: get socket server UID: %w", err)
+	}
+	if !allowPeerUID(uid) {
+		conn.Close()
+		return nil, fmt.Errorf("ipc: socket server belongs to a different user")
+	}
+	return conn, nil
 }

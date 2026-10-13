@@ -15,7 +15,12 @@ import (
 
 func TestListenAndDialRoundTripBytes(t *testing.T) {
 	cfg := Config{StateDir: t.TempDir(), Name: "roundtrip"}
-	listener, err := Listen(cfg)
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	listener, err := lock.Listen()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,17 +61,22 @@ func TestListenAndDialRoundTripBytes(t *testing.T) {
 	}
 }
 
-func TestASecondListenOnTheSameNameFails(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "second"}
-	first, err := Listen(cfg)
+func TestListenRequiresAHeldLock(t *testing.T) {
+	var nilLock *Lock
+	if listener, err := nilLock.Listen(); err == nil {
+		listener.Close()
+		t.Fatal("nil lock allowed Listen")
+	}
+	lock, err := Acquire(Config{StateDir: t.TempDir(), Name: "released"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
-	second, err := Listen(cfg)
-	if err == nil {
-		second.Close()
-		t.Fatal("second listener succeeded")
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if listener, err := lock.Listen(); err == nil {
+		listener.Close()
+		t.Fatal("released lock allowed Listen")
 	}
 }
 

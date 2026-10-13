@@ -14,7 +14,12 @@ import (
 func TestSocketAndDirectoryBelongOnlyToTheOwner(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	cfg := Config{StateDir: t.TempDir(), Name: "permissions"}
-	listener, err := Listen(cfg)
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	listener, err := lock.Listen()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +62,12 @@ func TestUnsafeSocketDirectoryIsRefusedByListenAndDial(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if l, err := Listen(cfg); err == nil {
+			lock, err := Acquire(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Release()
+			if l, err := lock.Listen(); err == nil {
 				l.Close()
 				t.Fatal("Listen accepted unsafe directory")
 			}
@@ -91,7 +101,12 @@ func TestSocketDirectoryOwnedByAnotherUserIsRefused(t *testing.T) {
 	if err := os.Chown(dir, 1, -1); err != nil {
 		t.Fatal(err)
 	}
-	if l, err := Listen(cfg); err == nil {
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	if l, err := lock.Listen(); err == nil {
 		l.Close()
 		t.Fatal("Listen accepted another owner")
 	}
@@ -117,9 +132,35 @@ func TestListenReplacesAnUnservedStaleSocket(t *testing.T) {
 	if err := stale.Close(); err != nil {
 		t.Fatal(err)
 	}
-	l, err := Listen(cfg)
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	l, err := lock.Listen()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
+}
+
+func TestListenRefusesANonSocketEndpoint(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	cfg := Config{StateDir: t.TempDir(), Name: "occupied"}
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	dir := filepath.Join(cfg.StateDir, "run")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, cfg.Name+".sock"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if listener, err := lock.Listen(); err == nil {
+		listener.Close()
+		t.Fatal("Listen replaced a non-socket endpoint")
+	}
 }
