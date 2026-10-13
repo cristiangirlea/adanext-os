@@ -89,7 +89,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer listener.Close()
-	server := &http.Server{Handler: api.New(s, api.NewHub(), func(*http.Request) (string, error) { return "local", nil }), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
+	hub := api.NewHub()
+	server := &http.Server{Handler: api.New(s, hub, func(*http.Request) (string, error) { return "local", nil }), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
+	server.RegisterOnShutdown(hub.Close)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
 	select {

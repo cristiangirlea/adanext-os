@@ -8,14 +8,19 @@ import (
 // Hub wakes event readers; the store remains the source of truth.
 type Hub struct {
 	mu                sync.Mutex
+	closeOnce         sync.Once
+	done              chan struct{}
 	subs              map[string]map[chan struct{}]struct{}
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
 }
 
 func NewHub() *Hub {
-	return &Hub{subs: make(map[string]map[chan struct{}]struct{}), PollInterval: time.Second, HeartbeatInterval: 15 * time.Second}
+	return &Hub{done: make(chan struct{}), subs: make(map[string]map[chan struct{}]struct{}), PollInterval: time.Second, HeartbeatInterval: 15 * time.Second}
 }
+
+// Close stops live event streams. Repeated calls are safe.
+func (h *Hub) Close() { h.closeOnce.Do(func() { close(h.done) }) }
 
 func (h *Hub) Notify(attemptID string) {
 	h.mu.Lock()

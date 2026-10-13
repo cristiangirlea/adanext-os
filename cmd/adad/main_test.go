@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,4 +92,84 @@ func TestSecondCoordinatorReportsPIDAndStaleLockRecovers(t *testing.T) {
 	second := startHelper(t, dir)
 	second.Process.Kill()
 	second.Wait()
+}
+
+func TestShutdownClosesOpenSSEStream(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	ctx := context.Background()
+	s, err := store.Open(ctx, filepath.Join(dir, "adanext.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateUser(ctx, "local", "Local"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Do(ctx, "local", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','Project','source','now')")
+		return []byte("ok"), err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddMember(ctx, "p", "local", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, "local", "task", "p", "work", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAttempt(ctx, store.Attempt{ID: "attempt", Task: "task", Actor: "local", Backend: "codex", Model: "test", Effort: "low", Executor: "local", EngineSHA256: "hash", State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan int, 1)
+	var output bytes.Buffer
+	go func() { done <- run(runCtx, []string{"-state-dir", dir}, &output, &output) }()
+	cfg := ipc.Config{StateDir: dir, Name: "adad"}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		probeCtx, probeCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		conn, dialErr := ipc.Dial(probeCtx, cfg)
+		probeCancel()
+		if dialErr == nil {
+			conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("adad did not listen: %v %s", dialErr, output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return ipc.Dial(ctx, cfg) }}}
+	request, err := http.NewRequest("GET", "http://ipc/v1/attempts/attempt/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Accept", "text/event-stream")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatalf("stream: %d", response.StatusCode)
+	}
+	streamDone := make(chan struct{})
+	go func() { io.Copy(io.Discard, response.Body); close(streamDone) }()
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("run returned %d: %s", code, output.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not stop within two seconds with an open SSE stream")
+	}
+	<-streamDone
 }

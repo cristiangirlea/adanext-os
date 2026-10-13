@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -31,7 +32,11 @@ type fixture struct {
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	s, err := store.Open(ctx, filepath.Join(dir, "store.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -58,11 +63,7 @@ func newFixture(t *testing.T) *fixture {
 	if err := s.AddMember(ctx, "b", "bob", "owner"); err != nil {
 		t.Fatal(err)
 	}
-	name, err := newID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := ipc.Config{StateDir: dir, Name: "api-" + name}
+	cfg := ipc.Config{StateDir: dir, Name: "a"}
 	lock, err := ipc.Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -354,5 +355,185 @@ func TestUnknownAndForeignAttemptsHaveIdenticalResponses(t *testing.T) {
 	otherCode, foreign := f.request(t, "GET", "/v1/attempts/foreign-attempt/events", "", "", nil)
 	if code != 404 || otherCode != 404 || !bytes.Equal(unknown, foreign) {
 		t.Fatalf("unknown %d %s, foreign %d %s", code, unknown, otherCode, foreign)
+	}
+}
+
+func TestCreateForeignAndUnknownProjectsHaveIdenticalResponses(t *testing.T) {
+	f := newFixture(t)
+	request := func(project, key string) (int, []byte) {
+		return f.request(t, "POST", "/v1/tasks", key, "", []byte(fmt.Sprintf(`{"project":%q,"objective":"work"}`, project)))
+	}
+	unknownCode, unknown := request("missing", "unknown")
+	foreignCode, foreign := request("b", "foreign")
+	if unknownCode != 404 || foreignCode != 404 || !bytes.Equal(unknown, foreign) {
+		t.Fatalf("unknown %d %s, foreign %d %s", unknownCode, unknown, foreignCode, foreign)
+	}
+}
+
+func TestStartForeignAndUnknownTasksHaveIdenticalResponses(t *testing.T) {
+	f := newFixture(t)
+	if err := f.s.CreateTask(context.Background(), "bob", "foreign", "b", "other", "done"); err != nil {
+		t.Fatal(err)
+	}
+	unknownCode, unknown := f.request(t, "POST", "/v1/tasks/missing/start", "unknown", "0", nil)
+	foreignCode, foreign := f.request(t, "POST", "/v1/tasks/foreign/start", "foreign", "0", nil)
+	if unknownCode != 404 || foreignCode != 404 || !bytes.Equal(unknown, foreign) {
+		t.Fatalf("unknown %d %s, foreign %d %s", unknownCode, unknown, foreignCode, foreign)
+	}
+}
+
+func TestCancelRunningTask(t *testing.T) {
+	f := newFixture(t)
+	id := create(t, f, "create", "work")["id"].(string)
+	for _, edge := range []struct {
+		from, to store.State
+		revision int64
+	}{
+		{store.Draft, store.Ready, 0}, {store.Ready, store.Preparing, 1}, {store.Preparing, store.Running, 2},
+	} {
+		if err := f.s.Transition(context.Background(), "alice", id, edge.from, edge.to, edge.revision); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, body := f.request(t, "POST", "/v1/tasks/"+id+"/cancel", "cancel", "3", nil)
+	if code != 200 || !bytes.Contains(body, []byte(`"state":"cancel_requested"`)) || !bytes.Contains(body, []byte(`"revision":4`)) {
+		t.Fatalf("cancel: %d %s", code, body)
+	}
+}
+
+func TestRouterErrorsAreJSON(t *testing.T) {
+	f := newFixture(t)
+	for _, tc := range []struct {
+		method, path string
+		status       int
+		code         string
+	}{
+		{"GET", "/v1/unknown", 404, "not_found"},
+		{"PUT", "/v1/tasks", 405, "method_not_allowed"},
+	} {
+		status, body := f.request(t, tc.method, tc.path, "", "", nil)
+		if status != tc.status || !bytes.Contains(body, []byte(`"error":"`+tc.code+`"`)) {
+			t.Fatalf("%s %s: %d %s", tc.method, tc.path, status, body)
+		}
+	}
+}
+
+func TestEmptyLastEventIDUsesAfterQuery(t *testing.T) {
+	f := newFixture(t)
+	id := create(t, f, "create", "work")["id"].(string)
+	if err := f.s.CreateAttempt(context.Background(), store.Attempt{ID: "attempt", Task: id, Actor: "alice", Backend: "codex", Model: "test", Effort: "low", Executor: "local", EngineSHA256: "hash", State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	for seq := int64(1); seq <= 3; seq++ {
+		if err := f.s.AppendEvent(context.Background(), "alice", store.Event{Attempt: "attempt", Seq: seq, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req, err := http.NewRequest("GET", "http://ipc/v1/attempts/attempt/events?after=2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header["Last-Event-Id"] = []string{""}
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || bytes.Contains(body, []byte(`"seq":1`)) || bytes.Contains(body, []byte(`"seq":2`)) || !bytes.Contains(body, []byte(`"seq":3`)) {
+		t.Fatalf("events: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestIdempotencyKeyRejectsInvalidBytesAndLength(t *testing.T) {
+	f := newFixture(t)
+	if status, body := f.request(t, "POST", "/v1/tasks", strings.Repeat("a", 255), "", []byte(`{"project":"a","objective":"work"}`)); status != 201 {
+		t.Fatalf("255-byte key: %d %s", status, body)
+	}
+	for _, key := range []string{strings.Repeat("a", 256), "with space", "with\tcontrol"} {
+		status, body := f.request(t, "POST", "/v1/tasks", key, "", []byte(`{"project":"a","objective":"work"}`))
+		if status != 400 || !bytes.Contains(body, []byte(`"error":"bad_request"`)) {
+			t.Fatalf("key %q: %d %s", key, status, body)
+		}
+	}
+}
+
+func TestEventsStreamHeartbeat(t *testing.T) {
+	f := newFixture(t)
+	id := create(t, f, "create", "work")["id"].(string)
+	if err := f.s.CreateAttempt(context.Background(), store.Attempt{ID: "attempt", Task: id, Actor: "alice", Backend: "codex", Model: "test", Effort: "low", Executor: "local", EngineSHA256: "hash", State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.HeartbeatInterval = 10 * time.Millisecond
+	f.hub.PollInterval = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://ipc/v1/attempts/attempt/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("heartbeat: %v", err)
+		}
+		if line == ": ping\n" {
+			break
+		}
+	}
+}
+
+func TestEventsStreamPollsWithoutNotify(t *testing.T) {
+	f := newFixture(t)
+	id := create(t, f, "create", "work")["id"].(string)
+	if err := f.s.CreateAttempt(context.Background(), store.Attempt{ID: "attempt", Task: id, Actor: "alice", Backend: "codex", Model: "test", Effort: "low", Executor: "local", EngineSHA256: "hash", State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.PollInterval = 10 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://ipc/v1/attempts/attempt/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+	if err := f.s.AppendEvent(context.Background(), "alice", store.Event{Attempt: "attempt", Seq: 1, Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+		if line == "id: 1\n" {
+			break
+		}
+	}
+}
+
+func TestHubCloseIsIdempotent(t *testing.T) {
+	hub := NewHub()
+	hub.Close()
+	hub.Close()
+	select {
+	case <-hub.done:
+	default:
+		t.Fatal("hub remains open")
 	}
 }

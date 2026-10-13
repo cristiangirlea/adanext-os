@@ -37,6 +37,17 @@ func New(s *store.Store, hub *Hub, auth Authenticator) http.Handler {
 	mux.HandleFunc("POST /v1/tasks/{id}/start", h.transition(store.Ready, store.Preparing))
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.transition(store.Running, store.CancelRequested))
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			probe := r.Clone(r.Context())
+			probe.Method = method
+			if _, pattern := mux.Handler(probe); pattern != "/" {
+				writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, "not_found")
+	})
 	return mux
 }
 
@@ -55,7 +66,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "internal": "internal error"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "internal": "internal error"}[code]
 	writeJSON(w, status, struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
@@ -103,9 +114,15 @@ func decode(body []byte, v any) error {
 }
 func key(w http.ResponseWriter, r *http.Request) (string, bool) {
 	k := r.Header.Get("Idempotency-Key")
-	if strings.TrimSpace(k) == "" {
+	if len(k) == 0 || len(k) > 255 {
 		writeError(w, 400, "bad_request")
 		return "", false
+	}
+	for i := 0; i < len(k); i++ {
+		if k[i] < 0x21 || k[i] > 0x7e {
+			writeError(w, 400, "bad_request")
+			return "", false
+		}
 	}
 	return k, true
 }
@@ -317,7 +334,7 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cursor := r.URL.Query().Get("after")
-	if values, exists := r.Header[http.CanonicalHeaderKey("Last-Event-ID")]; exists {
+	if values, exists := r.Header[http.CanonicalHeaderKey("Last-Event-ID")]; exists && strings.Join(values, ",") != "" {
 		cursor = strings.Join(values, ",")
 	}
 	after := int64(0)
@@ -393,6 +410,8 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-h.hub.done:
 			return
 		case <-wake:
 			if !send() {
