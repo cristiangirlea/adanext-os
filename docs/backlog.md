@@ -25,22 +25,19 @@ $root=(Get-Location).Path; $h="$root\.hrn\sandbox"; New-Item -ItemType Directory
 - [ ] **M0.1 Bootstrap.** Agent setup, CI on the owner's runner, `scripts/check.sh`, the engine
   pin and `internal/engine`, desktop version pins and lockfile, plan, status and backlog.
   Acceptance: `bash scripts/check.sh` passes; the engine tests reject short revisions, unknown
-  fields and wrong hashes; CI green on `lab-ada-os`.
-- [ ] **M0.2 Runner.** Infra pull request adding the `lab-ada-os` scale set and the repository
-  variable (owner merges; the GitHub App step is the owner's).
+  fields and wrong hashes; CI green. Done: #1, 2026-10-13, before CI could run (no runner then).
+- [x] **M0.2 Runner.** Superseded: infra #55 added a `lab-ada-os` scale set on 2026-10-11, and
+  infra #61 removes it, since the repository is public and runs on GitHub's runners (decisions
+  log, 2026-10-13).
 - [ ] **M0.3 AdaNext OS.** The product's name through README, AGENTS.md, the check skill and the
   desktop package; the amendments of 2026-10-13 in the status file's decisions log and in this
-  backlog; a pointer at the top of `docs/plan.md`, whose text stays. With it, outside this
-  repository: the owner renames the repository to `adanext-os`, and an infra pull request renames
-  the scale set to `lab-adanext-os` (owner merges). Acceptance: `bash scripts/check.sh` passes;
-  the old name appears only in `docs/plan.md` and in the decisions log entry that records the
-  change.
-- [ ] **M0.4 Public repository.** A MIT `LICENSE`; the workflow keeps fork pull requests off the
-  owner's runner and infra lists the repository in `PUBLIC_REPOS` (fork approval); the owner's
-  call on which machine details and local paths stay in `docs/plan.md` and the status file;
-  AGENTS.md says the repository is public. The owner then flips visibility and protects `main`
-  (owner action 6). Acceptance: `bash scripts/check.sh` passes; the workflow's `runs-on` is the
-  public-repository expression of the owner's CI rules; nothing the owner wanted out remains.
+  backlog; a pointer at the top of `docs/plan.md`, whose text stays. The owner renamed the
+  repository to `adanext-os` the same day. Acceptance: `bash scripts/check.sh` passes; the old
+  name appears only in `docs/plan.md` and in the decisions log entries that record the change.
+- [x] **M0.4 Public repository.** A MIT `LICENSE` and AGENTS.md saying the repository is public
+  (#12, 2026-10-13); the workflow on GitHub's runners (#14). The owner flipped the visibility on
+  2026-10-13; branch protection and the call on which machine details and local paths stay in
+  `docs/plan.md` and the status file are owner actions 6 and 8.
 
 ## M1 Execution protocol (Harness repository)
 

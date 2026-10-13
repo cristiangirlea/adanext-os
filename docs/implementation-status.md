@@ -6,7 +6,7 @@ are in `docs/backlog.md`.
 
 | Milestone | Status | Where | Next |
 |---|---|---|---|
-| M0 Baseline | in progress | this repository, bootstrap branch | Merge the bootstrap; M0.3 the name and the rename; M0.4 public |
+| M0 Baseline | in progress | this repository: #1, #12, #14 merged | M0.3 (this amendment), then owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | in progress | M2.1 store on a local branch stacked on the bootstrap | Its pull request opens once the bootstrap merges |
 | M3 Project workspaces | not started | | |
@@ -128,9 +128,10 @@ Chosen on 2026-10-11 as the newest stable release published at least 14 days ear
 
 ### CI
 
-No runner exists for this repository yet. The workflow is gated on `vars.CI_RUNNER` and is
-skipped until then, which does not count as a pass. Local checks are the only evidence until the
-owner's steps below are done.
+Until 2026-10-13 the workflow was gated on `vars.CI_RUNNER` and skipped, which did not count as
+a pass: #1 and #12 merged on local checks alone. Since #14 the repository, being public, runs on
+GitHub's runners (decisions log, 2026-10-13); the first hosted run, on #14, passed `scripts/check.sh`
+on `ubuntu-latest` with `-race`.
 
 ### M1.1 (2026-10-11)
 
@@ -228,9 +229,8 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
   on the guard stop here; anything further is recorded as a known limit.
 - **2026-10-13, the name.** "Ada OS" is another product's name, so this one is AdaNext OS: the
   brand word `adanext`, one word, as in the domain `adanext.si` and the `adanext-map` repository;
-  short form AdaNext. The repository becomes `adanext-os`: the owner renames it on GitHub, the old
-  URL redirects, the runners' GitHub App installation follows the repository id, and the
-  `lab-ada-os` scale set, which does not, is renamed in an infra slice. Binaries keep short names,
+  short form AdaNext. The repository becomes `adanext-os`: the owner renamed it on GitHub the same
+  day (the old URL redirects). Binaries keep short names,
   as `adamap` does: `adad`, `ada-guest`. `docs/plan.md` keeps its original text and names, as the
   docs rule asks; everything else says AdaNext OS.
 - **2026-10-13, three forms of one product.** AdaNext OS ships as an installed application (the
@@ -297,11 +297,17 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
   documentation, later a sponsorship link. It hosts no AdaNext service, no accounts and no model
   calls; nothing here is for a hosted or many-tenant deployment, and Harness's `server/` work
   stays out of it. The repositories go public under MIT, like `harness` and `adanext-map`.
-  Before the flip: a LICENSE, the public-repository CI pattern (fork pull requests kept off the
-  owner's runner, fork approval through infra's `PUBLIC_REPOS`), and the owner's call on which
-  machine details and local paths stay in `docs/plan.md` and this file (M0.4). Branch protection
-  on `main`, which GitHub Free denies a private repository, becomes available (owner action 6).
-  Reason: the owner's decision of 2026-10-13, replacing "private" of 2026-10-11.
+  With it: a LICENSE (M0.4, #12), and the owner's call on which machine details and local paths
+  stay in `docs/plan.md` and this file. Branch protection on `main`, which GitHub Free denies a
+  private repository, becomes available (owner action 6). The owner flipped the visibility the
+  same day. Reason: the owner's decision of 2026-10-13, replacing "private" of 2026-10-11.
+- **2026-10-13, CI on GitHub's runners.** The owner's rule for public repositories: they run on
+  GitHub's runners, free for public repositories, never the lab runners (a stranger's pull
+  request must not reach the owner's PC). So this repository has no scale set and no `CI_RUNNER`
+  variable: pull requests run on `ubuntu-latest`, pushes to `main` on `ubuntu-latest` and
+  `windows-latest` (#14; infra #61 removes the `lab-ada-os` scale set and lists the repository as
+  GitHub-hosted). `docs/plan.md` section 8's runner gap and the CI notes above are superseded;
+  the lab runner's limits no longer bound this repository's jobs.
 - **2026-10-13, repositories.** `adanext-os` holds `adad`, the UI, the Electron shell,
   `ada-guest` and packaging, because the API and the UI change together and splitting them
   would mean releasing the UI as an artifact for `adad` to embed. `adanext-images` (VM templates,
@@ -322,25 +328,22 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
-2. Rename the repository: `gh repo rename adanext-os -R cristiangirlea/ada-os` (the decision of
-   2026-10-13). Then the runners: infra #55 (merged 2026-10-11, `290aa6e`) created the
-   `lab-ada-os` scale set, which an infra slice renames to `lab-adanext-os` (the owner merges,
-   because it deploys). Still the owner's afterwards: add `adanext-os` to the runners' GitHub App
-   at https://github.com/settings/installations/166537844; add `"adanext-os"` to
-   `ci_runner_repos` in the untracked `infra/tofu/terraform.tfvars`; then, from `infra/tofu` on
-   `origin/main`:
-   `GITHUB_TOKEN=$(gh auth token) tofu apply -target='module.runner_vars.github_actions_variable.ci_runner["adanext-os"]'`.
-   Until the variable exists, CI is skipped on every pull request, which is not a pass.
+2. ~~Rename the repository~~ (done by the owner, 2026-10-13). Runners: none here, since the
+   repository is public and runs on GitHub's runners (decisions log, 2026-10-13); the owner
+   merges infra #61 and follows its steps to retire the `lab-ada-os` scale set created by
+   infra #55.
 3. Decide whether Harness `antigravity-cli` lands through a reviewed pull request.
 4. Confirm the owner-decisions table in `docs/plan.md` section 1 and the amendments of 2026-10-13
    in the decisions log.
 5. Before M5: approve installing Packer and its VMware plugin at pinned versions, and choose the
    VM storage drive.
-6. Branch protection for `main`: GitHub Free offers it to public repositories only (the API
-   answers "Upgrade to GitHub Pro or make this repository public"). The owner decided on
-   2026-10-13 to make the repository public. After M0.4, the flip is the owner's:
-   `gh repo edit cristiangirlea/adanext-os --visibility public --accept-visibility-change-consequences`,
-   then protect `main` (pull requests only, no force pushes, no deletion). Until then the
-   protection is the deny rules, the push guard and merging only through pull requests.
+6. Branch protection for `main`: GitHub Free offers it to public repositories only, and the
+   repository has been public since 2026-10-13. Protect `main` with a ruleset: pull requests
+   only, no force pushes, no deletion, the `check` status required once a run has reported on
+   `main`. Until then the protection is the deny rules, the push guard and merging only through
+   pull requests.
 7. For M4b: a Cloudflare API token with `Zone > DNS > Edit` on `adanext.si` alone, kept in
    `adad`'s configuration and never in a repository, and the `home.adanext.si` record.
+8. Now that the repository is public: say which machine details and local paths leave
+   `docs/plan.md` (section 8's availability snapshot) and this file (the VMware host table).
+   Suggested: the provider sign-in states and the local paths go; the hardware stays.

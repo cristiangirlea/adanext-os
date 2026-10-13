@@ -1,4 +1,4 @@
-# AdaNext OS (private until M0.4)
+# AdaNext OS
 
 A workspace (an installed desktop application, a web interface served to the owner's own network
 and, later, a bootable system) that remembers a project's state, proposes the next bounded task,
