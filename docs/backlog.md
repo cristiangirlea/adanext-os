@@ -103,7 +103,8 @@ records stay loadable, README and PLAN.md updated, tests first.
   Done: #18, 2026-10-13, merge `36174d9`; the files private to the user on Unix: #24,
   2026-10-13, merge `09ff3bf`.
 - [ ] **M2.2 `adad`, singleton and IPC.** Split in two slices (decisions log, 2026-10-13): M2.2a,
-  `internal/ipc` and the single-coordinator lock (#25), and M2.2b, `cmd/adad` and the `/v1` API
+  `internal/ipc` and the single-coordinator lock (#25; done: #28, 2026-10-13, merge `7e117ba`),
+  and M2.2b, `cmd/adad` and the `/v1` API
   (#26). `cmd/adad` listens, as `docs/plan.md` section 2 says,
   on a per-user Windows named pipe whose security descriptor grants only the current user, or an
   owner-only Unix socket (mode 0600 in a 0700 directory) on Linux. How the pipe is created

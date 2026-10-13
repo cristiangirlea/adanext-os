@@ -8,7 +8,7 @@ are in `docs/backlog.md`.
 |---|---|---|---|
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
-| M2 Durable coordinator | in progress | M2.1 store: #18 and #24 merged, verified; M2.2a IPC: #28 (open) | M2.2b `adad` and the `/v1` API (#26) |
+| M2 Durable coordinator | in progress | M2.1 store: #18 and #24 merged, verified; M2.2a IPC: #28 merged | M2.2b `adad` and the `/v1` API (#26) |
 | M3 Project workspaces | not started | | |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
