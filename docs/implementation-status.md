@@ -6,9 +6,9 @@ are in `docs/backlog.md`.
 
 | Milestone | Status | Where | Next |
 |---|---|---|---|
-| M0 Baseline | in progress | this repository: #1, #12, #14 merged | M0.3 (this amendment), then owner actions 6 and 8 |
+| M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
-| M2 Durable coordinator | in progress | M2.1 store on a local branch stacked on the bootstrap | Its pull request opens once the bootstrap merges |
+| M2 Durable coordinator | in progress | M2.1 store: #18 and #24 merged; M2.2a IPC: #28 | M2.2b `adad` and the `/v1` API (#26) |
 | M3 Project workspaces | not started | | |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
@@ -170,7 +170,7 @@ on a clean worktree at that commit built `hrn.exe` for windows/amd64 with go1.26
 `hrn exec --protocol v1` with a v1 `hello` (revision reported as unknown, as expected without a VCS
 stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 
-### M2.1 store (2026-10-11, local branch `m2/store`, not yet a pull request)
+### M2.1 store (2026-10-11 to 2026-10-13, #18 and #24, implemented)
 
 `internal/store` on modernc.org/sqlite v1.59.0, written in runs `20261011-165945-8a1560`,
 `20261011-171916-6142ca` on a branch stacked on the bootstrap, at `6925b33`. Checks:
@@ -195,6 +195,17 @@ outside it `bash scripts/check.sh` passed on the owner's PC (`-race` skipped, no
 chmod hook tests skipped on Windows). The pull request is still to open, after an independent
 review; nothing is verified or ticked. Review run `20261013-185055-ec8024` found the replay gap,
 fixed with the scope gate and its regression test; its two other findings are #15 and #16.
+
+2026-10-13, merge: #18 at `205c128`, CI green on ubuntu-latest; `bash scripts/check.sh` on the
+owner's PC passed at that head (run `20261013-201027-c1982b`); a security read of the whole diff
+(run `20261013-200746-cb6e25`) found nothing blocking and three gaps: idempotent responses not
+bound to their project (#20), unknown and foreign tasks told apart (#21), and the database, its
+sidecars and backups created readable by other users on Unix, fixed in #24 before it was filed.
+#24 (`3f20c6b`): the database file is created 0600 before SQLite opens it, backups are created
+with `O_EXCL` and 0600; `bash scripts/check.sh` on Windows and, in a `golang:1.26` container as uid
+1000, `go vet`, `go test` and `go test -race` on Linux passed (run `20261013-202333-1a9696`);
+review run `20261013-201921-3d3373`, its missing tests added, the rest #23. M2.1 stays
+`implemented`: the Windows CI leg on `main` is its next evidence.
 
 ## Decisions log
 
@@ -366,6 +377,13 @@ fixed with the scope gate and its regression test; its two other findings are #1
   continues. Who may cancel, review or approve, and what a revoked membership does to a pending
   permission prompt, are decided with the executor (M2.3) and review (M7) slices, where those
   records arrive.
+
+- **2026-10-13, M2.2 in two slices.** M2.2 is split into M2.2a, `internal/ipc` with the
+  single-coordinator lock (#25), and M2.2b, `cmd/adad` with the `/v1` API (#26), so each is
+  reviewable on its own. M2.2a's choices: the Windows pipe through go-winio v0.6.2 (first instance,
+  remote clients rejected, owner and DACL the user's SID alone), and the Unix socket under the
+  state directory rather than `$XDG_RUNTIME_DIR`, so that the lock and the socket cover the same
+  coordinators.
 
 ## Owner actions pending
 

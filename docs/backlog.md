@@ -22,18 +22,19 @@ $root=(Get-Location).Path; $h="$root\.hrn\sandbox"; New-Item -ItemType Directory
 
 ## M0 Baseline
 
-- [ ] **M0.1 Bootstrap.** Agent setup, CI on the owner's runner, `scripts/check.sh`, the engine
+- [x] **M0.1 Bootstrap.** Agent setup, CI on the owner's runner, `scripts/check.sh`, the engine
   pin and `internal/engine`, desktop version pins and lockfile, plan, status and backlog.
   Acceptance: `bash scripts/check.sh` passes; the engine tests reject short revisions, unknown
   fields and wrong hashes; CI green. Done: #1, 2026-10-13, before CI could run (no runner then).
 - [x] **M0.2 Runner.** Superseded: infra #55 added a `lab-ada-os` scale set on 2026-10-11, and
   infra #61 removes it, since the repository is public and runs on GitHub's runners (decisions
   log, 2026-10-13).
-- [ ] **M0.3 AdaNext OS.** The product's name through README, AGENTS.md, the check skill and the
+- [x] **M0.3 AdaNext OS.** The product's name through README, AGENTS.md, the check skill and the
   desktop package; the amendments of 2026-10-13 in the status file's decisions log and in this
   backlog; a pointer at the top of `docs/plan.md`, whose text stays. The owner renamed the
   repository to `adanext-os` the same day. Acceptance: `bash scripts/check.sh` passes; the old
-  name appears only in `docs/plan.md` and in the decisions log entries that record the change.
+  name appears only in `docs/plan.md` and in the decisions log entries that record the change. Done:
+  #13, 2026-10-13.
 - [x] **M0.4 Public repository.** A MIT `LICENSE` and AGENTS.md saying the repository is public
   (#12, 2026-10-13); the workflow on GitHub's runners (#14). The owner flipped the visibility on
   2026-10-13; branch protection and the call on which machine details and local paths stay in
@@ -85,7 +86,7 @@ records stay loadable, README and PLAN.md updated, tests first.
 
 ## M2 Durable coordinator
 
-- [ ] **M2.1 Store.** `internal/store` on modernc.org/sqlite v1.59.0: WAL, foreign keys,
+- [x] **M2.1 Store.** `internal/store` on modernc.org/sqlite v1.59.0: WAL, foreign keys,
   `synchronous=FULL`, numbered migrations each in a transaction, a refusal to open a newer schema.
   Tables for users, projects and their members, tasks, attempts, events and idempotency keys, with
   an actor on tasks and attempts (decisions log, 2026-10-13; reviews arrive in M7 and permission
@@ -98,7 +99,11 @@ records stay loadable, README and PLAN.md updated, tests first.
   actors refused by foreign keys; an attempt's actor is a member at creation. A permission prompt
   addressed to the task's actor is M2.3's acceptance, where permission decisions arrive. A helper
   process killed mid-transaction leaves a consistent database; restore from a backup.
-- [ ] **M2.2 `adad`, singleton and IPC.** `cmd/adad` listens, as `docs/plan.md` section 2 says,
+  Done: #18, 2026-10-13, merge `36174d9`; the files private to the user on Unix: #24, merge
+  `09ff3bf`.
+- [ ] **M2.2 `adad`, singleton and IPC.** Split in two slices (decisions log, 2026-10-13): M2.2a,
+  `internal/ipc` and the single-coordinator lock (#25), and M2.2b, `cmd/adad` and the `/v1` API
+  (#26). `cmd/adad` listens, as `docs/plan.md` section 2 says,
   on a per-user Windows named pipe whose security descriptor grants only the current user, or an
   owner-only Unix socket (mode 0600 in a 0700 directory) on Linux. How the pipe is created
   (direct Windows calls or a vetted library) is decided in the slice; a test reads the
