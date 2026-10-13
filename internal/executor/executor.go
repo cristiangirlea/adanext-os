@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/artifact"
@@ -239,32 +238,75 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}
 	var inputMu sync.Mutex
 	write := func(v any) error { inputMu.Lock(); defer inputMu.Unlock(); return json.NewEncoder(stdin).Encode(v) }
-	var killed atomic.Bool
+	var processMu sync.Mutex
+	var exited, killRequested bool
+	var exitState *os.ProcessState
+	var exitErr error
+	processDone := make(chan struct{})
+	go func() {
+		state, err := cmd.Process.Wait()
+		processMu.Lock()
+		exitState, exitErr, exited = state, err, true
+		processMu.Unlock()
+		close(processDone)
+	}()
 	kill := func() {
-		if cmd.Process.Kill() == nil {
-			killed.Store(true)
-			_ = stdout.Close()
+		processMu.Lock()
+		if !exited && cmd.Process.Kill() == nil {
+			killRequested = true
 		}
-	}
-	abort := func() {
-		_ = stdin.Close()
-		timer := time.AfterFunc(e.cfg.CancelGrace, kill)
-		_ = cmd.Wait()
-		timer.Stop()
+		processMu.Unlock()
+		// A descendant can retain stdout after the engine exits.
+		_ = stdout.Close()
 	}
 	var timerMu sync.Mutex
-	var timer *time.Timer
+	var closeTimer, killTimer *time.Timer
+	shutdownStarted := false
+	startShutdown := func() {
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		if shutdownStarted {
+			return
+		}
+		shutdownStarted = true
+		closeTimer = time.AfterFunc(e.cfg.CancelGrace, func() { _ = stdin.Close() })
+		killTimer = time.AfterFunc(2*e.cfg.CancelGrace, kill)
+	}
+	stopShutdown := func() {
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		if closeTimer != nil {
+			closeTimer.Stop()
+		}
+		if killTimer != nil {
+			killTimer.Stop()
+		}
+	}
+	// The reader calls cmd.Wait only after its final read has returned.
+	waitExit := func() (bool, error) {
+		<-processDone
+		_ = cmd.Wait() // Process.Wait above supplies the exit status.
+		stopShutdown()
+		processMu.Lock()
+		defer processMu.Unlock()
+		if exitErr != nil {
+			return killRequested, exitErr
+		}
+		if exitState == nil {
+			return killRequested, errors.New("engine exit state missing")
+		}
+		if !exitState.Success() {
+			return killRequested, fmt.Errorf("exit status %d", exitState.ExitCode())
+		}
+		return killRequested, nil
+	}
 	done := make(chan struct{})
 	cancelDone := make(chan struct{})
 	accepted := make(chan struct{})
 	defer func() {
 		close(done)
 		<-cancelDone
-		timerMu.Lock()
-		if timer != nil {
-			timer.Stop()
-		}
-		timerMu.Unlock()
+		stopShutdown()
 		stdin.Close()
 	}()
 	go func() {
@@ -277,10 +319,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 				_ = write(map[string]any{"type": "cancel", "attempt_id": a.ID})
 			default:
 			}
-			_ = stdin.Close()
-			timerMu.Lock()
-			timer = time.AfterFunc(e.cfg.CancelGrace, kill)
-			timerMu.Unlock()
+			startShutdown()
 			select {
 			case <-accepted:
 				_ = e.requestCancel(a)
@@ -326,15 +365,28 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		}
 		return m, line, nil
 	}
+	drain := func() (error, bool, error) {
+		startShutdown()
+		for {
+			_, _, err := read()
+			if err != nil {
+				killed, waitErr := waitExit()
+				return err, killed, waitErr
+			}
+		}
+	}
+	abort := func(cause error) {
+		e.recordCause(a, cause)
+		_, killed, _ := drain()
+		e.failFinal(a, cause, true, killed)
+	}
 	hello, _, err := next("hello", false)
 	if err != nil {
-		abort()
-		e.fail(a, fmt.Errorf("hello: %w", err))
+		abort(fmt.Errorf("hello: %w", err))
 		return
 	}
 	if hello.Protocol != "v1" {
-		abort()
-		e.fail(a, fmt.Errorf("hello protocol %q", hello.Protocol))
+		abort(fmt.Errorf("hello protocol %q", hello.Protocol))
 		return
 	}
 	var options []string
@@ -347,46 +399,39 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		}
 	}
 	if !found {
-		abort()
-		e.fail(a, fmt.Errorf("backend %s mode %s unavailable", a.Backend, a.Mode))
+		abort(fmt.Errorf("backend %s mode %s unavailable", a.Backend, a.Mode))
 		return
 	}
 	task := map[string]any{"prompt": prompt, "dir": work, "backend": a.Backend, "mode": a.Mode}
 	if a.Model != "" {
 		if !contains(options, "model") {
-			abort()
-			e.fail(a, errors.New("model unsupported"))
+			abort(errors.New("model unsupported"))
 			return
 		}
 		task["model"] = a.Model
 	}
 	if a.Effort != "" {
 		if !contains(options, "effort") {
-			abort()
-			e.fail(a, errors.New("effort unsupported"))
+			abort(errors.New("effort unsupported"))
 			return
 		}
 		task["effort"] = a.Effort
 	}
 	if err := write(map[string]any{"type": "start", "attempt_id": a.ID, "task": task}); err != nil {
-		abort()
-		e.fail(a, fmt.Errorf("start write: %w", err))
+		abort(fmt.Errorf("start write: %w", err))
 		return
 	}
 	answer, _, err := next("", true)
 	if err != nil {
-		abort()
-		e.fail(a, fmt.Errorf("start response: %w", err))
+		abort(fmt.Errorf("start response: %w", err))
 		return
 	}
 	if answer.Type == "rejected" {
-		abort()
-		e.fail(a, fmt.Errorf("rejected: %s", answer.Error.Code))
+		abort(fmt.Errorf("rejected: %s", answer.Error.Code))
 		return
 	}
 	if answer.Type != "accepted" || answer.RunID == "" {
-		abort()
-		e.fail(a, errors.New("invalid accepted response"))
+		abort(errors.New("invalid accepted response"))
 		return
 	}
 	if err := e.owned(a.ID, func(tx *store.Tx) error {
@@ -401,108 +446,85 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		_, err := tx.ExecContext(ctx, "UPDATE attempts SET state='running',run_id=? WHERE id=?", answer.RunID, a.ID)
 		return err
 	}); err != nil {
-		abort()
-		e.fail(a, err)
+		abort(err)
 		return
 	}
 	close(accepted)
 	var fatalCause error
-	var fatalTimer *time.Timer
-	var fatalKillTimer *time.Timer
-	defer func() {
-		if fatalTimer != nil {
-			fatalTimer.Stop()
-		}
-		if fatalKillTimer != nil {
-			fatalKillTimer.Stop()
-		}
-	}()
 	for {
 		m, line, err := next("", true)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				waitErr := cmd.Wait()
-				if killed.Load() {
-					e.fail(a, errors.New("engine was killed after the grace period"))
-				} else if fatalCause != nil {
-					e.fail(a, fmt.Errorf("%w: engine exited without result: %v", fatalCause, waitErr))
-				} else {
-					e.fail(a, fmt.Errorf("engine exited without result: %v", waitErr))
+				if fatalCause == nil {
+					e.recordCause(a, errors.New("engine exited without result"))
 				}
+				startShutdown()
+				killed, waitErr := waitExit()
+				cause := fmt.Errorf("engine exited without result: %v", waitErr)
+				if fatalCause != nil {
+					cause = fmt.Errorf("%w: %v", fatalCause, cause)
+				}
+				e.failFinal(a, cause, fatalCause != nil, killed)
 				return
 			}
-			abort()
-			if killed.Load() {
-				e.fail(a, errors.New("engine was killed after the grace period"))
-			} else {
-				e.fail(a, fmt.Errorf("protocol stream: %w", err))
-			}
+			abort(fmt.Errorf("protocol stream: %w", err))
 			return
 		}
 		switch m.Type {
 		case "event":
 			if m.Event.Kind == "" {
-				abort()
-				e.fail(a, errors.New("event missing kind"))
+				abort(errors.New("event missing kind"))
 				return
 			}
 			if err := e.append(a, m.Event.Kind, line, m.Event.Text); err != nil {
-				abort()
-				e.fail(a, fmt.Errorf("event storage: %w", err))
+				abort(fmt.Errorf("event storage: %w", err))
 				return
 			}
 		case "error":
 			if err := e.append(a, "error", line, ""); err != nil {
-				abort()
-				e.fail(a, fmt.Errorf("error storage: %w", err))
+				abort(fmt.Errorf("error storage: %w", err))
 				return
 			}
 			if m.Fatal {
 				fatalCause = fmt.Errorf("fatal error %s: %s", m.Error.Code, m.Error.Message)
-				if fatalTimer == nil {
-					fatalTimer = time.AfterFunc(e.cfg.CancelGrace, func() { _ = stdin.Close() })
-					fatalKillTimer = time.AfterFunc(2*e.cfg.CancelGrace, kill)
-				}
+				startShutdown()
 			}
 		case "result":
-			if fatalTimer != nil {
-				fatalTimer.Stop()
-				fatalKillTimer.Stop()
-			}
 			if err := e.result(a, m, line); err != nil {
-				abort()
-				e.fail(a, err)
+				abort(err)
 				return
 			}
-			waitDone := make(chan error, 1)
-			go func() { waitDone <- cmd.Wait() }()
-			abortTail := func() {
-				_ = stdin.Close()
-				select {
-				case <-waitDone:
-				case <-time.After(e.cfg.CancelGrace):
-					kill()
-					<-waitDone
-				}
-			}
+			startShutdown()
 			_, _, tailErr := read()
 			if tailErr == nil {
-				abortTail()
-				e.fail(a, errors.New("line after result"))
+				abort(errors.New("line after result"))
 				return
 			}
 			if !errors.Is(tailErr, io.EOF) {
-				abortTail()
-				e.fail(a, tailErr)
+				cause := fmt.Errorf("result tail: %w", tailErr)
+				if !errors.Is(tailErr, os.ErrClosed) {
+					e.recordCause(a, cause)
+				}
+				killed, _ := waitExit()
+				if killed {
+					if fatalCause != nil {
+						e.failFinal(a, fatalCause, true, true)
+					} else {
+						e.failFinal(a, cause, !errors.Is(tailErr, os.ErrClosed), true)
+					}
+				} else {
+					e.failFinal(a, cause, !errors.Is(tailErr, os.ErrClosed), false)
+				}
 				return
 			}
-			waitErr := <-waitDone
-			if killed.Load() {
-				e.fail(a, errors.New("engine was killed after the grace period"))
+			killed, waitErr := waitExit()
+			if killed {
+				cause := errors.New("engine was killed after the grace period")
+				e.failFinal(a, cause, false, false)
 				return
 			}
 			if fatalCause != nil {
-				e.fail(a, fatalCause)
+				e.failFinal(a, fatalCause, true, false)
 				return
 			}
 			if waitErr != nil && m.Result.Status != "canceled" {
@@ -514,8 +536,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 			return
 		default:
-			abort()
-			e.fail(a, fmt.Errorf("unexpected protocol type %s", m.Type))
+			abort(fmt.Errorf("unexpected protocol type %s", m.Type))
 			return
 		}
 	}
@@ -663,6 +684,15 @@ func (e *Executor) finish(a store.Attempt, status string) error {
 }
 
 func (e *Executor) fail(a store.Attempt, cause error) {
+	e.failFinal(a, cause, false, false)
+}
+
+func (e *Executor) recordCause(a store.Attempt, cause error) {
+	payload, _ := json.Marshal(map[string]any{"error": cause.Error()})
+	_ = e.append(a, "error", payload, "")
+}
+
+func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed bool) {
 	if errors.Is(cause, store.ErrStaleOwnership) {
 		return
 	}
@@ -712,7 +742,16 @@ func (e *Executor) fail(a store.Attempt, cause error) {
 			}
 			seq++
 		}
-		return tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload})
+		if !causeRecorded {
+			if err := tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload}); err != nil {
+				return err
+			}
+			seq++
+		}
+		if killed {
+			return tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: []byte(`{"error":"engine was killed after the grace period"}`)})
+		}
+		return nil
 	})
 	if e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)

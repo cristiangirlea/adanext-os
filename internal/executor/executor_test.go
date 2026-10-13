@@ -27,7 +27,7 @@ func TestHelperFakeEngine(t *testing.T) {
 		return
 	}
 	if script == "grandchild" {
-		time.Sleep(time.Second)
+		time.Sleep(5 * time.Second)
 		return
 	}
 	marker := os.Getenv("ADA_FAKE_MARKER")
@@ -172,6 +172,7 @@ func TestHelperFakeEngine(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(3)
 		}
+		mark(fmt.Sprintf("child_pid:%d", child.Process.Pid))
 	}
 	final := "done"
 	if script == "big" || script == "big_block" {
@@ -185,6 +186,9 @@ func TestHelperFakeEngine(t *testing.T) {
 		for {
 			time.Sleep(time.Hour)
 		}
+	}
+	if script == "delayed_exit" {
+		time.Sleep(20 * time.Millisecond)
 	}
 	os.Exit(0)
 }
@@ -238,7 +242,7 @@ func testExecutor(t *testing.T, script string) (*Executor, *store.Store, string,
 		t.Fatal(err)
 	}
 	marker := filepath.Join(dir, "marker")
-	e := New(Config{EnginePath: os.Args[0], EngineSHA256: want, EngineArgs: []string{"-test.run=^TestHelperFakeEngine$"}, StateDir: dir, Artifacts: a, Store: s, Hub: api.NewHub(), Generation: generation, CancelGrace: 50 * time.Millisecond, Env: []string{"ADA_FAKE_ENGINE=" + script, "ADA_FAKE_MARKER=" + marker}})
+	e := New(Config{EnginePath: os.Args[0], EngineSHA256: want, EngineArgs: []string{"-test.run=^TestHelperFakeEngine$"}, StateDir: dir, Artifacts: a, Store: s, Hub: api.NewHub(), Generation: generation, CancelGrace: 50 * time.Millisecond, Env: []string{"ADA_FAKE_ENGINE=" + script, "ADA_FAKE_MARKER=" + marker, "GORACE=atexit_sleep_ms=0"}})
 	return e, s, dir, marker
 }
 
@@ -289,6 +293,14 @@ func TestHappyEngineRunRecordsOrderedEventsAndVerifiesTask(t *testing.T) {
 	}
 }
 
+func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		e, s, _, _ := testExecutor(t, "delayed_exit")
+		e.LaunchAttempt("attempt")
+		waitAttempt(t, s, "ended_ok")
+	}
+}
+
 type notificationCounter struct{ count atomic.Int32 }
 
 func (n *notificationCounter) Notify(string) { n.count.Add(1) }
@@ -324,13 +336,11 @@ func TestBrokenProtocolStreamsFailWithAnErrorEvent(t *testing.T) {
 				t.Fatalf("task state = %s", task.State)
 			}
 			events, _ := s.Events(context.Background(), "u", "attempt", 0)
-			if len(events) == 0 || events[len(events)-1].Kind != "error" {
+			if len(events) == 0 {
 				t.Fatalf("events = %+v", events)
 			}
 			cause := map[string]string{"crash": "exit status 3", "truncated": "truncated", "gap": "seq", "duplicate": "seq", "fatal": "fatal"}[script]
-			if !strings.Contains(string(events[len(events)-1].Payload), cause) {
-				t.Fatalf("error = %s", events[len(events)-1].Payload)
-			}
+			errorEventContains(t, s, cause)
 		})
 	}
 }
@@ -386,10 +396,23 @@ func TestArtifactFileSystemDiskFullFailsTaskAndStopsEngine(t *testing.T) {
 	if task.State != store.Failed {
 		t.Fatalf("task state = %s", task.State)
 	}
-	events, _ := s.Events(context.Background(), "u", "attempt", 0)
-	last := events[len(events)-1]
-	if last.Kind != "error" || !strings.Contains(string(last.Payload), "disk is full") {
-		t.Fatalf("last event = %+v", last)
+	errorEventContains(t, s, "disk is full")
+	errorEventContains(t, s, "engine was killed after the grace period")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var causeIndex, killIndex = -1, -1
+	for i, event := range events {
+		if strings.Contains(string(event.Payload), "disk is full") {
+			causeIndex = i
+		}
+		if strings.Contains(string(event.Payload), "engine was killed after the grace period") {
+			killIndex = i
+		}
+	}
+	if causeIndex < 0 || killIndex <= causeIndex {
+		t.Fatalf("cause and kill event order: %+v", events)
 	}
 }
 
@@ -411,6 +434,16 @@ func TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine(t *testing.T) {
 			}
 			if script == "ignore_cancel" {
 				errorEventContains(t, s, "engine was killed after the grace period")
+			} else {
+				events, err := s.Events(context.Background(), "u", "attempt", 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range events {
+					if event.Kind == "error" {
+						t.Fatalf("clean cancellation recorded error: %+v", event)
+					}
+				}
 			}
 		})
 	}
@@ -616,7 +649,7 @@ func TestEngineEnvironmentIsAllowListed(t *testing.T) {
 			continue
 		}
 		for _, name := range strings.Split(strings.TrimPrefix(line, "env:"), ",") {
-			if !contains([]string{"PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "HRN_HOME", "ADA_FAKE_ENGINE", "ADA_FAKE_MARKER"}, name) {
+			if !contains([]string{"PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "HRN_HOME", "ADA_FAKE_ENGINE", "ADA_FAKE_MARKER", "GORACE"}, name) {
 				t.Fatalf("unexpected environment variable %s", name)
 			}
 		}
@@ -640,12 +673,33 @@ func TestStderrIsCappedAndPrivate(t *testing.T) {
 }
 
 func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
-	e, s, _, _ := testExecutor(t, "child_stdout")
+	e, s, _, marker := testExecutor(t, "child_stdout")
+	t.Cleanup(func() {
+		for _, line := range markerLines(t, marker) {
+			if strings.HasPrefix(line, "child_pid:") {
+				var pid int
+				if _, err := fmt.Sscanf(line, "child_pid:%d", &pid); err == nil {
+					if child, err := os.FindProcess(pid); err == nil {
+						_ = child.Kill()
+					}
+				}
+			}
+		}
+	})
 	started := time.Now()
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("executor waited %s for descendant stdout", elapsed)
+	}
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if strings.Contains(string(event.Payload), "engine was killed after the grace period") {
+			t.Fatalf("exited parent marked killed: %+v", event)
+		}
 	}
 }
 
