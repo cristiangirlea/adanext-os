@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/artifact"
@@ -156,6 +158,26 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		e.fail(a, fmt.Errorf("engine path: %w", err))
 		return
 	}
+	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(enginePath), ".exe") {
+		e.fail(a, errors.New("engine path requires a .exe suffix on Windows"))
+		return
+	}
+	if err := e.owned(a.ID, func(tx *store.Tx) error {
+		result, err := tx.ExecContext(ctx, "UPDATE attempts SET state='launching' WHERE id=? AND state='pending'", a.ID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return store.ErrStaleOwnership
+		}
+		return nil
+	}); err != nil {
+		return
+	}
 	if err := os.MkdirAll(work, 0700); err != nil {
 		e.fail(a, fmt.Errorf("scratch directory: %w", err))
 		return
@@ -175,17 +197,13 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		e.fail(a, fmt.Errorf("task prompt: %w", err))
 		return
 	}
-	if err := e.owned(a.ID, func(tx *store.Tx) error {
-		_, err := tx.ExecContext(ctx, "UPDATE attempts SET state='launching' WHERE id=? AND state='pending'", a.ID)
-		return err
-	}); err != nil {
-		return
-	}
 	args := e.cfg.EngineArgs
 	if args == nil {
 		args = []string{"exec", "--protocol", "v1"}
 	}
 	cmd := exec.Command(enginePath, args...)
+	cmd.Path = enginePath
+	cmd.WaitDelay = e.cfg.CancelGrace
 	cmd.Dir = work
 	cmd.Env = e.environment(base)
 	cmd.Stderr = &capWriter{file: stderr, left: 1 << 20}
@@ -221,7 +239,19 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}
 	var inputMu sync.Mutex
 	write := func(v any) error { inputMu.Lock(); defer inputMu.Unlock(); return json.NewEncoder(stdin).Encode(v) }
-	kill := func() { _ = cmd.Process.Kill() }
+	var killed atomic.Bool
+	kill := func() {
+		if cmd.Process.Kill() == nil {
+			killed.Store(true)
+			_ = stdout.Close()
+		}
+	}
+	abort := func() {
+		_ = stdin.Close()
+		timer := time.AfterFunc(e.cfg.CancelGrace, kill)
+		_ = cmd.Wait()
+		timer.Stop()
+	}
 	var timerMu sync.Mutex
 	var timer *time.Timer
 	done := make(chan struct{})
@@ -241,13 +271,19 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		defer close(cancelDone)
 		select {
 		case <-active.cancel:
+			select {
+			case <-accepted:
+				_ = e.requestCancel(a)
+				_ = write(map[string]any{"type": "cancel", "attempt_id": a.ID})
+			default:
+			}
+			_ = stdin.Close()
 			timerMu.Lock()
 			timer = time.AfterFunc(e.cfg.CancelGrace, kill)
 			timerMu.Unlock()
 			select {
 			case <-accepted:
 				_ = e.requestCancel(a)
-				_ = write(map[string]any{"type": "cancel", "attempt_id": a.ID})
 			case <-done:
 			}
 		case <-done:
@@ -292,14 +328,12 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}
 	hello, _, err := next("hello", false)
 	if err != nil {
-		kill()
-		_ = cmd.Wait()
+		abort()
 		e.fail(a, fmt.Errorf("hello: %w", err))
 		return
 	}
 	if hello.Protocol != "v1" {
-		kill()
-		_ = cmd.Wait()
+		abort()
 		e.fail(a, fmt.Errorf("hello protocol %q", hello.Protocol))
 		return
 	}
@@ -313,17 +347,14 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		}
 	}
 	if !found {
-		stdin.Close()
-		kill()
-		_ = cmd.Wait()
+		abort()
 		e.fail(a, fmt.Errorf("backend %s mode %s unavailable", a.Backend, a.Mode))
 		return
 	}
 	task := map[string]any{"prompt": prompt, "dir": work, "backend": a.Backend, "mode": a.Mode}
 	if a.Model != "" {
 		if !contains(options, "model") {
-			kill()
-			_ = cmd.Wait()
+			abort()
 			e.fail(a, errors.New("model unsupported"))
 			return
 		}
@@ -331,36 +362,30 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}
 	if a.Effort != "" {
 		if !contains(options, "effort") {
-			kill()
-			_ = cmd.Wait()
+			abort()
 			e.fail(a, errors.New("effort unsupported"))
 			return
 		}
 		task["effort"] = a.Effort
 	}
 	if err := write(map[string]any{"type": "start", "attempt_id": a.ID, "task": task}); err != nil {
-		kill()
-		_ = cmd.Wait()
+		abort()
 		e.fail(a, fmt.Errorf("start write: %w", err))
 		return
 	}
 	answer, _, err := next("", true)
 	if err != nil {
-		kill()
-		_ = cmd.Wait()
+		abort()
 		e.fail(a, fmt.Errorf("start response: %w", err))
 		return
 	}
 	if answer.Type == "rejected" {
-		stdin.Close()
-		kill()
-		_ = cmd.Wait()
+		abort()
 		e.fail(a, fmt.Errorf("rejected: %s", answer.Error.Code))
 		return
 	}
 	if answer.Type != "accepted" || answer.RunID == "" {
-		kill()
-		_ = cmd.Wait()
+		abort()
 		e.fail(a, errors.New("invalid accepted response"))
 		return
 	}
@@ -376,67 +401,110 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		_, err := tx.ExecContext(ctx, "UPDATE attempts SET state='running',run_id=? WHERE id=?", answer.RunID, a.ID)
 		return err
 	}); err != nil {
-		kill()
-		_ = cmd.Wait()
+		abort()
 		e.fail(a, err)
 		return
 	}
 	close(accepted)
+	var fatalCause error
+	var fatalTimer *time.Timer
+	var fatalKillTimer *time.Timer
+	defer func() {
+		if fatalTimer != nil {
+			fatalTimer.Stop()
+		}
+		if fatalKillTimer != nil {
+			fatalKillTimer.Stop()
+		}
+	}()
 	for {
 		m, line, err := next("", true)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				waitErr := cmd.Wait()
-				e.fail(a, fmt.Errorf("engine exited without result: %v", waitErr))
+				if killed.Load() {
+					e.fail(a, errors.New("engine was killed after the grace period"))
+				} else if fatalCause != nil {
+					e.fail(a, fmt.Errorf("%w: engine exited without result: %v", fatalCause, waitErr))
+				} else {
+					e.fail(a, fmt.Errorf("engine exited without result: %v", waitErr))
+				}
 				return
 			}
-			kill()
-			_ = cmd.Wait()
-			e.fail(a, fmt.Errorf("protocol stream: %w", err))
+			abort()
+			if killed.Load() {
+				e.fail(a, errors.New("engine was killed after the grace period"))
+			} else {
+				e.fail(a, fmt.Errorf("protocol stream: %w", err))
+			}
 			return
 		}
 		switch m.Type {
 		case "event":
 			if m.Event.Kind == "" {
-				kill()
-				_ = cmd.Wait()
+				abort()
 				e.fail(a, errors.New("event missing kind"))
 				return
 			}
 			if err := e.append(a, m.Event.Kind, line, m.Event.Text); err != nil {
-				kill()
-				_ = cmd.Wait()
+				abort()
 				e.fail(a, fmt.Errorf("event storage: %w", err))
 				return
 			}
 		case "error":
-			if m.Fatal {
-				kill()
-				_ = cmd.Wait()
-				e.fail(a, fmt.Errorf("fatal error %s: %s", m.Error.Code, m.Error.Message))
+			if err := e.append(a, "error", line, ""); err != nil {
+				abort()
+				e.fail(a, fmt.Errorf("error storage: %w", err))
 				return
 			}
+			if m.Fatal {
+				fatalCause = fmt.Errorf("fatal error %s: %s", m.Error.Code, m.Error.Message)
+				if fatalTimer == nil {
+					fatalTimer = time.AfterFunc(e.cfg.CancelGrace, func() { _ = stdin.Close() })
+					fatalKillTimer = time.AfterFunc(2*e.cfg.CancelGrace, kill)
+				}
+			}
 		case "result":
+			if fatalTimer != nil {
+				fatalTimer.Stop()
+				fatalKillTimer.Stop()
+			}
 			if err := e.result(a, m, line); err != nil {
-				kill()
-				_ = cmd.Wait()
+				abort()
 				e.fail(a, err)
 				return
 			}
+			waitDone := make(chan error, 1)
+			go func() { waitDone <- cmd.Wait() }()
+			abortTail := func() {
+				_ = stdin.Close()
+				select {
+				case <-waitDone:
+				case <-time.After(e.cfg.CancelGrace):
+					kill()
+					<-waitDone
+				}
+			}
 			_, _, tailErr := read()
 			if tailErr == nil {
-				kill()
-				_ = cmd.Wait()
+				abortTail()
 				e.fail(a, errors.New("line after result"))
 				return
 			}
 			if !errors.Is(tailErr, io.EOF) {
-				kill()
-				_ = cmd.Wait()
+				abortTail()
 				e.fail(a, tailErr)
 				return
 			}
-			waitErr := cmd.Wait()
+			waitErr := <-waitDone
+			if killed.Load() {
+				e.fail(a, errors.New("engine was killed after the grace period"))
+				return
+			}
+			if fatalCause != nil {
+				e.fail(a, fatalCause)
+				return
+			}
 			if waitErr != nil && m.Result.Status != "canceled" {
 				e.fail(a, fmt.Errorf("engine exit: %w", waitErr))
 				return
@@ -446,8 +514,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 			return
 		default:
-			kill()
-			_ = cmd.Wait()
+			abort()
 			e.fail(a, fmt.Errorf("unexpected protocol type %s", m.Type))
 			return
 		}
@@ -614,17 +681,23 @@ func (e *Executor) fail(a store.Attempt, cause error) {
 			if err := tx.TransitionOwned(context.Background(), a.Task, store.Preparing, store.Interrupted, rev); err != nil {
 				return err
 			}
-			attemptState = "interrupted"
+			if err := tx.TransitionOwned(context.Background(), a.Task, store.Interrupted, store.RecoveryRequired, rev+1); err != nil {
+				return err
+			}
+			attemptState = "recovery_required"
 		} else if state == store.Preparing || state == store.Running {
 			if err := tx.TransitionOwned(context.Background(), a.Task, state, store.Failed, rev); err != nil {
 				return err
 			}
 		}
 		if state == store.CancelRequested {
-			if err := tx.TransitionOwned(context.Background(), a.Task, state, store.Canceled, rev); err != nil {
+			if err := tx.TransitionOwned(context.Background(), a.Task, state, store.Interrupted, rev); err != nil {
 				return err
 			}
-			attemptState = "canceled"
+			if err := tx.TransitionOwned(context.Background(), a.Task, store.Interrupted, store.RecoveryRequired, rev+1); err != nil {
+				return err
+			}
+			attemptState = "recovery_required"
 		}
 		if _, err := tx.ExecContext(context.Background(), "UPDATE attempts SET state=?,ended=? WHERE id=?", attemptState, time.Now().UTC().Format(time.RFC3339Nano), a.ID); err != nil {
 			return err
@@ -632,6 +705,12 @@ func (e *Executor) fail(a store.Attempt, cause error) {
 		var seq int64
 		if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&seq); err != nil {
 			return err
+		}
+		if attemptState == "recovery_required" {
+			if err := tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "recovery", Payload: []byte(`{"reason":"engine exit not confirmed"}`)}); err != nil {
+				return err
+			}
+			seq++
 		}
 		return tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload})
 	})

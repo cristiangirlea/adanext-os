@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -24,12 +26,24 @@ func TestHelperFakeEngine(t *testing.T) {
 	if script == "" {
 		return
 	}
-	marker := os.Getenv("ADA_FAKE_MARKER")
-	if marker != "" {
-		f, _ := os.OpenFile(marker, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-		fmt.Fprintln(f, script)
-		f.Close()
+	if script == "grandchild" {
+		time.Sleep(time.Second)
+		return
 	}
+	marker := os.Getenv("ADA_FAKE_MARKER")
+	mark := func(value string) {
+		if marker != "" {
+			f, _ := os.OpenFile(marker, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+			fmt.Fprintln(f, value)
+			f.Close()
+		}
+	}
+	mark(script)
+	var names []string
+	for _, entry := range os.Environ() {
+		names = append(names, strings.SplitN(entry, "=", 2)[0])
+	}
+	mark("env:" + strings.Join(names, ","))
 	line := func(seq int, kind string, fields map[string]any) {
 		m := map[string]any{"v": 1, "seq": seq, "type": kind, "time": time.Now().UTC().Format(time.RFC3339Nano)}
 		for k, v := range fields {
@@ -38,7 +52,23 @@ func TestHelperFakeEngine(t *testing.T) {
 		b, _ := json.Marshal(m)
 		fmt.Println(string(b))
 	}
-	line(1, "hello", map[string]any{"protocol": "v1", "backends": []any{map[string]any{"name": "codex", "available": true, "modes": []string{"readonly", "auto", "yolo"}, "options": []string{"model", "mode", "effort"}, "approvals": false}}})
+	backend := map[string]any{"name": "codex", "available": true, "modes": []string{"readonly", "auto", "yolo"}, "options": []string{"model", "mode", "effort"}, "approvals": false}
+	hello := map[string]any{"protocol": "v1", "backends": []any{backend}}
+	switch script {
+	case "bad_protocol":
+		hello["protocol"] = "v2"
+	case "backend_missing":
+		backend["name"] = "other"
+	case "backend_unavailable":
+		backend["available"] = false
+	case "mode_missing":
+		backend["modes"] = []string{"readonly"}
+	case "no_model":
+		backend["options"] = []string{"mode", "effort"}
+	case "no_effort":
+		backend["options"] = []string{"mode", "model"}
+	}
+	line(1, "hello", hello)
 	var input struct {
 		Type      string `json:"type"`
 		AttemptID string `json:"attempt_id"`
@@ -49,7 +79,12 @@ func TestHelperFakeEngine(t *testing.T) {
 			Mode    string `json:"mode"`
 		} `json:"task"`
 	}
-	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
+	var rawStart json.RawMessage
+	if err := json.NewDecoder(os.Stdin).Decode(&rawStart); err != nil {
+		os.Exit(2)
+	}
+	mark("start:" + string(rawStart))
+	if err := json.Unmarshal(rawStart, &input); err != nil {
 		os.Exit(2)
 	}
 	if input.Type != "start" || input.Task.Prompt != "objective\n\nAcceptance criteria:\ncriteria" || input.Task.Backend != "codex" || input.Task.Mode != "auto" || input.Task.Dir != filepath.Join(filepath.Dir(os.Getenv("HRN_HOME")), "work") || strings.Contains(input.Task.Dir, "never-use") {
@@ -71,6 +106,26 @@ func TestHelperFakeEngine(t *testing.T) {
 	}
 	base := map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run"}
 	line(2, "accepted", base)
+	if script == "bad_event_id" || script == "unknown_type" || script == "missing_kind" || script == "violation_eof" {
+		kind := "event"
+		id := input.AttemptID
+		event := map[string]any{"kind": "text"}
+		if script == "bad_event_id" || script == "violation_eof" {
+			id = "wrong"
+		}
+		if script == "unknown_type" {
+			kind = "mystery"
+		}
+		if script == "missing_kind" {
+			event = map[string]any{"text": "bad"}
+		}
+		line(3, kind, map[string]any{"attempt_id": id, "run_id": "fake-run", "event": event})
+		if script == "violation_eof" {
+			_, _ = os.Stdin.Read(make([]byte, 1))
+			mark("stdin closed")
+		}
+		return
+	}
 	if script == "block" || script == "cancel" || script == "ignore_cancel" {
 		if script == "ignore_cancel" {
 			for {
@@ -107,11 +162,25 @@ func TestHelperFakeEngine(t *testing.T) {
 		line(7, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "failed"}})
 		os.Exit(0)
 	}
+	if script == "stderr_cap" {
+		fmt.Fprint(os.Stderr, strings.Repeat("x", 2<<20))
+	}
+	if script == "child_stdout" {
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild")
+		child.Stdout = os.Stdout
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+	}
 	final := "done"
 	if script == "big" || script == "big_block" {
 		final = strings.Repeat("x", 100*1024)
 	}
 	line(6, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok", "final": final}})
+	if script == "after_result" {
+		line(7, "event", map[string]any{"attempt_id": input.AttemptID, "event": map[string]any{"kind": "text"}})
+	}
 	if script == "big_block" {
 		for {
 			time.Sleep(time.Hour)
@@ -331,10 +400,17 @@ func TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine(t *testing.T) {
 			e.LaunchAttempt("attempt")
 			waitAttempt(t, s, "running")
 			e.CancelTask("task")
-			waitAttempt(t, s, "canceled")
+			want := "canceled"
+			if script == "ignore_cancel" {
+				want = "recovery_required"
+			}
+			waitAttempt(t, s, want)
 			task, _ := s.Task(context.Background(), "u", "task")
-			if task.State != store.Canceled {
+			if string(task.State) != want {
 				t.Fatalf("task state = %s", task.State)
+			}
+			if script == "ignore_cancel" {
+				errorEventContains(t, s, "engine was killed after the grace period")
 			}
 		})
 	}
@@ -369,11 +445,253 @@ func TestStopBeforeAcceptanceInterruptsThePreparingTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, err := s.AttemptByID(context.Background(), "attempt")
-	if err != nil || a.State != "interrupted" {
+	if err != nil || a.State != "recovery_required" {
 		t.Fatalf("attempt = %+v: %v", a, err)
 	}
 	task, err := s.Task(context.Background(), "u", "task")
-	if err != nil || task.State != store.Interrupted {
+	if err != nil || task.State != store.RecoveryRequired {
 		t.Fatalf("task = %+v: %v", task, err)
+	}
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil || len(events) < 2 || events[len(events)-2].Kind != "recovery" {
+		t.Fatalf("events = %+v: %v", events, err)
+	}
+}
+
+func setAttemptOptions(t *testing.T, s *store.Store, model, effort string) {
+	t.Helper()
+	_, err := s.Do(context.Background(), "u", "set-options", "set-options", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(context.Background(), "UPDATE attempts SET model=?,effort=? WHERE id='attempt'", model, effort)
+		return []byte("ok"), err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func markerLines(t *testing.T, marker string) []string {
+	t.Helper()
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+func errorEventContains(t *testing.T, s *store.Store, cause string) {
+	t.Helper()
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Kind == "error" && strings.Contains(string(event.Payload), cause) {
+			return
+		}
+	}
+	t.Fatalf("no error containing %q in %+v", cause, events)
+}
+
+func TestStartOptionsFollowHello(t *testing.T) {
+	for _, tc := range []struct {
+		script, model, effort, field string
+		accepted                     bool
+	}{
+		{"happy", "", "", "", true},
+		{"happy", "model-a", "high", "both", true},
+		{"no_model", "model-a", "", "model", false},
+		{"no_effort", "", "high", "effort", false},
+	} {
+		t.Run(tc.script+"_"+tc.field, func(t *testing.T) {
+			e, s, _, marker := testExecutor(t, tc.script)
+			setAttemptOptions(t, s, tc.model, tc.effort)
+			e.LaunchAttempt("attempt")
+			want := "ended_failed"
+			if tc.accepted {
+				want = "ended_ok"
+			}
+			waitAttempt(t, s, want)
+			lines := markerLines(t, marker)
+			var start string
+			for _, line := range lines {
+				if strings.HasPrefix(line, "start:") {
+					start = strings.TrimPrefix(line, "start:")
+				}
+			}
+			if tc.accepted {
+				if start == "" {
+					t.Fatal("start missing")
+				}
+				var request struct {
+					Task map[string]any `json:"task"`
+				}
+				if err := json.Unmarshal([]byte(start), &request); err != nil {
+					t.Fatal(err)
+				}
+				for key, value := range map[string]string{"model": tc.model, "effort": tc.effort} {
+					got, present := request.Task[key]
+					if present != (value != "") || (present && got != value) {
+						t.Fatalf("%s = %v, present %v", key, got, present)
+					}
+				}
+			} else {
+				if start != "" {
+					t.Fatalf("unexpected start: %s", start)
+				}
+				errorEventContains(t, s, tc.field+" unsupported")
+			}
+		})
+	}
+}
+
+func TestInvalidHelloFailsBeforeStart(t *testing.T) {
+	for _, script := range []string{"bad_protocol", "backend_missing", "backend_unavailable", "mode_missing"} {
+		t.Run(script, func(t *testing.T) {
+			e, s, _, marker := testExecutor(t, script)
+			e.LaunchAttempt("attempt")
+			waitAttempt(t, s, "ended_failed")
+			for _, line := range markerLines(t, marker) {
+				if strings.HasPrefix(line, "start:") {
+					t.Fatalf("unexpected %s", line)
+				}
+			}
+			cause := "backend codex"
+			if script == "bad_protocol" {
+				cause = "hello protocol"
+			}
+			errorEventContains(t, s, cause)
+		})
+	}
+}
+
+func TestProtocolViolationsRecordCause(t *testing.T) {
+	for script, cause := range map[string]string{"bad_event_id": "attempt_id mismatch", "after_result": "line after result", "unknown_type": "unexpected protocol type", "missing_kind": "event missing kind"} {
+		t.Run(script, func(t *testing.T) {
+			e, s, _, _ := testExecutor(t, script)
+			e.LaunchAttempt("attempt")
+			waitAttempt(t, s, "ended_failed")
+			errorEventContains(t, s, cause)
+		})
+	}
+}
+
+func TestProtocolViolationClosesStdinBeforeKilling(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "violation_eof")
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	if !strings.Contains(strings.Join(markerLines(t, marker), "\n"), "stdin closed") {
+		t.Fatal("engine did not observe stdin EOF")
+	}
+}
+
+func TestFatalErrorAndResultAreBothStored(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "fatal")
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fatal, result bool
+	for _, event := range events {
+		if event.Kind == "error" && strings.Contains(string(event.Payload), `"fatal":true`) {
+			fatal = true
+		}
+		if event.Kind == "result" {
+			result = true
+		}
+	}
+	if !fatal || !result {
+		t.Fatalf("fatal=%v result=%v events=%+v", fatal, result, events)
+	}
+}
+
+func TestEngineEnvironmentIsAllowListed(t *testing.T) {
+	t.Setenv("SECRET_TEST_VAR", "must-not-leak")
+	e, s, _, marker := testExecutor(t, "happy")
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	for _, line := range markerLines(t, marker) {
+		if !strings.HasPrefix(line, "env:") {
+			continue
+		}
+		for _, name := range strings.Split(strings.TrimPrefix(line, "env:"), ",") {
+			if !contains([]string{"PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "HRN_HOME", "ADA_FAKE_ENGINE", "ADA_FAKE_MARKER"}, name) {
+				t.Fatalf("unexpected environment variable %s", name)
+			}
+		}
+	}
+}
+
+func TestStderrIsCappedAndPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode bits")
+	}
+	e, s, dir, _ := testExecutor(t, "stderr_cap")
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	info, err := os.Stat(filepath.Join(dir, "attempts", "attempt", "engine.stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 1<<20 || info.Mode().Perm() != 0600 {
+		t.Fatalf("stderr size=%d mode=%o", info.Size(), info.Mode().Perm())
+	}
+}
+
+func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "child_stdout")
+	started := time.Now()
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("executor waited %s for descendant stdout", elapsed)
+	}
+}
+
+func TestConcurrentLaunchOfSameAttemptStartsOnce(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "happy")
+	other := New(e.cfg)
+	go e.LaunchAttempt("attempt")
+	go other.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := e.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, line := range markerLines(t, marker) {
+		if line == "happy" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("engine starts = %d", count)
+	}
+}
+
+func TestWindowsEngineWithoutExeSuffixIsRefused(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows executable naming")
+	}
+	e, s, dir, marker := testExecutor(t, "happy")
+	data, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "engine-without-suffix")
+	if err := os.WriteFile(path, data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.EnginePath = path
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	errorEventContains(t, s, ".exe")
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("engine launched: %v", err)
 	}
 }
