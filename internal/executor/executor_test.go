@@ -346,6 +346,18 @@ func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
 	}
 }
 
+func TestResultBeforeNaturalExitWithSlowStorageEndsOK(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "delayed_exit")
+	e.cfg.CancelGrace = 50 * time.Millisecond
+	e.afterAppend = func() { time.Sleep(3 * e.cfg.CancelGrace) }
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil || len(events) != 4 || events[len(events)-1].Kind != "result" {
+		t.Fatalf("events = %+v: %v", events, err)
+	}
+}
+
 type notificationCounter struct{ count atomic.Int32 }
 
 func (n *notificationCounter) Notify(string) { n.count.Add(1) }
@@ -802,6 +814,24 @@ func TestStderrDescendantFitsStopBudget(t *testing.T) {
 	if err := e.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestExitedEngineWithDescendantStderrEndsOK(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "child_stderr")
+	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = 100 * time.Millisecond
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Kind == "info" && strings.Contains(string(event.Payload), "a descendant kept stderr open after the engine exited") {
+			return
+		}
+	}
+	t.Fatalf("missing stderr descendant info event: %+v", events)
 }
 
 func TestRecordCauseReportsAppendFailure(t *testing.T) {

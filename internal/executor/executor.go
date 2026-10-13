@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/artifact"
@@ -44,11 +45,12 @@ type active struct {
 	once   sync.Once
 }
 type Executor struct {
-	cfg     Config
-	mu      sync.Mutex
-	active  map[string]*active
-	stopped bool
-	wg      sync.WaitGroup
+	cfg         Config
+	mu          sync.Mutex
+	active      map[string]*active
+	stopped     bool
+	wg          sync.WaitGroup
+	afterAppend func() // Set only by tests to simulate slow event storage.
 }
 
 func New(cfg Config) *Executor {
@@ -251,20 +253,24 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	var processMu sync.Mutex
 	var exited, killRequested bool
 	var exitErr error
-	var exitTime time.Time
 	processDone := make(chan struct{})
 	kill := func() {
 		processMu.Lock()
-		if !exited && cmd.Process.Kill() == nil {
+		killed := !exited && cmd.Process.Kill() == nil
+		if killed {
 			killRequested = true
 		}
 		processMu.Unlock()
-		// A descendant can retain stdout after the engine exits.
-		_ = stdout.Close()
+		if killed {
+			_ = stdout.Close()
+		}
 	}
+	var readProgress atomic.Int64
+	var reading atomic.Bool
 	var timerMu sync.Mutex
-	var closeTimer, killTimer *time.Timer
+	var closeTimer, killTimer, idleTimer *time.Timer
 	shutdownStarted := false
+	shutdownStopped := false
 	startShutdown := func() {
 		timerMu.Lock()
 		defer timerMu.Unlock()
@@ -278,19 +284,44 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	stopShutdown := func() {
 		timerMu.Lock()
 		defer timerMu.Unlock()
+		shutdownStopped = true
 		if closeTimer != nil {
 			closeTimer.Stop()
 		}
 		if killTimer != nil {
 			killTimer.Stop()
 		}
+		if idleTimer != nil {
+			idleTimer.Stop()
+		}
+	}
+	var checkIdle func(int64)
+	checkIdle = func(last int64) {
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		if shutdownStopped {
+			return
+		}
+		current := readProgress.Load()
+		if reading.Load() && current == last {
+			// The engine is gone and the reader is blocked on a descendant's pipe.
+			_ = stdout.Close()
+			return
+		}
+		idleTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkIdle(current) })
 	}
 	go func() {
 		err := cmd.Wait()
 		processMu.Lock()
-		exitErr, exited, exitTime = err, true, time.Now()
+		exitErr, exited = err, true
 		processMu.Unlock()
 		startShutdown()
+		timerMu.Lock()
+		if !shutdownStopped {
+			last := readProgress.Load()
+			idleTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkIdle(last) })
+		}
+		timerMu.Unlock()
 		close(processDone)
 	}()
 	waitExit := func() (bool, error) {
@@ -299,10 +330,14 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		processMu.Lock()
 		defer processMu.Unlock()
 		if exitErr != nil {
+			if errors.Is(exitErr, exec.ErrWaitDelay) && cmd.ProcessState.Success() {
+				const detail = "a descendant kept stderr open after the engine exited"
+				if err := e.append(a, "info", []byte(`{"event":{"kind":"info","text":"`+detail+`"}}`), ""); err != nil {
+					return killRequested, fmt.Errorf("exit info storage: %w", err)
+				}
+				return killRequested, nil
+			}
 			return killRequested, exitErr
-		}
-		if cmd.ProcessState == nil || exitTime.IsZero() {
-			return killRequested, errors.New("engine exit state missing")
 		}
 		return killRequested, nil
 	}
@@ -338,7 +373,12 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	read := func() (message, []byte, error) {
 		var line []byte
 		for {
+			reading.Store(true)
 			part, err := reader.ReadSlice('\n')
+			if len(part) != 0 {
+				readProgress.Add(1)
+			}
+			reading.Store(false)
 			if len(line)+len(part) > 4<<20 {
 				return message{}, nil, errors.New("line too long")
 			}
@@ -385,7 +425,18 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			_, _, err := read()
 			if err != nil {
 				if !errors.Is(err, io.EOF) {
-					_, _ = io.Copy(io.Discard, reader)
+					buf := make([]byte, 32*1024)
+					for {
+						reading.Store(true)
+						n, drainErr := reader.Read(buf)
+						if n != 0 {
+							readProgress.Add(1)
+						}
+						reading.Store(false)
+						if drainErr != nil {
+							break
+						}
+					}
 				}
 				killed, waitErr := waitExit()
 				return err, killed, waitErr
@@ -610,6 +661,9 @@ func (e *Executor) append(a store.Attempt, kind string, payload []byte, session 
 	})
 	if err == nil && e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)
+	}
+	if err == nil && e.afterAppend != nil {
+		e.afterAppend()
 	}
 	return err
 }
