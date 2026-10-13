@@ -15,11 +15,13 @@ jobs:
         # around the job, so only merged code may reach it; pull requests include branches written
         # by agents. Without CI_RUNNER_WINDOWS there is no Windows leg.
         os: ${{ github.event_name == 'push' && vars.CI_RUNNER_WINDOWS != '' && fromJSON('["linux", "windows"]') || fromJSON('["linux"]') }}
-    # Only the owner's runners, never GitHub's: Linux on the local cluster's lab-ada-os scale set
-    # (CI_RUNNER), Windows on the runner on the owner's PC (CI_RUNNER_WINDOWS). Without CI_RUNNER
-    # the job is skipped, and a skipped job is not a pass.
+    # The owner's runners: Linux on the local cluster's lab-adanext-os scale set (CI_RUNNER),
+    # Windows on the runner on the owner's PC (CI_RUNNER_WINDOWS). The repository is public, so a
+    # pull request from a fork never reaches them: it runs on GitHub's runner, free for public
+    # repositories, after the approval the cluster requires for fork runs. Without CI_RUNNER the
+    # job is skipped, and a skipped job is not a pass.
     if: ${{ vars.CI_RUNNER != '' }}
-    runs-on: ${{ matrix.os == 'linux' && vars.CI_RUNNER || vars.CI_RUNNER_WINDOWS }}
+    runs-on: ${{ matrix.os == 'windows' && vars.CI_RUNNER_WINDOWS || ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest') }}
     env:
       # The lab runner's container sees the node's 24 CPUs within a 3 GiB memory limit; the SQLite
       # driver is a large package to compile, so build at most four packages at once.
