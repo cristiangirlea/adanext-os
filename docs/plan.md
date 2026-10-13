@@ -4,6 +4,8 @@ Date: 2026-10-11
 
 Status: Planning complete. Verified against the machine and the Harness source on 2026-10-11 (section 8). Ada implementation has not started. Repository inspection, model discovery, and one bounded read-only Harness audit have been performed. This file is the standalone handoff for continuing the work in Claude or another coding agent.
 
+Amended 2026-10-13 (the decisions log of `docs/implementation-status.md`, entries dated 2026-10-13): the product is AdaNext OS, repository `adanext-os`, delivered as an installed application, a web interface on the owner's own network and, later, a bootable system; `adad` serves one HTTP and SSE API to both shells; the store carries users and actors; `adanext.si` distributes the product and hosts no service; the repositories go public. This document keeps its original text and names.
+
 ## Start here in Claude
 
 Read this whole document before changing files. It contains the product decisions already made with Cristian, the architecture, the implementation sequence, and the acceptance gates. Do not restart product discovery or ask him to repeat these decisions. Section 8 records the verification of this file on 2026-10-11 and the gaps it found; M0 items 11-14 come from it.

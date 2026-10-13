@@ -1,16 +1,17 @@
 # Implementation status
 
-Updated 2026-10-11. Statuses: not started, in progress, implemented (code merged), verified
+Updated 2026-10-13. Statuses: not started, in progress, implemented (code merged), verified
 (evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
 are in `docs/backlog.md`.
 
 | Milestone | Status | Where | Next |
 |---|---|---|---|
-| M0 Baseline | in progress | this repository, bootstrap branch | Repository on GitHub, CI runner, merge the bootstrap |
+| M0 Baseline | in progress | this repository, bootstrap branch | Merge the bootstrap; M0.3 the name and the rename; M0.4 public |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | in progress | M2.1 store on a local branch stacked on the bootstrap | Its pull request opens once the bootstrap merges |
 | M3 Project workspaces | not started | | |
 | M4 First local workflow | not started | | |
+| M4b Web access | not started | | After M4, before M5 (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
 | M6 Resume intelligence | not started | | |
 | M7 Review and integration | not started | | |
@@ -225,20 +226,95 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
   fixed, but it confirms the point: a text check is a guard rail against mistakes, not a security
   boundary. The boundary for `main` is branch protection on GitHub (owner action 6). Review rounds
   on the guard stop here; anything further is recorded as a known limit.
+- **2026-10-13, the name.** "Ada OS" is another product's name, so this one is AdaNext OS: the
+  brand word `adanext`, one word, as in the domain `adanext.si` and the `adanext-map` repository;
+  short form AdaNext. The repository becomes `adanext-os`: the owner renames it on GitHub, the old
+  URL redirects, the runners' GitHub App installation follows the repository id, and the
+  `lab-ada-os` scale set, which does not, is renamed in an infra slice. Binaries keep short names,
+  as `adamap` does: `adad`, `ada-guest`. `docs/plan.md` keeps its original text and names, as the
+  docs rule asks; everything else says AdaNext OS.
+- **2026-10-13, three forms of one product.** AdaNext OS ships as an installed application (the
+  Electron shell, as planned), as a web interface (`adad` serves the same React UI over HTTPS to
+  browsers on the owner's own network, each person signed in as themselves), and later as a
+  bootable system (an image that runs `adad` and the web interface: the plan's "bootable Linux
+  distribution"). One UI and one coordinator; the shells differ only in how they reach it.
+  Reason: the first second user works from another computer on the same network, and the
+  bootable form is the web form preinstalled, so designing the web form now makes the later
+  system a packaging task rather than a new product.
+- **2026-10-13, one API for both shells.** `adad` speaks HTTP/1.1, with server-sent events for the
+  event stream, on the per-user named pipe or owner-only Unix socket of M2.2 (Go serves HTTP on
+  any listener; Electron's main process reaches a pipe through Node's `socketPath`), and the web
+  form is the same server on a TLS listener. M2.2's framing changes from NDJSON to HTTP and SSE;
+  the pipe and its permissions, the versioning, idempotency keys, expected revisions and
+  reconnection from a sequence number stay. Reason: two framings of one request set would drift,
+  and the renderer's narrow typed API (`docs/plan.md` section 2, desktop boundary) was designed
+  for an untrusted renderer, which makes it the right surface for a browser too.
+- **2026-10-13, people in the store.** M2.1 adds a `User` record and project membership, and an
+  actor on `Task`, `Attempt`, `Review` and `PermissionDecision`; a permission prompt goes to the
+  task's actor. The desktop form has one implicit local user. Reason: a column now is cheap and a
+  migration later is not (`docs/plan.md` section 8 used the same argument for the concurrency
+  cap), and M5 to M8 build on this schema.
+- **2026-10-13, whose provider account runs a task.** Every AdaNext user has a credential profile:
+  the engine runs with `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and the other CLIs' equivalents under
+  that user's directory in `adad`'s state, so each person signs the provider CLIs in once (the
+  provider's own browser or device flow, relayed through the web interface) and their tasks run
+  on their own plan. A task never runs on another user's login. Reason: the rule in Harness's
+  durable-workers specification never to share the owner's account implicitly, and the
+  subscriptions' terms; the plan already applies the same rule inside guests (section 4).
+- **2026-10-13, reaching it from the network.** Loopback only, by default. The network listener is
+  a setting: one interface address, TLS required (certificate and key together or neither, as
+  Harness's server does), a name under the owner's domain (`home.adanext.si`, a DNS-only record
+  on the private address) with a Let's Encrypt certificate from the DNS-01 challenge through a
+  Cloudflare API token scoped to that zone's DNS, renewed by `adad`. The first web slice takes
+  the certificate from files; the ACME client is the slice after. Accounts are local and created
+  by the owner, never from the network; the credential scheme (passkeys, or a password with a
+  memory-hard hash) is decided in the slice; sessions are cookies. Reason: the owner's rule that
+  servers bind loopback unless asked; a certificate from a public CA spares every device a
+  private CA, and DNS-01 is the challenge that works for a host nobody outside can reach.
+- **2026-10-13, M4b Web access.** A milestone between M4 and M5: the TLS listener, accounts and
+  sessions, per-user project visibility and permission routing, credential profiles, and a
+  Playwright run from a second browser context. Lead model Sol at high effort (it is persistence
+  and permissions), with an independent review. Reason: the first second user is on the network
+  now, and multi-user state is cheapest before M5 to M8 build on the store.
+- **2026-10-13, adanext.si and public repositories.** The site distributes the product: downloads,
+  documentation, later a sponsorship link. It hosts no AdaNext service, no accounts and no model
+  calls; nothing here is for a hosted or many-tenant deployment, and Harness's `server/` work
+  stays out of it. The repositories go public under MIT, like `harness` and `adanext-map`.
+  Before the flip: a LICENSE, the public-repository CI pattern (fork pull requests kept off the
+  owner's runner, fork approval through infra's `PUBLIC_REPOS`), and the owner's call on which
+  machine details and local paths stay in `docs/plan.md` and this file (M0.4). Branch protection
+  on `main`, which GitHub Free denies a private repository, becomes available (owner action 6).
+  Reason: the owner's decision of 2026-10-13, replacing "private" of 2026-10-11.
+- **2026-10-13, repositories.** `adanext-os` holds `adad`, the UI, the Electron shell,
+  `ada-guest` and packaging, because the API and the UI change together and splitting them
+  would mean releasing the UI as an artifact for `adad` to embed. `adanext-images` (VM templates,
+  the image factory, later the bootable system) is created when M5 starts: another toolchain,
+  large artifacts, its own cadence. The site is a repository of its own. In this repository the
+  React app lives in `ui/`, loaded by the Electron shell and served by `adad`, from M2.4;
+  `desktop/` keeps the Electron shell and its pins.
 
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
-2. Runners: infra #55 merged on 2026-10-11 (`290aa6e`), so Flux runs the `lab-ada-os` scale set.
-   Still the owner's: add `ada-os` to the runners' GitHub App at
-   https://github.com/settings/installations/166537844; add `"ada-os"` to `ci_runner_repos` in
-   the untracked `infra/tofu/terraform.tfvars`; then, from `infra/tofu` on `origin/main`:
-   `GITHUB_TOKEN=$(gh auth token) tofu apply -target='module.runner_vars.github_actions_variable.ci_runner["ada-os"]'`.
+2. Rename the repository: `gh repo rename adanext-os -R cristiangirlea/ada-os` (the decision of
+   2026-10-13). Then the runners: infra #55 (merged 2026-10-11, `290aa6e`) created the
+   `lab-ada-os` scale set, which an infra slice renames to `lab-adanext-os` (the owner merges,
+   because it deploys). Still the owner's afterwards: add `adanext-os` to the runners' GitHub App
+   at https://github.com/settings/installations/166537844; add `"adanext-os"` to
+   `ci_runner_repos` in the untracked `infra/tofu/terraform.tfvars`; then, from `infra/tofu` on
+   `origin/main`:
+   `GITHUB_TOKEN=$(gh auth token) tofu apply -target='module.runner_vars.github_actions_variable.ci_runner["adanext-os"]'`.
+   Until the variable exists, CI is skipped on every pull request, which is not a pass.
 3. Decide whether Harness `antigravity-cli` lands through a reviewed pull request.
-4. Confirm the owner-decisions table in `docs/plan.md` section 1.
+4. Confirm the owner-decisions table in `docs/plan.md` section 1 and the amendments of 2026-10-13
+   in the decisions log.
 5. Before M5: approve installing Packer and its VMware plugin at pinned versions, and choose the
    VM storage drive.
-6. Branch protection for `main`: GitHub Free does not offer it for private repositories (the API
-   answers "Upgrade to GitHub Pro or make this repository public"). The owner keeps `ada-os`
-   private (2026-10-11), so until a plan change the protection is the deny rules, the push guard
-   and merging only through pull requests. Upgrading is the owner's paid decision.
+6. Branch protection for `main`: GitHub Free offers it to public repositories only (the API
+   answers "Upgrade to GitHub Pro or make this repository public"). The owner decided on
+   2026-10-13 to make the repository public. After M0.4, the flip is the owner's:
+   `gh repo edit cristiangirlea/adanext-os --visibility public --accept-visibility-change-consequences`,
+   then protect `main` (pull requests only, no force pushes, no deletion). Until then the
+   protection is the deny rules, the push guard and merging only through pull requests.
+7. For M4b: a Cloudflare API token with `Zone > DNS > Edit` on `adanext.si` alone, kept in
+   `adad`'s configuration and never in a repository, and the `home.adanext.si` record.
