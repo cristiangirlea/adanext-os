@@ -8,7 +8,7 @@ are in `docs/backlog.md`.
 |---|---|---|---|
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
-| M2 Durable coordinator | in progress | M2.1 store: #18 and #24 merged; M2.2a IPC: #28 | M2.2b `adad` and the `/v1` API (#26) |
+| M2 Durable coordinator | in progress | M2.1 store: #18 and #24 merged, verified; M2.2a IPC: #28 (open) | M2.2b `adad` and the `/v1` API (#26) |
 | M3 Project workspaces | not started | | |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
@@ -170,7 +170,7 @@ on a clean worktree at that commit built `hrn.exe` for windows/amd64 with go1.26
 `hrn exec --protocol v1` with a v1 `hello` (revision reported as unknown, as expected without a VCS
 stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 
-### M2.1 store (2026-10-11 to 2026-10-13, #18 and #24, implemented)
+### M2.1 store (2026-10-11 to 2026-10-13, #18 and #24, verified at `09ff3bf`)
 
 `internal/store` on modernc.org/sqlite v1.59.0, written in runs `20261011-165945-8a1560`,
 `20261011-171916-6142ca` on a branch stacked on the bootstrap, at `6925b33`. Checks:
@@ -196,16 +196,19 @@ chmod hook tests skipped on Windows). The pull request is still to open, after a
 review; nothing is verified or ticked. Review run `20261013-185055-ec8024` found the replay gap,
 fixed with the scope gate and its regression test; its two other findings are #15 and #16.
 
-2026-10-13, merge: #18 at `205c128`, CI green on ubuntu-latest; `bash scripts/check.sh` on the
+Later on 2026-10-13, the merges: #18 at `205c128`, CI green on ubuntu-latest (run 38427995495); `bash scripts/check.sh` on the
 owner's PC passed at that head (run `20261013-201027-c1982b`); a security read of the whole diff
 (run `20261013-200746-cb6e25`) found nothing blocking and three gaps: idempotent responses not
 bound to their project (#20), unknown and foreign tasks told apart (#21), and the database, its
-sidecars and backups created readable by other users on Unix, fixed in #24 before it was filed.
+sidecars and backups created readable by other users on Unix, fixed in #24 and so not filed as
+an issue.
 #24 (`3f20c6b`): the database file is created 0600 before SQLite opens it, backups are created
 with `O_EXCL` and 0600; `bash scripts/check.sh` on Windows and, in a `golang:1.26` container as uid
 1000, `go vet`, `go test` and `go test -race` on Linux passed (run `20261013-202333-1a9696`);
-review run `20261013-201921-3d3373`, its missing tests added, the rest #23. M2.1 stays
-`implemented`: the Windows CI leg on `main` is its next evidence.
+review run `20261013-201921-3d3373`, its missing tests added, the rest #23; the same review was
+its security read, #24 being the fix itself; CI green on ubuntu-latest (run 38438816831). On
+`main`, CI passed on ubuntu-latest and windows-latest at `36174d9` (run 38436772635) and at
+`09ff3bf` (run 38441899352), so M2.1 is verified at `09ff3bf`.
 
 ## Decisions log
 

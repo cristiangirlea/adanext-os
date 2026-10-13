@@ -25,7 +25,8 @@ $root=(Get-Location).Path; $h="$root\.hrn\sandbox"; New-Item -ItemType Directory
 - [x] **M0.1 Bootstrap.** Agent setup, CI on the owner's runner, `scripts/check.sh`, the engine
   pin and `internal/engine`, desktop version pins and lockfile, plan, status and backlog.
   Acceptance: `bash scripts/check.sh` passes; the engine tests reject short revisions, unknown
-  fields and wrong hashes; CI green. Done: #1, 2026-10-13, before CI could run (no runner then).
+  fields and wrong hashes; CI green. Done: #1, 2026-10-13, before CI could run (no runner then);
+  CI green on GitHub's runners, Linux and Windows, on `main` from `e4a2c14` (#14).
 - [x] **M0.2 Runner.** Superseded: infra #55 added a `lab-ada-os` scale set on 2026-10-11, and
   infra #61 removes it, since the repository is public and runs on GitHub's runners (decisions
   log, 2026-10-13).
@@ -99,8 +100,8 @@ records stay loadable, README and PLAN.md updated, tests first.
   actors refused by foreign keys; an attempt's actor is a member at creation. A permission prompt
   addressed to the task's actor is M2.3's acceptance, where permission decisions arrive. A helper
   process killed mid-transaction leaves a consistent database; restore from a backup.
-  Done: #18, 2026-10-13, merge `36174d9`; the files private to the user on Unix: #24, merge
-  `09ff3bf`.
+  Done: #18, 2026-10-13, merge `36174d9`; the files private to the user on Unix: #24,
+  2026-10-13, merge `09ff3bf`.
 - [ ] **M2.2 `adad`, singleton and IPC.** Split in two slices (decisions log, 2026-10-13): M2.2a,
   `internal/ipc` and the single-coordinator lock (#25), and M2.2b, `cmd/adad` and the `/v1` API
   (#26). `cmd/adad` listens, as `docs/plan.md` section 2 says,
