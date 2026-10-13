@@ -40,8 +40,10 @@ func listen(cfg Config) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	return winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: "O:" + sid + "D:P(A;;GA;;;" + sid + ")"})
+	return winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: pipeSDDL(sid)})
 }
+
+func pipeSDDL(sid string) string { return "O:" + sid + "D:P(A;;GA;;;" + sid + ")" }
 
 // Dial connects only when the pipe server process belongs to the current user.
 func Dial(ctx context.Context, cfg Config) (net.Conn, error) {

@@ -12,7 +12,6 @@ import (
 )
 
 func TestSocketAndDirectoryBelongOnlyToTheOwner(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	cfg := Config{StateDir: t.TempDir(), Name: "permissions"}
 	lock, err := Acquire(cfg)
 	if err != nil {
@@ -45,7 +44,6 @@ func TestSocketAndDirectoryBelongOnlyToTheOwner(t *testing.T) {
 }
 
 func TestUnsafeSocketDirectoryIsRefusedByListenAndDial(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	for _, kind := range []string{"wide mode", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := Config{StateDir: t.TempDir(), Name: "unsafe"}
@@ -92,7 +90,6 @@ func TestSocketDirectoryOwnedByAnotherUserIsRefused(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("changing directory ownership requires root")
 	}
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	cfg := Config{StateDir: t.TempDir(), Name: "foreign"}
 	dir := filepath.Join(cfg.StateDir, "run")
 	if err := os.Mkdir(dir, 0700); err != nil {
@@ -117,7 +114,6 @@ func TestSocketDirectoryOwnedByAnotherUserIsRefused(t *testing.T) {
 }
 
 func TestListenReplacesAnUnservedStaleSocket(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	cfg := Config{StateDir: t.TempDir(), Name: "stale"}
 	dir := filepath.Join(cfg.StateDir, "run")
 	if err := os.Mkdir(dir, 0700); err != nil {
@@ -145,7 +141,6 @@ func TestListenReplacesAnUnservedStaleSocket(t *testing.T) {
 }
 
 func TestListenRefusesANonSocketEndpoint(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	cfg := Config{StateDir: t.TempDir(), Name: "occupied"}
 	lock, err := Acquire(cfg)
 	if err != nil {
@@ -162,5 +157,87 @@ func TestListenRefusesANonSocketEndpoint(t *testing.T) {
 	if listener, err := lock.Listen(); err == nil {
 		listener.Close()
 		t.Fatal("Listen replaced a non-socket endpoint")
+	}
+}
+
+func TestDifferentStateDirsWithSameNameKeepBothSockets(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	configs := []Config{
+		{StateDir: t.TempDir(), Name: "shared"},
+		{StateDir: t.TempDir(), Name: "shared"},
+	}
+	for _, cfg := range configs {
+		lock, err := Acquire(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Release()
+		listener, err := lock.Listen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+	}
+	for _, cfg := range configs {
+		conn, err := Dial(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("Dial(%s): %v", cfg.StateDir, err)
+		}
+		conn.Close()
+	}
+}
+
+func TestXDGRuntimeDirDoesNotChangeSocketPath(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	cfg := Config{StateDir: t.TempDir(), Name: "location"}
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	listener, err := lock.Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	want := filepath.Join(cfg.StateDir, "run", cfg.Name+".sock")
+	if listener.Addr().String() != want {
+		t.Fatalf("socket path = %q, want %q", listener.Addr(), want)
+	}
+}
+
+func TestCloseDoesNotRemoveReplacementSocket(t *testing.T) {
+	cfg := Config{StateDir: t.TempDir(), Name: "replacement"}
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	first, err := lock.Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := first.Addr().String()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	second, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	secondInfo, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	currentInfo, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("replacement socket removed: %v", err)
+	}
+	if !os.SameFile(secondInfo, currentInfo) {
+		t.Fatal("replacement socket changed")
 	}
 }

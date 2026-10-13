@@ -12,9 +12,6 @@ import (
 )
 
 func socketDir(cfg Config) string {
-	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
-		return filepath.Join(runtimeDir, "adanext")
-	}
 	return filepath.Join(cfg.StateDir, "run")
 }
 
@@ -24,11 +21,10 @@ func privateSocketDir(cfg Config, create bool) (string, error) {
 	}
 	dir := socketDir(cfg)
 	if create {
-		if os.Getenv("XDG_RUNTIME_DIR") == "" {
-			if err := os.MkdirAll(dir, 0700); err != nil {
-				return "", err
-			}
-		} else if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
+			return "", err
+		}
+		if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 			return "", err
 		}
 	}
@@ -64,14 +60,45 @@ func listen(cfg Config) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0600); err != nil {
+	l.SetUnlinkOnClose(false)
+	boundInfo, err := os.Lstat(path)
+	if err != nil {
 		l.Close()
 		return nil, err
 	}
-	return &ownerListener{UnixListener: l}, nil
+	owner := &ownerListener{UnixListener: l, path: path, boundInfo: boundInfo}
+	if err := os.Chmod(path, 0600); err != nil {
+		owner.Close()
+		return nil, err
+	}
+	return owner, nil
 }
 
-type ownerListener struct{ *net.UnixListener }
+type ownerListener struct {
+	*net.UnixListener
+	path      string
+	boundInfo os.FileInfo
+}
+
+func (l *ownerListener) Close() error {
+	closeErr := l.UnixListener.Close()
+	info, err := os.Lstat(l.path)
+	if os.IsNotExist(err) {
+		return closeErr
+	}
+	if err != nil {
+		if closeErr != nil {
+			return closeErr
+		}
+		return err
+	}
+	if os.SameFile(l.boundInfo, info) {
+		if err := os.Remove(l.path); err != nil && closeErr == nil {
+			return err
+		}
+	}
+	return closeErr
+}
 
 func (l *ownerListener) Accept() (net.Conn, error) {
 	for {

@@ -86,6 +86,14 @@ func TestPipeServerSIDAllowsOnlyTheCurrentUser(t *testing.T) {
 	}
 }
 
+func TestPipeSDDLHasUserOwnerAndProtectedSingleACE(t *testing.T) {
+	sid := "S-1-5-21-123-456-789-1001"
+	want := "O:" + sid + "D:P(A;;GA;;;" + sid + ")"
+	if got := pipeSDDL(sid); got != want {
+		t.Fatalf("pipeSDDL(%q) = %q, want %q", sid, got, want)
+	}
+}
+
 func TestASecondListenOnTheSameNameFails(t *testing.T) {
 	firstLock, err := Acquire(Config{StateDir: t.TempDir(), Name: "second"})
 	if err != nil {
