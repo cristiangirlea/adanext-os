@@ -12,6 +12,10 @@ taking a slice, and don't reopen a recorded decision.
 | Path | Holds |
 |---|---|
 | `internal/engine/` | The pinned Harness engine: its source revision and the identity of a built binary. |
+| `cmd/adad/` | The coordinator process and its lifecycle. |
+| `internal/api/` | Versioned HTTP API and event subscriptions. |
+| `internal/store/` | SQLite state, schema migrations, and task records. |
+| `internal/ipc/` | Private local listener and singleton lock. |
 | `engine/engine.json` | The Harness revision Ada runs. Change it only in a slice that says why. |
 | `desktop/` | The Electron, React and TypeScript shell. Versions are pinned; code arrives in M2 and M4. |
 | `scripts/check.sh` | Everything CI runs, in order. |
@@ -20,9 +24,8 @@ taking a slice, and don't reopen a recorded decision.
 | `scripts/build-engine.sh` | Builds `hrn` from a clean Harness checkout at the pinned revision into `.engine/`. |
 | `docs/` | Plan, status and backlog. |
 
-Planned, not yet present: `cmd/adad` (the coordinator), `internal/store` (SQLite),
-`internal/ipc`, `internal/executor`, `ui/` (the React app both shells load, from M2.4), and
-`cmd/ada-guest` (M5).
+Planned, not yet present: `internal/executor`, `ui/` (the React app both shells load,
+from M2.4), and `cmd/ada-guest` (M5).
 
 ## Build and test
 
