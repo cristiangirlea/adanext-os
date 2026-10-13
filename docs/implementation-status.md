@@ -11,7 +11,7 @@ are in `docs/backlog.md`.
 | M2 Durable coordinator | in progress | M2.1 store on a local branch stacked on the bootstrap | Its pull request opens once the bootstrap merges |
 | M3 Project workspaces | not started | | |
 | M4 First local workflow | not started | | |
-| M4b Web access | not started | | After M4, before M5 (decisions log, 2026-10-13) |
+| M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
 | M6 Resume intelligence | not started | | |
 | M7 Review and integration | not started | | |
@@ -258,9 +258,18 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
   the engine runs with `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and the other CLIs' equivalents under
   that user's directory in `adad`'s state, so each person signs the provider CLIs in once (the
   provider's own browser or device flow, relayed through the web interface) and their tasks run
-  on their own plan. A task never runs on another user's login. Reason: the rule in Harness's
-  durable-workers specification never to share the owner's account implicitly, and the
-  subscriptions' terms; the plan already applies the same rule inside guests (section 4).
+  on their own plan. A task never runs on another user's login. The selection fails closed: an
+  attempt whose actor has no profile, or whose sign-in the CLI reports invalid, is refused with no
+  fallback to another login, and a continuation stays in the profile of the attempt it continues.
+  Because the engine passes its environment on to the CLI (Harness `internal/agent/cli.go` at the
+  pin), the launcher builds the environment explicitly, with nothing of `adad`'s own
+  configuration or secrets in it, and the execution boundary must keep the other profiles and
+  `adad`'s state out of a task's reach: which mechanism (a separate OS account per profile, or
+  the VM executor of section 4) is decided and tested before M4b lets a second user run anything,
+  since the plan already says a worktree alone is no protection against hostile code (section 4).
+  Reason: the rule in Harness's durable-workers specification never to share the owner's account
+  implicitly, and the subscriptions' terms; the plan already applies the same rule inside guests
+  (section 4).
 - **2026-10-13, reaching it from the network.** Loopback only, by default. The network listener is
   a setting: one interface address, TLS required (certificate and key together or neither, as
   Harness's server does), a name under the owner's domain (`home.adanext.si`, a DNS-only record
@@ -274,8 +283,16 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 - **2026-10-13, M4b Web access.** A milestone between M4 and M5: the TLS listener, accounts and
   sessions, per-user project visibility and permission routing, credential profiles, and a
   Playwright run from a second browser context. Lead model Sol at high effort (it is persistence
-  and permissions), with an independent review. Reason: the first second user is on the network
-  now, and multi-user state is cheapest before M5 to M8 build on the store.
+  and permissions), with an independent review. Its completion evidence is a real run from a
+  second computer, not a second browser context alone: a browser on another machine reaching
+  `https://home.adanext.si`, a separate local account, that user's own project and task on their
+  own provider sign-in, a permission prompt answered by that user and invisible to the other, and
+  reconnection after a dropped connection. Section 6's v1 gate gains a fifth lane for it, the web
+  workflow from a second computer against a Windows host; an Ubuntu host joins when lane 4's host
+  exists. The four desktop lanes stay. M4b completes before M5 completes; section 8's parallel
+  policy, under which the M5 image factory and VMware spike may start from M3, is unchanged.
+  Reason: the first second user is on the network now, and multi-user state is cheapest before
+  M5 to M8 build on the store.
 - **2026-10-13, adanext.si and public repositories.** The site distributes the product: downloads,
   documentation, later a sponsorship link. It hosts no AdaNext service, no accounts and no model
   calls; nothing here is for a hosted or many-tenant deployment, and Harness's `server/` work
@@ -292,6 +309,15 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
   large artifacts, its own cadence. The site is a repository of its own. In this repository the
   React app lives in `ui/`, loaded by the Electron shell and served by `adad`, from M2.4;
   `desktop/` keeps the Electron shell and its pins.
+- **2026-10-13, amendment review.** The independent review of this amendment (Codex Sol, read-only,
+  run `20261013-121541-eba24c`) found two blocking gaps, both fixed above: the credential profiles
+  promised isolation without an enforceable boundary (now: selection fails closed, an explicit
+  environment, a boundary mechanism decided and tested before a second user runs anything), and
+  M4b's evidence could pass on one machine (now: a real run from a second computer, a fifth lane
+  of the v1 gate). Its eight non-blocking findings are issues #3 to #10: identity and
+  authorization semantics, the SSE cursor contract, the browser boundary of the shared UI, LAN
+  session security, the provider sign-in relay and approval prompts, the Cloudflare token's blast
+  radius and renewal, stopping a shared coordinator, and the images compatibility manifest.
 
 ## Owner actions pending
 

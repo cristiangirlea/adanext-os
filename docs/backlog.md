@@ -133,9 +133,12 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
 - **M4 First local workflow:** desktop import, task, edit, checks, diff and review on Windows and
   Ubuntu with a real backend.
 - **M4b Web access:** the TLS listener and its setting, local accounts and sessions, per-user
-  project visibility and permission routing, credential profiles and the relayed provider
-  sign-in, `home.adanext.si` with a certificate from files, then the DNS-01 client; Playwright from
-  a second browser context.
+  project visibility and permission routing, credential profiles whose selection fails closed and
+  an execution boundary that keeps other profiles and `adad`'s secrets out of a task's reach, the
+  relayed provider sign-in, `home.adanext.si` with a certificate from files, then the DNS-01
+  client. Evidence: Playwright from a second browser context, and a real run from a second
+  computer over HTTPS (own account, project, task and provider sign-in, a permission prompt
+  answered there, reconnect), the fifth lane of the v1 gate (decisions log, 2026-10-13).
 - **M5 VMware execution:** Packer template, guest service, isolated network, guest login, previews,
   recovery.
 - **M6 Resume intelligence:** evidence extraction, cited summaries, next-task proposals,
