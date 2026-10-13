@@ -19,5 +19,5 @@ These hold for every window; the post-edit hook refuses the worst violations.
 - Versions are exact pins in `package.json` with a committed lockfile. Change a pin only in a slice
   that says why, and prefer a release at least two weeks old.
 - Tests: Vitest for components and logic, Playwright for the real workflow against a real `adad`.
-  Cap workers (`--maxWorkers`, `workers`) for the lab runner's 3 GiB limit. Milestone demos use the
+  Cap workers (`--maxWorkers`, `workers`) so a run fits a hosted runner's memory. Milestone demos use the
   real coordinator; fixtures are for tests only.
