@@ -17,8 +17,8 @@ func TestOpenRefusesUnrecordedOrTamperedMigrations(t *testing.T) {
 	for _, tc := range []struct{ query, want string }{
 		{"DROP TABLE events", "invalid store schema"},
 		{"UPDATE schema_migrations SET sha256='tampered' WHERE version=1", "migration 1 checksum differs"},
-		{"DELETE FROM schema_migrations", "requires 2 migration records, found 0"},
-		{"INSERT INTO schema_migrations VALUES(3,'unexpected')", "recorded migration version 3 is inconsistent with schema version 2"},
+		{"DELETE FROM schema_migrations", "requires 3 migration records, found 0"},
+		{"INSERT INTO schema_migrations VALUES(4,'unexpected')", "recorded migration version 4 is inconsistent with schema version 3"},
 		{"PRAGMA user_version=0", "recorded migration version 1 is inconsistent with schema version 0"},
 	} {
 		query := tc.query
@@ -259,12 +259,16 @@ func TestMigrationRefusesForeignKeyViolationsBeforeCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files := fstest.MapFS{"migrations/0001_initial.sql": &fstest.MapFile{Data: initial}, "migrations/0002_idempotency_project.sql": &fstest.MapFile{Data: second}, "migrations/0003_good.sql": &fstest.MapFile{Data: []byte("CREATE TABLE should_not_commit(id INTEGER);")}}
+	third, err := migrationFiles.ReadFile("migrations/0003_artifacts.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := fstest.MapFS{"migrations/0001_initial.sql": &fstest.MapFile{Data: initial}, "migrations/0002_idempotency_project.sql": &fstest.MapFile{Data: second}, "migrations/0003_artifacts.sql": &fstest.MapFile{Data: third}, "migrations/0004_good.sql": &fstest.MapFile{Data: []byte("CREATE TABLE should_not_commit(id INTEGER);")}}
 	if err := s.migrate(ctx, files); err == nil || !strings.Contains(err.Error(), "foreign key check") {
 		t.Fatalf("migration: %v", err)
 	}
 	var version, count int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("version: %d %v", version, err)
 	}
 	if err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='should_not_commit'").Scan(&count); err != nil || count != 0 {

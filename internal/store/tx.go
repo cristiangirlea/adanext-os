@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 )
 
 // Tx is the transaction-scoped handle passed to Do. It is valid only during the
@@ -38,6 +39,23 @@ func (tx *Tx) AppendEvent(ctx context.Context, event Event) error {
 		return err
 	}
 	return appendEvent(ctx, tx.tx, event)
+}
+
+// ReferenceArtifact records an artifact only after its content write has returned
+// successfully. The caller enforces that ordering; this method only writes the
+// reference in the current transaction.
+func (tx *Tx) ReferenceArtifact(ctx context.Context, hash string, size int64, origin string) error {
+	if _, err := tx.tx.ExecContext(ctx, "INSERT INTO artifacts(hash,size,origin,created) VALUES(?,?,?,?) ON CONFLICT(hash) DO NOTHING", hash, size, origin, now()); err != nil {
+		return err
+	}
+	var storedSize int64
+	if err := tx.tx.QueryRowContext(ctx, "SELECT size FROM artifacts WHERE hash=?", hash).Scan(&storedSize); err != nil {
+		return err
+	}
+	if storedSize != size {
+		return fmt.Errorf("artifact %s has size %d, requested %d", hash, storedSize, size)
+	}
+	return nil
 }
 
 func (s *Store) write(ctx context.Context, userID string, fn func(*Tx) error) error {
