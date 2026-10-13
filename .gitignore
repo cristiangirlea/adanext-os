@@ -1,0 +1,18 @@
+# Build output
+/bin/
+/dist/
+/out/
+/.engine/
+/coverage/
+desktop/node_modules/
+desktop/dist/
+desktop/out/
+desktop/test-results/
+desktop/playwright-report/
+
+# Delegated agent worktrees and sandbox caches
+.hrn/
+
+# Personal AI notes and settings
+CLAUDE.local.md
+.claude/settings.local.json

@@ -1,0 +1,6 @@
+* text=auto eol=lf
+# Hook and shell scripts run under sh or bash, which break on CRLF line endings.
+.claude/hooks/* text eol=lf
+*.sh text eol=lf
+*.png binary
+*.ico binary
