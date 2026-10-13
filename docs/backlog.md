@@ -25,9 +25,19 @@ $root=(Get-Location).Path; $h="$root\.hrn\sandbox"; New-Item -ItemType Directory
 - [ ] **M0.1 Bootstrap.** Agent setup, CI on the owner's runner, `scripts/check.sh`, the engine
   pin and `internal/engine`, desktop version pins and lockfile, plan, status and backlog.
   Acceptance: `bash scripts/check.sh` passes; the engine tests reject short revisions, unknown
-  fields and wrong hashes; CI green on `lab-ada-os`.
-- [ ] **M0.2 Runner.** Infra pull request adding the `lab-ada-os` scale set and the repository
-  variable (owner merges; the GitHub App step is the owner's).
+  fields and wrong hashes; CI green. Done: #1, 2026-10-13, before CI could run (no runner then).
+- [x] **M0.2 Runner.** Superseded: infra #55 added a `lab-ada-os` scale set on 2026-10-11, and
+  infra #61 removes it, since the repository is public and runs on GitHub's runners (decisions
+  log, 2026-10-13).
+- [ ] **M0.3 AdaNext OS.** The product's name through README, AGENTS.md, the check skill and the
+  desktop package; the amendments of 2026-10-13 in the status file's decisions log and in this
+  backlog; a pointer at the top of `docs/plan.md`, whose text stays. The owner renamed the
+  repository to `adanext-os` the same day. Acceptance: `bash scripts/check.sh` passes; the old
+  name appears only in `docs/plan.md` and in the decisions log entries that record the change.
+- [x] **M0.4 Public repository.** A MIT `LICENSE` and AGENTS.md saying the repository is public
+  (#12, 2026-10-13); the workflow on GitHub's runners (#14). The owner flipped the visibility on
+  2026-10-13; branch protection and the call on which machine details and local paths stay in
+  `docs/plan.md` and the status file are owner actions 6 and 8.
 
 ## M1 Execution protocol (Harness repository)
 
@@ -77,21 +87,24 @@ records stay loadable, README and PLAN.md updated, tests first.
 
 - [ ] **M2.1 Store.** `internal/store` on modernc.org/sqlite v1.59.0: WAL, foreign keys,
   `synchronous=FULL`, numbered migrations each in a transaction, a refusal to open a newer schema.
-  Tables for projects, tasks, attempts, events and idempotency keys; the task state machine of
-  `docs/plan.md` section 2 with a revision per task; consistent backups through the SQLite backup
-  path. Acceptance: migrations from empty; refusing a future schema; every allowed and refused
-  transition; duplicate requests with one idempotency key; a stale expected revision refused; a
-  helper process killed mid-transaction leaves a consistent database; restore from a backup;
-  disk-full on the artifact writer surfaces and stops the task.
+  Tables for users, projects and their members, tasks, attempts, events and idempotency keys, with
+  an actor on tasks, attempts, reviews and permission decisions (decisions log, 2026-10-13); the
+  task state machine of `docs/plan.md` section 2 with a revision per task; consistent backups
+  through the SQLite backup path. Acceptance: migrations from empty; refusing a future schema;
+  every allowed and refused transition; duplicate requests with one idempotency key; a stale
+  expected revision refused; a task listed only to its project's members and a permission prompt
+  addressed to the task's actor; a helper process killed mid-transaction leaves a consistent
+  database; restore from a backup; disk-full on the artifact writer surfaces and stops the task.
 - [ ] **M2.2 `adad`, singleton and IPC.** `cmd/adad` listens, as `docs/plan.md` section 2 says,
   on a per-user Windows named pipe whose security descriptor grants only the current user, or an
   owner-only Unix socket (mode 0600 in a 0700 directory) on Linux. How the pipe is created
   (direct Windows calls or a vetted library) is decided in the slice; a test reads the
   descriptor back and finds no other principal.
   A second `adad` finds the first and exits; a stale lock from a dead process (PID and creation
-  time) is recovered. Versioned NDJSON requests: create, start, cancel, get and list tasks, and
-  subscribe to events from a sequence number. Every mutating request carries an idempotency key
-  and the expected task revision. Acceptance: duplicate start, concurrent clients, a client
+  time) is recovered. HTTP/1.1 on that pipe or socket, versioned under `/v1`: create, start,
+  cancel, get and list tasks, and subscribe to events from a sequence number as server-sent
+  events (decisions log, 2026-10-13: the same server takes M4b's TLS listener). Every mutating
+  request carries an idempotency key and the expected task revision. Acceptance: duplicate start, concurrent clients, a client
   disconnecting mid-stream, reconnect from the last sequence, a malformed request, and the pipe's
   or socket's permissions.
 - [ ] **M2.3 Local executor.** `internal/executor` runs the pinned engine (`hrn exec --protocol v1`)
@@ -100,8 +113,9 @@ records stay loadable, README and PLAN.md updated, tests first.
   After an `adad` crash, an attempt that was running becomes `interrupted` and then
   `recovery_required`; it is never replayed. Acceptance: a fake engine speaking the protocol;
   cancel, engine crash, `adad` crash and restart, truncated stream, duplicate start.
-- [ ] **M2.4 The window can close.** A minimal Electron shell (main, preload, one React view of
-  tasks and events) that connects to `adad`, or starts it independently of its own process tree.
+- [ ] **M2.4 The window can close.** A minimal Electron shell (main and preload in `desktop/`, one
+  React view of tasks and events in `ui/`, the app `adad` serves in M4b) that connects to `adad`,
+  or starts it independently of its own process tree.
   Acceptance, with Playwright against a real `adad` and a fake engine: start a task, close the
   window, `adad` and the task keep running, reopen, the task and its events are there; the explicit
   "Quit Ada and stop work" cancels and stops.
@@ -115,11 +129,18 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   import blockers.
 - **M4 First local workflow:** desktop import, task, edit, checks, diff and review on Windows and
   Ubuntu with a real backend.
+- **M4b Web access:** the TLS listener and its setting, local accounts and sessions, per-user
+  project visibility and permission routing, credential profiles whose selection fails closed and
+  an execution boundary that keeps other profiles and `adad`'s secrets out of a task's reach, the
+  relayed provider sign-in, `home.adanext.si` with a certificate from files, then the DNS-01
+  client. Evidence: Playwright from a second browser context, and a real run from a second
+  computer over HTTPS (own account, project, task and provider sign-in, a permission prompt
+  answered there, reconnect), the fifth lane of the v1 gate (decisions log, 2026-10-13).
 - **M5 VMware execution:** Packer template, guest service, isolated network, guest login, previews,
   recovery.
 - **M6 Resume intelligence:** evidence extraction, cited summaries, next-task proposals,
   continuation.
 - **M7 Review and integration:** review package, branch export, destination checks.
 - **M8 Recovery and routing:** the fault matrix, model policies, quota handling.
-- **M9 Packaging and dogfood:** installers, diagnostics, accessibility, one improvement to Ada made
-  through Ada.
+- **M9 Packaging and dogfood:** installers, the web form as a service, a download page on
+  adanext.si, diagnostics, accessibility, one improvement to Ada made through Ada.

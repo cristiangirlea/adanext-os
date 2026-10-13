@@ -1,10 +1,11 @@
-# Ada OS (private)
+# AdaNext OS
 
-A desktop workspace that remembers a project's state, proposes the next bounded task, runs the
-chosen agent on a feature branch, and brings back verified changes for review. The accepted plan is
-`docs/plan.md`; progress, evidence and decisions are in `docs/implementation-status.md`; the work
-queue is `docs/backlog.md`. Read all three before taking a slice, and don't reopen a recorded
-decision.
+A workspace (an installed desktop application, a web interface served to the owner's own network
+and, later, a bootable system) that remembers a project's state, proposes the next bounded task,
+runs the chosen agent on a feature branch, and brings back verified changes for review. The
+accepted plan is `docs/plan.md`, amended in the decisions log of `docs/implementation-status.md`,
+which also holds progress and evidence; the work queue is `docs/backlog.md`. Read all three before
+taking a slice, and don't reopen a recorded decision.
 
 ## Layout
 
@@ -20,7 +21,8 @@ decision.
 | `docs/` | Plan, status and backlog. |
 
 Planned, not yet present: `cmd/adad` (the coordinator), `internal/store` (SQLite),
-`internal/ipc`, `internal/executor`, and `cmd/ada-guest` (M5).
+`internal/ipc`, `internal/executor`, `ui/` (the React app both shells load, from M2.4), and
+`cmd/ada-guest` (M5).
 
 ## Build and test
 
