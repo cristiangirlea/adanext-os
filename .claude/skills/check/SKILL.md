@@ -1,6 +1,6 @@
 ---
 name: check
-description: Run what CI runs on Ada OS (vet, build, tests, race where possible, gofmt, import ban, scripts, desktop lockfile) before a pull request
+description: Run what CI runs on AdaNext OS (vet, build, tests, race where possible, gofmt, import ban, scripts, desktop lockfile) before a pull request
 ---
 Run from the repository root and report each step's result in one line. On a failure, show the
 error text and fix it before re-running.

@@ -2,7 +2,7 @@
   "name": "ada-desktop",
   "version": "0.0.0",
   "private": true,
-  "description": "Ada OS desktop shell. Versions are pinned in M0; the code arrives in M2 and M4.",
+  "description": "AdaNext OS desktop shell. Versions are pinned in M0; the code arrives in M2 and M4.",
   "license": "UNLICENSED",
   "engines": {
     "node": "22.16.0"
