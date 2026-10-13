@@ -73,7 +73,7 @@ they arrive.
 - One branch per slice (`m<N>/<short-name>`), one pull request, linked to its issue. Work in a
   worktree when the main checkout is busy.
 - **Everything is tested before a merge**: `scripts/check.sh`, tests for every behaviour the
-  change adds or alters, and CI green on the owner's runner. Only then may an agent merge its pull
+  change adds or alters, and CI green on the runner the workflow selects. Only then may an agent merge its pull
   request, and only through it (`gh pr merge <n> --merge --delete-branch --match-head-commit
   <sha>`), when an independent review ran and its findings are fixed, a security read of the diff
   has nothing open, and the head being merged is the commit all of that ran on. Never `--auto`

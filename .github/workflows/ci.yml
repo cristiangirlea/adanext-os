@@ -23,8 +23,7 @@ jobs:
       # The lab runner's container sees the node's 24 CPUs within a 3 GiB memory limit; the SQLite
       # driver is a large package to compile, so build at most four packages at once.
       GOFLAGS: -p=4
-    # bash on every OS, so a self-hosted Windows runner with only Windows PowerShell 5.1 does not
-    # refuse the step scripts. Git Bash is on that runner's PATH.
+    # bash on every OS: the step scripts are bash, and GitHub's Windows runner has Git Bash.
     defaults:
       run:
         shell: bash
