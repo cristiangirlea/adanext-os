@@ -152,19 +152,27 @@ func isBusy(err error) bool {
 func retryBusy(ctx context.Context, timeout time.Duration, busy func(error) bool, fn func(context.Context) error) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var cause error
+	stopped := func(err error) error {
+		if cause == nil {
+			return err
+		}
+		return fmt.Errorf("busy retry: %w; last cause: %w", err, cause)
+	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return stopped(err)
 		}
 		err := fn(ctx)
 		if !busy(err) {
 			return err
 		}
+		cause = err
 		timer := time.NewTimer(10 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return stopped(ctx.Err())
 		case <-timer.C:
 		}
 	}
@@ -373,7 +381,26 @@ func (s *Store) Backup(ctx context.Context, destPath string) error {
 	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", destPath); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(destPath, os.O_RDWR, 0)
+	return finishBackup(destPath, func(path string) (backupFile, error) {
+		return os.OpenFile(path, os.O_RDWR, 0)
+	}, syncBackupDirectory)
+}
+
+type backupFile interface {
+	Sync() error
+	Close() error
+}
+
+// finishBackup permits filesystem faults to be tested without filling a disk.
+func finishBackup(destPath string, open func(string) (backupFile, error), syncDir func(string) error) (err error) {
+	defer func() {
+		if err != nil {
+			if removeErr := os.Remove(destPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("remove failed backup: %w", removeErr))
+			}
+		}
+	}()
+	file, err := open(destPath)
 	if err != nil {
 		return fmt.Errorf("open backup for sync: %w", err)
 	}
@@ -385,7 +412,7 @@ func (s *Store) Backup(ctx context.Context, destPath string) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err := syncBackupDirectory(filepath.Dir(destPath)); err != nil {
+	if err := syncDir(filepath.Dir(destPath)); err != nil {
 		return fmt.Errorf("sync backup directory: %w", err)
 	}
 	return nil

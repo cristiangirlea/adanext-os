@@ -14,13 +14,14 @@ import (
 )
 
 func TestOpenRefusesUnrecordedOrTamperedMigrations(t *testing.T) {
-	for _, query := range []string{
-		"DROP TABLE events",
-		"UPDATE schema_migrations SET sha256='tampered' WHERE version=1",
-		"DELETE FROM schema_migrations WHERE version=1",
-		"INSERT INTO schema_migrations VALUES(2,'unexpected')",
-		"PRAGMA user_version=0",
+	for _, tc := range []struct{ query, want string }{
+		{"DROP TABLE events", "invalid store schema"},
+		{"UPDATE schema_migrations SET sha256='tampered' WHERE version=1", "migration 1 checksum differs"},
+		{"DELETE FROM schema_migrations WHERE version=1", "requires 1 migration records, found 0"},
+		{"INSERT INTO schema_migrations VALUES(2,'unexpected')", "recorded migration version 2 is inconsistent with schema version 1"},
+		{"PRAGMA user_version=0", "recorded migration version 1 is inconsistent with schema version 0"},
 	} {
+		query := tc.query
 		t.Run(query, func(t *testing.T) {
 			s := openTestStore(t)
 			execute(t, s, query)
@@ -30,8 +31,8 @@ func TestOpenRefusesUnrecordedOrTamperedMigrations(t *testing.T) {
 			if reopened != nil {
 				reopened.Close()
 			}
-			if err == nil {
-				t.Fatal("opened a tampered database")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("tamper error: %v, want %q", err, tc.want)
 			}
 		})
 	}
@@ -49,8 +50,8 @@ func TestOpenRefusesUnrecordedOrTamperedMigrations(t *testing.T) {
 		if s != nil {
 			s.Close()
 		}
-		if err == nil {
-			t.Fatal("opened user_version=1 without recorded migrations")
+		if err == nil || !strings.Contains(err.Error(), "read recorded migrations for schema version 1") {
+			t.Fatalf("unrecorded migration error: %v", err)
 		}
 	})
 }
@@ -59,7 +60,7 @@ func TestDoRefusesAnEmptyKeyOrRequestHashBeforeCallingTheCallback(t *testing.T) 
 	s := openTestStore(t)
 	for _, pair := range [][2]string{{"", "hash"}, {"key", ""}} {
 		called := false
-		_, err := s.Do(ctx, pair[0], pair[1], func(*Tx) ([]byte, error) { called = true; return nil, nil })
+		_, err := s.Do(ctx, "u", pair[0], pair[1], func(*Tx) ([]byte, error) { called = true; return nil, nil })
 		if err == nil || called {
 			t.Fatalf("empty idempotency input accepted: %v called=%v", err, called)
 		}
@@ -82,6 +83,11 @@ func TestAnImmediateTransactionBlocksWritesBeforeWritingAnyRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	defer func() {
+		if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+			t.Error(err)
+		}
+	}()
 	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=1"); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +123,7 @@ func TestDoComposesTransitionsAndEventsInTheSameTransaction(t *testing.T) {
 		return []byte("ready"), nil
 	}
 	for range 2 {
-		response, err := s.Do(ctx, "change", "hash", fn)
+		response, err := s.Do(ctx, "u", "change", "hash", fn)
 		if err != nil || string(response) != "ready" {
 			t.Fatalf("response: %s %v", response, err)
 		}
@@ -127,7 +133,7 @@ func TestDoComposesTransitionsAndEventsInTheSameTransaction(t *testing.T) {
 	if err := s.db.QueryRow("SELECT state,revision FROM tasks WHERE id='t'").Scan(&state, &revision); err != nil || state != "ready" || revision != 1 {
 		t.Fatalf("task: %s %d %v", state, revision, err)
 	}
-	events, err := s.Events(ctx, "a", 0)
+	events, err := s.Events(ctx, "u", "a", 0)
 	if err != nil || len(events) != 1 {
 		t.Fatalf("events: %+v %v", events, err)
 	}
@@ -136,7 +142,7 @@ func TestDoComposesTransitionsAndEventsInTheSameTransaction(t *testing.T) {
 		t.Fatalf("insert: %d %v", count, err)
 	}
 	failure := errors.New("rollback")
-	if _, err := s.Do(ctx, "rollback", "hash", func(tx *Tx) ([]byte, error) {
+	if _, err := s.Do(ctx, "u", "rollback", "hash", func(tx *Tx) ([]byte, error) {
 		if err := tx.Transition(ctx, "t", Ready, Preparing, 1); err != nil {
 			return nil, err
 		}
@@ -150,7 +156,7 @@ func TestDoComposesTransitionsAndEventsInTheSameTransaction(t *testing.T) {
 	if err := s.db.QueryRow("SELECT revision FROM tasks WHERE id='t'").Scan(&revision); err != nil || revision != 1 {
 		t.Fatalf("rollback revision: %d %v", revision, err)
 	}
-	events, err = s.Events(ctx, "a", 0)
+	events, err = s.Events(ctx, "u", "a", 0)
 	if err != nil || len(events) != 1 {
 		t.Fatalf("rollback events: %+v %v", events, err)
 	}
@@ -166,7 +172,7 @@ func TestDoComposesTransitionsAndEventsInTheSameTransaction(t *testing.T) {
 		}, ErrEventSequence},
 		{"missing", func(tx *Tx) error { return tx.Transition(ctx, "missing", Ready, Preparing, 0) }, ErrNotFound},
 	} {
-		if _, err := s.Do(ctx, tc.key, "hash", func(tx *Tx) ([]byte, error) { return nil, tc.fn(tx) }); !errors.Is(err, tc.want) {
+		if _, err := s.Do(ctx, "u", tc.key, "hash", func(tx *Tx) ([]byte, error) { return nil, tc.fn(tx) }); !errors.Is(err, tc.want) {
 			t.Fatalf("%s: %v", tc.key, err)
 		}
 	}
@@ -198,7 +204,7 @@ func TestBusyRetryRetriesOnlyBusyAndStopsAtItsDeadline(t *testing.T) {
 	}
 	started := time.Now()
 	err = retryBusy(ctx, 25*time.Millisecond, isBusy, func(context.Context) error { return busy })
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > time.Second {
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, busy) || time.Since(started) > time.Second {
 		t.Fatalf("deadline: %v", err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
@@ -219,7 +225,7 @@ func TestOpenAndEventsHonorCanceledContexts(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := openTestStore(t)
-	if _, err := s.Events(canceled, "a", 0); !errors.Is(err, context.Canceled) {
+	if _, err := s.Events(canceled, "u", "a", 0); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 }
@@ -230,16 +236,21 @@ func TestMigrationRefusesForeignKeyViolationsBeforeCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer conn.Close()
+	defer func() {
+		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+			t.Error(err)
+		}
+	}()
 	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.ExecContext(ctx, "INSERT INTO tasks VALUES('orphan','missing','objective','criteria','draft',0,'created','updated')"); err != nil {
+	if _, err := conn.ExecContext(ctx, "INSERT INTO tasks VALUES('orphan','missing','u','objective','criteria','draft',0,'created','updated')"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
 		t.Fatal(err)
 	}
-	conn.Close()
 	initial, err := migrationFiles.ReadFile("migrations/0001_initial.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +281,7 @@ func TestBackupUnderConcurrentWritesRestoresAConsistentCommitPrefix(t *testing.T
 				done <- nil
 				return
 			}
-			_, err := s.Do(writerCtx, fmt.Sprintf("work-%d", seq), "hash", func(tx *Tx) ([]byte, error) {
+			_, err := s.Do(writerCtx, "u", fmt.Sprintf("work-%d", seq), "hash", func(tx *Tx) ([]byte, error) {
 				if err := tx.AppendEvent(writerCtx, Event{Attempt: "a", Seq: seq, Payload: json.RawMessage(`{}`)}); err != nil {
 					return nil, err
 				}
@@ -305,7 +316,9 @@ func TestBackupUnderConcurrentWritesRestoresAConsistentCommitPrefix(t *testing.T
 		t.Fatal("writer did not start")
 	}
 	dest := filepath.Join(t.TempDir(), "concurrent.sqlite")
-	if err := s.Backup(writerCtx, dest); err != nil {
+	backupCtx, backupCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer backupCancel()
+	if err := s.Backup(backupCtx, dest); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
@@ -323,7 +336,7 @@ func TestBackupUnderConcurrentWritesRestoresAConsistentCommitPrefix(t *testing.T
 	if err := restored.db.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil || integrity != "ok" {
 		t.Fatalf("integrity: %s %v", integrity, err)
 	}
-	events, err := restored.Events(ctx, "a", 0)
+	events, err := restored.Events(ctx, "u", "a", 0)
 	if err != nil || len(events) == 0 {
 		t.Fatalf("events: %d %v", len(events), err)
 	}
