@@ -11,10 +11,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/api"
+	"github.com/cristiangirlea/ada-os/internal/artifact"
+	"github.com/cristiangirlea/ada-os/internal/executor"
 	"github.com/cristiangirlea/ada-os/internal/ipc"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
@@ -48,6 +51,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	stateDir := flags.String("state-dir", defaultStateDir(), "coordinator state directory")
 	name := flags.String("name", "adad", "coordinator endpoint name")
+	enginePath := flags.String("engine", "", "pinned Harness engine path")
+	engineHash := flags.String("engine-sha256", "", "pinned Harness engine SHA-256")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -84,6 +89,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "adad: create local user:", err)
 		return 1
 	}
+	generation, recovered, err := s.BumpAndRecover(context.Background())
+	if err != nil {
+		fmt.Fprintln(stderr, "adad: recover attempts:", err)
+		return 1
+	}
 	listener, err := lock.Listen()
 	if err != nil {
 		fmt.Fprintln(stderr, "adad: listen:", err)
@@ -91,7 +101,29 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	defer listener.Close()
 	hub := api.NewHub()
-	server := &http.Server{Handler: api.New(s, hub, func(*http.Request) (string, error) { return "local", nil }), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
+	for _, id := range recovered {
+		hub.Notify(id)
+	}
+	var execution api.Execution
+	var local *executor.Executor
+	if *enginePath != "" && *engineHash != "" {
+		*engineHash = strings.ToLower(*engineHash)
+		artifacts, err := artifact.Open(filepath.Join(*stateDir, "artifacts"))
+		if err != nil {
+			fmt.Fprintln(stderr, "adad: open artifacts:", err)
+			return 1
+		}
+		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation})
+		execution = api.Execution{EngineSHA256: *engineHash, Generation: generation, Runner: local}
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := local.Stop(stopCtx); err != nil {
+				fmt.Fprintln(stderr, "adad: stop executor:", err)
+			}
+		}()
+	}
+	server := &http.Server{Handler: api.New(s, hub, func(*http.Request) (string, error) { return "local", nil }, execution), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
 	server.RegisterOnShutdown(hub.Close)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
@@ -110,6 +142,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintln(stderr, "adad: serve:", err)
+			return 1
+		}
+	}
+	if local != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := local.Stop(stopCtx); err != nil {
+			fmt.Fprintln(stderr, "adad: stop executor:", err)
 			return 1
 		}
 	}
