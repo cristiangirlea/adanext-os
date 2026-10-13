@@ -60,7 +60,7 @@ func TestDoRefusesAnEmptyKeyOrRequestHashBeforeCallingTheCallback(t *testing.T) 
 	s := openTestStore(t)
 	for _, pair := range [][2]string{{"", "hash"}, {"key", ""}} {
 		called := false
-		_, err := s.Do(ctx, "u", pair[0], pair[1], func(*Tx) ([]byte, error) { called = true; return nil, nil })
+		_, err := s.Do(ctx, "u", pair[0], pair[1], nil, func(*Tx) ([]byte, error) { called = true; return nil, nil })
 		if err == nil || called {
 			t.Fatalf("empty idempotency input accepted: %v called=%v", err, called)
 		}
@@ -123,7 +123,7 @@ func TestDoComposesTransitionsAndEventsInTheSameTransaction(t *testing.T) {
 		return []byte("ready"), nil
 	}
 	for range 2 {
-		response, err := s.Do(ctx, "u", "change", "hash", fn)
+		response, err := s.Do(ctx, "u", "change", "hash", &Scope{ProjectID: "p"}, fn)
 		if err != nil || string(response) != "ready" {
 			t.Fatalf("response: %s %v", response, err)
 		}
@@ -142,7 +142,7 @@ func TestDoComposesTransitionsAndEventsInTheSameTransaction(t *testing.T) {
 		t.Fatalf("insert: %d %v", count, err)
 	}
 	failure := errors.New("rollback")
-	if _, err := s.Do(ctx, "u", "rollback", "hash", func(tx *Tx) ([]byte, error) {
+	if _, err := s.Do(ctx, "u", "rollback", "hash", &Scope{ProjectID: "p"}, func(tx *Tx) ([]byte, error) {
 		if err := tx.Transition(ctx, "t", Ready, Preparing, 1); err != nil {
 			return nil, err
 		}
@@ -172,7 +172,7 @@ func TestDoComposesTransitionsAndEventsInTheSameTransaction(t *testing.T) {
 		}, ErrEventSequence},
 		{"missing", func(tx *Tx) error { return tx.Transition(ctx, "missing", Ready, Preparing, 0) }, ErrNotFound},
 	} {
-		if _, err := s.Do(ctx, "u", tc.key, "hash", func(tx *Tx) ([]byte, error) { return nil, tc.fn(tx) }); !errors.Is(err, tc.want) {
+		if _, err := s.Do(ctx, "u", tc.key, "hash", &Scope{ProjectID: "p"}, func(tx *Tx) ([]byte, error) { return nil, tc.fn(tx) }); !errors.Is(err, tc.want) {
 			t.Fatalf("%s: %v", tc.key, err)
 		}
 	}
@@ -281,7 +281,7 @@ func TestBackupUnderConcurrentWritesRestoresAConsistentCommitPrefix(t *testing.T
 				done <- nil
 				return
 			}
-			_, err := s.Do(writerCtx, "u", fmt.Sprintf("work-%d", seq), "hash", func(tx *Tx) ([]byte, error) {
+			_, err := s.Do(writerCtx, "u", fmt.Sprintf("work-%d", seq), "hash", &Scope{ProjectID: "p"}, func(tx *Tx) ([]byte, error) {
 				if err := tx.AppendEvent(writerCtx, Event{Attempt: "a", Seq: seq, Payload: json.RawMessage(`{}`)}); err != nil {
 					return nil, err
 				}

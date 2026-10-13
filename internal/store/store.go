@@ -329,12 +329,19 @@ func (s *Store) validateSchema(ctx context.Context) error {
 	return nil
 }
 
-// Do commits a callback's writes and its response atomically. Repeats with the
-// same user and hash return the original bytes without running fn. The callback must be
+// Scope names the project a request touches. The trusted coordinator must
+// derive it from the request's target, including for cached responses.
+type Scope struct{ ProjectID string }
+
+// Do commits a callback's writes and its response atomically. When scope is
+// non-nil, membership is checked in the transaction before reading the cache or
+// running fn. Use nil only for requests touching no project, such as creating a
+// user or project. Repeats with the same user, key and hash return the original
+// bytes without running fn, provided the user is still authorized. The callback must be
 // short and have no effect outside the transaction. Use only tx for database
 // work, including transitions and events; do not call Store mutation methods.
 // A callback error rolls back both writes and the key.
-func (s *Store) Do(ctx context.Context, userID, key, requestHash string, fn func(*Tx) ([]byte, error)) ([]byte, error) {
+func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *Scope, fn func(*Tx) ([]byte, error)) ([]byte, error) {
 	if key == "" || requestHash == "" {
 		return nil, errors.New("idempotency key and request hash must be nonempty")
 	}
@@ -343,6 +350,11 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, fn func
 		return nil, err
 	}
 	defer tx.Rollback()
+	if scope != nil {
+		if err := requireMember(ctx, tx, userID, scope.ProjectID); err != nil {
+			return nil, err
+		}
+	}
 	var hash string
 	var response []byte
 	err = tx.QueryRowContext(ctx, "SELECT request_hash,response FROM idempotency WHERE user=? AND key=?", userID, key).Scan(&hash, &response)

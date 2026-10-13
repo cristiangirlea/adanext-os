@@ -368,7 +368,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 		return []byte("response"), err
 	}
 	for range 2 {
-		response, err := s.Do(ctx, "u", "key", "hash", fn)
+		response, err := s.Do(ctx, "u", "key", "hash", nil, fn)
 		if err != nil || string(response) != "response" {
 			t.Fatalf("%s %v", response, err)
 		}
@@ -381,14 +381,14 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if response, err := other.Do(ctx, "u", "key", "hash", func(*Tx) ([]byte, error) { t.Fatal("persisted key ran callback"); return nil, nil }); err != nil || string(response) != "response" {
+	if response, err := other.Do(ctx, "u", "key", "hash", nil, func(*Tx) ([]byte, error) { t.Fatal("persisted key ran callback"); return nil, nil }); err != nil || string(response) != "response" {
 		t.Fatalf("persisted response: %s %v", response, err)
 	}
-	if _, err := s.Do(ctx, "u", "key", "other", fn); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, err := s.Do(ctx, "u", "key", "other", nil, fn); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatal(err)
 	}
 	failure := errors.New("callback failed")
-	if _, err := s.Do(ctx, "u", "retry", "hash", func(tx *Tx) ([]byte, error) {
+	if _, err := s.Do(ctx, "u", "retry", "hash", nil, func(tx *Tx) ([]byte, error) {
 		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('q','name','source','created')")
 		if err != nil {
 			return nil, err
@@ -397,7 +397,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	}); !errors.Is(err, failure) {
 		t.Fatal(err)
 	}
-	if _, err := s.Do(ctx, "u", "retry", "hash", func(tx *Tx) ([]byte, error) {
+	if _, err := s.Do(ctx, "u", "retry", "hash", nil, func(tx *Tx) ([]byte, error) {
 		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('q','name','source','created')")
 		return nil, err
 	}); err != nil {
@@ -423,7 +423,7 @@ func TestConcurrentIdempotencyAcrossStoresExecutesOnce(t *testing.T) {
 			if i%2 == 0 {
 				store = other
 			}
-			response, err := store.Do(ctx, "u", "key", "hash", func(tx *Tx) ([]byte, error) { calls.Add(1); return []byte("ok"), nil })
+			response, err := store.Do(ctx, "u", "key", "hash", nil, func(tx *Tx) ([]byte, error) { calls.Add(1); return []byte("ok"), nil })
 			if err != nil || string(response) != "ok" {
 				t.Errorf("%s %v", response, err)
 			}
@@ -514,7 +514,7 @@ func TestBackupRestoresAllCommittedRowsFromALiveWALDatabase(t *testing.T) {
 	if err := s.AppendEvent(ctx, "u", Event{Attempt: "a", Seq: 1, Time: "now", Kind: "output", Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Do(ctx, "u", "key", "hash", func(tx *Tx) ([]byte, error) { return []byte("response"), nil }); err != nil {
+	if _, err := s.Do(ctx, "u", "key", "hash", nil, func(tx *Tx) ([]byte, error) { return []byte("response"), nil }); err != nil {
 		t.Fatal(err)
 	}
 	// Keep a write transaction open during the snapshot. Its uncommitted row
