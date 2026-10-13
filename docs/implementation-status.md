@@ -172,8 +172,8 @@ stamp). M1 stays "implemented" until Harness's Windows CI leg passes on `main`.
 
 ### M2.1 store (2026-10-11, local branch `m2/store`, not yet a pull request)
 
-`internal/store` on modernc.org/sqlite v1.59.0, written by Codex (runs `20261011-165945-8a1560`,
-`20261011-171916-6142ca`) on a branch stacked on the bootstrap, at `6925b33`. Checks:
+`internal/store` on modernc.org/sqlite v1.59.0, written in runs `20261011-165945-8a1560`,
+`20261011-171916-6142ca` on a branch stacked on the bootstrap, at `6925b33`. Checks:
 `bash scripts/check.sh` on Windows passes; offline in a Linux container, `go vet ./...`,
 `go test -race -count=3 ./internal/store/` and `go test -race -count=1 ./...` pass. Claude Opus
 reviewed it twice (runs `20261011-171544-53b71d`, `20261011-173013-a06dc5`): the first found the
@@ -186,14 +186,15 @@ test changes on pooled connections. Opening its pull request waits for the boots
 database created at its first commit (`77015e4`) will not open any more; none exists outside tests.
 
 2026-10-13: the branch was rebased onto `main` (`e4a2c14`, after the amendment of #13), and
-Codex (run `20261013-183524-47c2e9`, mode auto) added users, project membership, task and attempt
+run `20261013-183524-47c2e9` (mode auto) added users, project membership, task and attempt
 actors, membership-scoped task and event calls and per-user idempotency (`88f0a7a`) and the five
 review follow-ups (`8dbc89a`); the identity tests failed before the schema and API existed, the
 busy-timeout cause and failed-backup removal tests before their fixes. Inside the sandbox
 `go test -count=3 ./...` passed and the commits could not be written (the worktree's index lock);
 outside it `bash scripts/check.sh` passed on the owner's PC (`-race` skipped, no cgo; the two
 chmod hook tests skipped on Windows). The pull request is still to open, after an independent
-review; nothing is verified or ticked.
+review; nothing is verified or ticked. Review run `20261013-185055-ec8024` found the replay gap,
+fixed with the scope gate and its regression test; its two other findings are #15 and #16.
 
 ## Decisions log
 
