@@ -65,6 +65,28 @@ func TestReferenceArtifactAndMigrationRefuseInvalidMetadata(t *testing.T) {
 	}
 }
 
+func TestArtifactMigrationRefusesHashWithEmbeddedNUL(t *testing.T) {
+	s := openTestStore(t)
+	hash := strings.Repeat("a", 64) + "\x00zz"
+	err := s.write(ctx, "u", func(tx *Tx) error {
+		_, err := tx.ExecContext(ctx, "INSERT INTO artifacts(hash,size,origin,created) VALUES(?,?,?,?)", hash, 1, "test", "now")
+		return err
+	})
+	if err == nil {
+		t.Fatal("direct INSERT accepted hash with embedded NUL and trailing bytes")
+	}
+}
+
+func TestReferenceArtifactRefusesNegativeSize(t *testing.T) {
+	s := openTestStore(t)
+	err := s.write(ctx, "u", func(tx *Tx) error {
+		return tx.ReferenceArtifact(ctx, strings.Repeat("a", 64), -1, "test")
+	})
+	if !errors.Is(err, ErrInvalidArtifact) {
+		t.Fatalf("ReferenceArtifact negative size: %v", err)
+	}
+}
+
 func TestReferenceArtifactRollsBackWithStoreDo(t *testing.T) {
 	s := openTestStore(t)
 	if err := s.CreateUser(ctx, "u", "user"); err != nil {
