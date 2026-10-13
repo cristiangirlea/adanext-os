@@ -803,7 +803,7 @@ func TestStderrDescendantFitsStopBudget(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "child_stderr")
 	cleanupGrandchild(t, marker)
 	e.cfg.CancelGrace = 200 * time.Millisecond
-	if got, want := e.StopBudget(), 3*e.cfg.CancelGrace+5*time.Second; got != want {
+	if got, want := e.StopBudget(), 5*e.cfg.CancelGrace+5*time.Second; got != want {
 		t.Fatalf("stop budget = %s, want %s", got, want)
 	}
 	e.LaunchAttempt("attempt")

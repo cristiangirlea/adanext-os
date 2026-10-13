@@ -60,9 +60,9 @@ func New(cfg Config) *Executor {
 	return &Executor{cfg: cfg, active: make(map[string]*active)}
 }
 
-// StopBudget includes the shutdown timers, the stderr WaitDelay, and state persistence.
+// StopBudget includes the shutdown timers, stderr WaitDelay, stdout idle check, and state persistence.
 func (e *Executor) StopBudget() time.Duration {
-	return 3*e.cfg.CancelGrace + 5*time.Second
+	return 5*e.cfg.CancelGrace + 5*time.Second
 }
 
 func (e *Executor) LaunchAttempt(id string) {
@@ -302,8 +302,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		if shutdownStopped {
 			return
 		}
+		inRead := reading.Load()
 		current := readProgress.Load()
-		if reading.Load() && current == last {
+		// A read announces its start before setting reading, so an unchanged
+		// counter here means this same read was already active at the last check.
+		if inRead && current == last {
 			// The engine is gone and the reader is blocked on a descendant's pipe.
 			_ = stdout.Close()
 			return
@@ -328,18 +331,19 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		<-processDone
 		stopShutdown()
 		processMu.Lock()
-		defer processMu.Unlock()
-		if exitErr != nil {
-			if errors.Is(exitErr, exec.ErrWaitDelay) && cmd.ProcessState.Success() {
+		waitErr, killed := exitErr, killRequested
+		processMu.Unlock()
+		if waitErr != nil {
+			if errors.Is(waitErr, exec.ErrWaitDelay) && cmd.ProcessState.Success() {
 				const detail = "a descendant kept stderr open after the engine exited"
 				if err := e.append(a, "info", []byte(`{"event":{"kind":"info","text":"`+detail+`"}}`), ""); err != nil {
-					return killRequested, fmt.Errorf("exit info storage: %w", err)
+					return killed, fmt.Errorf("exit info storage: %w", err)
 				}
-				return killRequested, nil
+				return killed, nil
 			}
-			return killRequested, exitErr
+			return killed, waitErr
 		}
-		return killRequested, nil
+		return killed, nil
 	}
 	done := make(chan struct{})
 	cancelDone := make(chan struct{})
@@ -373,6 +377,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	read := func() (message, []byte, error) {
 		var line []byte
 		for {
+			readProgress.Add(1)
 			reading.Store(true)
 			part, err := reader.ReadSlice('\n')
 			if len(part) != 0 {
@@ -427,6 +432,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 				if !errors.Is(err, io.EOF) {
 					buf := make([]byte, 32*1024)
 					for {
+						readProgress.Add(1)
 						reading.Store(true)
 						n, drainErr := reader.Read(buf)
 						if n != 0 {
