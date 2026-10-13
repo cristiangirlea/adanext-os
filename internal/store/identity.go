@@ -121,6 +121,26 @@ func (s *Store) Task(ctx context.Context, userID, taskID string) (Task, error) {
 	return task, nil
 }
 
+// TaskProject and AttemptProject reveal a scope only to a current member.
+// Unknown and inaccessible identifiers have the same result.
+func (s *Store) TaskProject(ctx context.Context, userID, taskID string) (string, error) {
+	var project string
+	err := s.db.QueryRowContext(ctx, `SELECT t.project FROM tasks t JOIN project_members m ON m.project=t.project AND m.user=? WHERE t.id=?`, userID, taskID).Scan(&project)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return project, err
+}
+
+func (s *Store) AttemptProject(ctx context.Context, userID, attemptID string) (string, error) {
+	var project string
+	err := s.db.QueryRowContext(ctx, `SELECT t.project FROM attempts a JOIN tasks t ON t.id=a.task JOIN project_members m ON m.project=t.project AND m.user=? WHERE a.id=?`, userID, attemptID).Scan(&project)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return project, err
+}
+
 func (s *Store) CreateTask(ctx context.Context, userID, id, project, objective, criteria string) error {
 	return s.write(ctx, userID, func(tx *Tx) error {
 		if err := requireMember(ctx, tx, userID, project); err != nil {

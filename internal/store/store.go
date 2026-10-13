@@ -323,7 +323,7 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated FROM tasks LIMIT 0",
 		"SELECT id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended FROM attempts LIMIT 0",
 		"SELECT attempt,seq,time,kind,payload FROM events LIMIT 0",
-		"SELECT user,key,request_hash,response,created FROM idempotency LIMIT 0",
+		"SELECT user,key,request_hash,response,created,project FROM idempotency LIMIT 0",
 	} {
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {
@@ -364,9 +364,10 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 	}
 	var hash string
 	var response []byte
-	err = tx.QueryRowContext(ctx, "SELECT request_hash,response FROM idempotency WHERE user=? AND key=?", userID, key).Scan(&hash, &response)
+	var cachedProject sql.NullString
+	err = tx.QueryRowContext(ctx, "SELECT request_hash,response,project FROM idempotency WHERE user=? AND key=?", userID, key).Scan(&hash, &response, &cachedProject)
 	if err == nil {
-		if hash != requestHash {
+		if hash != requestHash || cachedProject.Valid != (scope != nil) || (scope != nil && cachedProject.String != scope.ProjectID) {
 			return nil, ErrIdempotencyConflict
 		}
 		return response, nil
@@ -381,7 +382,11 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 	if response == nil {
 		response = []byte{}
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO idempotency(user,key,request_hash,response,created) VALUES(?,?,?,?,?)", userID, key, requestHash, response, now()); err != nil {
+	var project any
+	if scope != nil {
+		project = scope.ProjectID
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO idempotency(user,key,request_hash,response,created,project) VALUES(?,?,?,?,?,?)", userID, key, requestHash, response, now(), project); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
