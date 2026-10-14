@@ -63,7 +63,7 @@ func TestBackupRefusesAnExistingDestinationWithoutChangingIt(t *testing.T) {
 	}
 }
 
-func TestBackupRemovesItsDestinationWhenVacuumFails(t *testing.T) {
+func TestFailedVacuumLeavesNeitherTemporaryFileNorDestination(t *testing.T) {
 	s := openTestStore(t)
 	dest := filepath.Join(t.TempDir(), "backup.sqlite")
 	if err := s.Close(); err != nil {
@@ -136,7 +136,7 @@ func (f *failingBackupFile) Close() error { f.closed = true; return f.closeErr }
 
 func TestAnUnsyncedBackupIsRemovedAndItsCauseIsPreserved(t *testing.T) {
 	failure := errors.New("injected disk failure")
-	for _, stage := range []string{"open", "file sync", "close", "directory sync"} {
+	for _, stage := range []string{"open", "file sync", "close", "publish", "directory sync"} {
 		t.Run(stage, func(t *testing.T) {
 			s := openTestStore(t)
 			seed(t, s)
@@ -150,12 +150,16 @@ func TestAnUnsyncedBackupIsRemovedAndItsCauseIsPreserved(t *testing.T) {
 			if stage == "close" {
 				file.closeErr = failure
 			}
+			publish := publishBackupNoReplace
+			if stage == "publish" {
+				publish = func(string, string) error { return failure }
+			}
 			err := finishBackup(tmp, dest, func(string) (backupFile, error) {
 				if stage == "open" {
 					return nil, failure
 				}
 				return file, nil
-			}, publishBackupNoReplace, func(string) error {
+			}, publish, func(string) error {
 				if stage == "directory sync" {
 					return failure
 				}
@@ -163,6 +167,9 @@ func TestAnUnsyncedBackupIsRemovedAndItsCauseIsPreserved(t *testing.T) {
 			})
 			if !errors.Is(err, failure) {
 				t.Fatalf("cause: %v", err)
+			}
+			if stage == "publish" && !strings.Contains(err.Error(), "publish backup") {
+				t.Fatalf("publish failure context: %v", err)
 			}
 			if stage != "open" && !file.closed {
 				t.Fatal("backup handle was not closed")
