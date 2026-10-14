@@ -32,6 +32,7 @@ func TestStoreAndBackupFilesArePrivateWithPermissiveUmask(t *testing.T) {
 	if err := s.Backup(ctx, dest); err != nil {
 		t.Fatal(err)
 	}
+	assertNoBackupTemps(t, filepath.Dir(dest))
 	for _, file := range []string{path, path + "-wal", path + "-shm", dest} {
 		info, err := os.Stat(file)
 		if err != nil {
@@ -118,6 +119,7 @@ func TestBackupRefusesPlantedSymlink(t *testing.T) {
 			if err := s.Backup(ctx, link); !errors.Is(err, os.ErrExist) {
 				t.Fatalf("Backup to symlink error = %v, want os.ErrExist", err)
 			}
+			assertNoBackupTemps(t, dir)
 			info, err := os.Lstat(link)
 			if err != nil {
 				t.Fatal(err)
