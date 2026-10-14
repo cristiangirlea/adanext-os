@@ -529,6 +529,13 @@ func TestSlowPageWriteHoldsOnlyEncodedBytes(t *testing.T) {
 			}
 			f.hub.BudgetBytes = pageBytes
 			h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
+			_, page, err := h.page(context.Background(), "alice", "limits-attempt", 0, stream)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cap(page) != len(page) {
+				t.Fatalf("small page holds %d bytes with %d-byte capacity", len(page), cap(page))
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil).WithContext(ctx)
@@ -570,6 +577,23 @@ func TestIdleStreamPageHasNoLargeBuffer(t *testing.T) {
 	if err != nil || len(events) != 0 || cap(page) != 0 {
 		t.Fatalf("idle page: events=%d bytes=%d capacity=%d err=%v", len(events), len(page), cap(page), err)
 	}
+}
+
+func TestZeroByteReleaseDoesNotWakeBudgetWaiters(t *testing.T) {
+	h := NewHub()
+	if !h.reserveBytes(context.Background(), 1) {
+		t.Fatal("reserve byte")
+	}
+	h.mu.Lock()
+	wake := h.budgetWake
+	h.mu.Unlock()
+	h.releaseBytes(0)
+	select {
+	case <-wake:
+		t.Fatal("zero-byte release woke budget waiters")
+	default:
+	}
+	h.releaseBytes(1)
 }
 
 func TestIfMatchSpellingsReplayOneTransition(t *testing.T) {

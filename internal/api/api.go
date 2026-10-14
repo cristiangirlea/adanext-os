@@ -542,22 +542,33 @@ func (h *handler) page(ctx context.Context, user, id string, after int64, stream
 	if err != nil {
 		return nil, nil, err
 	}
+	encoded := make([][]byte, len(events))
+	total := 0
+	if !stream {
+		total = 3 // brackets and newline
+		if len(events) > 1 {
+			total += len(events) - 1 // commas
+		}
+	}
+	for i, e := range events {
+		encoded[i] = encode(e)
+		if len(encoded[i]) > eventBytes {
+			return nil, nil, errors.New("stored event exceeds encoded limit")
+		}
+		total += len(encoded[i])
+	}
 	var page []byte
-	if len(events) != 0 {
-		page = make([]byte, 0, pageBytes)
+	if total != 0 {
+		page = make([]byte, 0, total)
 	}
 	if !stream {
 		page = append(page, '[')
 	}
-	for i, e := range events {
-		encoded := encode(e)
-		if len(encoded) > eventBytes {
-			return nil, nil, errors.New("stored event exceeds encoded limit")
-		}
+	for i, event := range encoded {
 		if !stream && i != 0 {
 			page = append(page, ',')
 		}
-		page = append(page, encoded...)
+		page = append(page, event...)
 	}
 	if !stream {
 		page = append(page, ']', '\n')

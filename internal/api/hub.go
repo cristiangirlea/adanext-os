@@ -74,6 +74,9 @@ func (h *Hub) reserveBytes(ctx context.Context, n int) bool {
 }
 
 func (h *Hub) releaseBytes(n int) {
+	if n == 0 {
+		return
+	}
 	h.mu.Lock()
 	h.budgetUsed -= n
 	if h.budgetWake != nil {
