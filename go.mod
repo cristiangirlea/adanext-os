@@ -3,8 +3,8 @@ module github.com/cristiangirlea/ada-os
 go 1.26.4
 
 require (
-	github.com/Microsoft/go-winio v0.6.2
-	golang.org/x/sys v0.47.0
+	github.com/Microsoft/go-winio v0.6.3
+	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.59.0
 )
 
