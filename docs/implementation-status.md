@@ -440,16 +440,22 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
 
 - **2026-10-14, SSE limits, cursors and the desktop client (#4).** M2.2b settled per-attempt
   sequences, `Last-Event-ID` over `?after=`, `id:` lines and a replay-to-live handoff with no gap
-  or duplicate. The remainder: bytes are bounded as well as counts. An event's payload is at most
-  256 KiB, matching the engine's bound on event text; the executor stores a larger payload as an
-  artifact at ingestion and the event carries its reference and size instead, so no stored event
-  exceeds the cap. The stream reads the store in pages that end at 256 events or 1 MiB of
-  payload, whichever comes first (one event always fits, being under the cap), and writes each
+  or duplicate. The remainder: bytes are bounded as well as counts. Every byte limit below counts
+  encoded bytes on the wire: an event as written, with its `id:`, `event:` and `data:` framing in
+  the stream form and its JSON encoding in the JSON form, not the stored payload, which escaping
+  and framing make larger. An encoded event is at most 256 KiB, matching the engine's bound on
+  event text; the executor stores a payload whose encoded event would exceed it as an artifact
+  at ingestion and the event carries its reference and size instead, so no stored event exceeds
+  the cap. The stream reads the store in pages that end at 256 events or 1 MiB encoded,
+  whichever comes first (one event always fits, being under the cap), and writes each
   page under a 10-second write deadline (`http.ResponseController`); a subscriber that misses it
   is disconnected and resumes from its cursor, so the server holds at most one page per
   subscriber and the store is the buffer. Across all streams and JSON reads the pages held at
-  once share a 32 MiB budget (a byte-weighted semaphore): a page read waits for its bytes, and a
-  stream that cannot get them within its write deadline is disconnected like a slow one. At most
+  once share a 32 MiB budget (a byte-weighted semaphore). Capacity is reserved before a page is
+  read from the store: a reader acquires the page maximum, 1 MiB, then reads and encodes, and
+  releases what the encoded page did not use; it holds the rest until the page is written or the
+  stream ends. A reader that cannot get its reservation waits without touching the store, and a
+  stream that cannot get it within its write deadline is disconnected like a slow one. At most
   16 open streams per user and 128 in all; one more is answered 429 `too_many_streams` before any
   event. Every stream starts with `retry: 2000`. The JSON form returns one page by the same rule
   and the client asks again from the last sequence. A cursor that is not a non-negative integer
@@ -473,9 +479,12 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   server-side limits in #30. Tests: a real Node client to Go over a Windows named pipe (the
   `windows-latest` leg) and a Linux socket; a subscriber that stops reading is disconnected within
   the deadline with the hub's subscriber count back to zero; the 17th stream of one user refused;
-  a payload over 256 KiB stored as an artifact with the event holding its reference; a page cut
-  at 1 MiB before 256 events; many slow streams together never holding more than the 32 MiB
-  budget, the excess disconnected; a malformed cursor; `cursor_ahead` as 409 in the JSON form and
+  a payload whose encoded event exceeds 256 KiB stored as an artifact with the event holding its
+  reference, including one under 256 KiB raw that escaping takes over; a page cut at 1 MiB of
+  encoded bytes before 256 events, including one whose payloads alone fit but whose framing does
+  not; many slow streams together never holding more than the 32 MiB budget, the excess
+  disconnected; with the budget exhausted, no store read started until a reservation is granted;
+  a malformed cursor; `cursor_ahead` as 409 in the JSON form and
   as the closing event in the stream form, after which the Node client and, in a browser test, the
   `EventSource` adapter reopen from 0 without `Last-Event-ID` and do not retry the stale cursor;
   events appended while replay pages are read; `adad` killed and restarted during a replay longer
@@ -491,23 +500,28 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   session cookie, `EventSource` for events). Authorization is always `adad`'s: the bridge forwards
   and refuses only malformed calls, and decides no permission. Import on the desktop keeps the
   native dialog in main, whose path goes to `adad` without passing through the renderer. Import in
-  the browser is a server-side chooser: `adad` lists the import roots the owner allowed on the
-  coordinator host (a setting edited only from the desktop, each root granted to named users; none
-  by default but the owner), browses the directories below a root, and imports a root id plus a
-  relative path; `..`, absolute paths, and links or junctions leaving the root are refused with
-  M3's import blockers. A git URL is the other way in: `https` only, no credentials in the URL,
-  cloned anonymously by `adad` as M3 clones; `ssh`, `file` and private repositories wait for
-  per-user git credentials in the credential profile, a later decision. The clone goes out under
-  an outbound policy, since it is a request the coordinator makes on a user's behalf: the host is
-  resolved by `adad`, and the connection is made to an address it checked, refusing loopback,
-  link-local, unspecified, private (RFC 1918), unique-local (`fc00::/7`), CGNAT (`100.64.0.0/10`)
-  and the coordinator's own interface addresses; redirects are refused (git's
-  `http.followRedirects=false`), so no later hop escapes the check; the transport is pinned to
-  HTTPS (`protocol.allow=never` with `https` alone allowed, which also refuses submodule and
-  other transports); the clone is limited to 15 minutes and 2 GiB on disk, then its process tree
-  ends and the partial clone is removed. The checked address is handed to git with
-  `http.curloptResolve` (`host:443:address`), so git connects to that address and a name that
-  resolves differently on a second lookup cannot slip past the check. Previews are served by
+  the browser is a server-side chooser and nothing else: `adad` lists the import roots the owner
+  allowed on the coordinator host (a setting edited only from the desktop, each root granted to
+  named users; none by default but the owner), browses the directories below a root, and imports
+  a root id plus a relative path; `..`, absolute paths, and links or junctions leaving the root
+  are refused with M3's import blockers. Importing from a git URL is not offered in M4b, in the
+  browser or through `/v1`. A clone is a request the coordinator makes on a user's behalf, and
+  git can connect where an address pin does not reach: another port in the URL, URL rewriting
+  (`url.<base>.insteadOf`) and proxies from git configuration or the environment, submodules,
+  Git LFS and filters fetching from other hosts, and IPv6 or other address forms a host check
+  can miss. Git-URL import waits for a slice that controls every outbound fetch, and that slice
+  must meet at least: HTTPS on port 443 only; git run with an isolated configuration (no system,
+  global or repository config read, `GIT_CONFIG_NOSYSTEM`, an empty `HOME` and
+  `GIT_CONFIG_GLOBAL`) and a cleared proxy environment; no submodules and no LFS or filter
+  downloads (`protocol.allow=never` with `https` alone allowed, LFS and filters disabled);
+  the host resolved by `adad` and the connection pinned to the checked address
+  (`http.curloptResolve`), the check covering IPv4 and IPv6 and refusing loopback, link-local,
+  unspecified, private (RFC 1918), unique-local (`fc00::/7`), CGNAT (`100.64.0.0/10`),
+  IPv4-mapped and other embedded forms of these, and the coordinator's own addresses;
+  redirects refused (`http.followRedirects=false`); no credentials in the URL; and a time and
+  disk limit after which the process tree ends and the partial clone is removed. Each condition
+  comes with its test then; `ssh`, `file` and private repositories wait further for per-user git
+  credentials in the credential profile. Previews are served by
   `adad`'s preview listener, a reverse proxy to the managed preview process, on its own host name
   and port (`preview.home.adanext.si`, the listener's port plus one by default, a DNS-only record
   on the same private address, the certificate naming both hosts). The UI embeds a preview in an
@@ -529,20 +543,17 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   Tests: no module outside the adapters touches `window.ada` or `fetch`; the component tests run
   against both adapters with one fake `adad`; an action `adad` refuses comes back as `adad`'s
   refusal through the bridge; browsing outside a granted root, through `..`, an absolute path or
-  an escaping link or junction, and a root granted to another user, refused; a git URL with
-  credentials or a non-`https` scheme refused; a git URL whose host resolves to loopback, a
-  link-local address, an RFC 1918 or unique-local address, or one of the coordinator's own
-  addresses refused before any connection, against a fake resolver; a redirect from an allowed
-  host to a refused one not followed; a host that resolves first to a public and then to a
-  private address still reached only at the checked one; a clone past the time or size limit
-  ended and removed; from a preview page, reading `/v1` fails, a mutating request with the user's
-  cookies is refused, framing an Ada page fails; a preview without a ticket, with a reused or
+  an escaping link or junction, and a root granted to another user, refused; the browser offering
+  no git-URL import and `/v1` refusing an import by URL; from a preview page, reading `/v1`
+  fails, a mutating request with the user's cookies is refused, framing an Ada page fails; a
+  preview without a ticket, with a reused or
   expired one, or for a non-member refused; the preview cookie refused by `/v1`; a member
   removed while viewing a preview, after which their next page, asset
   and WebSocket upgrade are refused and an open WebSocket is closed; a cookie for one preview
   refused on another. Reason: a typed bridge is an interface, not authorization, so the one place
   that authorizes must be `adad` for both shells, and a browser can neither open a host dialog nor
-  be trusted with a typed host path.
+  be trusted with a typed host path; a git clone is held to the checked address only once every
+  fetch git can make is controlled, so until then the smaller safe option is no clone at all.
 
 - **2026-10-14, LAN session security (#6).** The desktop form's implicit local user is the owner
   account: when web access is enabled the owner adds a credential to that same `users` row, so
@@ -614,17 +625,25 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   engine's handshake advertises approvals, which needs a Harness protocol version and a new
   engine pin, each its own decision. Until then the permission prompts of the M4b evidence are
   Ada's own decisions before launch (`PermissionDecision`, `docs/plan.md` section 2), held by a
-  scheduler gate. A forward migration in the M4b slice adds `permission_decisions`: the attempt,
-  the task revision, the execution policy decided (backend, mode, network), the decision (allow
-  or deny), the deciding user, the time and the request's idempotency key. A start whose execution
-  policy exceeds the project's default (a write mode or network access) records the attempt
-  `pending` as M2.3b does and marks it as needing a decision; in #9's queue such an attempt keeps
-  its place but is passed over until decided, so it never holds up other users' work. The
-  executor launches a pending
-  attempt only when an allow decision for that attempt exists and its task revision and policy
-  still equal the task's and the attempt's, checked in the transaction that moves the attempt to
-  launching, so a task edited after the decision waits for a new one and no process starts before
-  approval. `POST /v1/attempts/{id}/decision` takes the decision and an `Idempotency-Key` (the
+  scheduler gate. The scheduler, #9's queue, is the only launch path in M4b: it replaces the
+  direct launch after a start, so every attempt, needing a decision or not, launches through the
+  same claim. The claim stays M2.3b's atomic claim-once update of `pending` to `launching`,
+  extended with the decision check in the same transaction: an attempt moves from `pending` to
+  `launching` only if no decision is required for it (its scope, judged at the claim against the
+  project's current default, does not exceed it), or a matching, unexpired allow decision exists.
+  A decision binds the task revision, the source snapshot's content identity, the exact
+  permitted scope (backend, mode, network access and workspace) and the coordinator's ownership
+  generation (`docs/plan.md` section 2); it matches only while all four still equal the
+  attempt's, and any change to a binding (a task edited, a new snapshot, another scope, a new
+  generation after a restart) requires a fresh decision, never a reuse of the old one. A decision
+  expires 24 hours after it is made. A forward migration in the M4b slice adds
+  `permission_decisions`: the attempt, the four bindings, the decision (allow or deny), the
+  deciding user, the time, the expiry and the request's idempotency key. A start whose scope
+  exceeds the project's default (a write mode or network access) records the attempt `pending` as
+  M2.3b does and marks it as needing a decision; in the queue such an attempt keeps its place but
+  is passed over until decided, so it never holds up other users' work, and no process starts
+  before approval. `POST /v1/attempts/{id}/decision` takes the decision and an
+  `Idempotency-Key` (the
   same key and body return the first result, a different body under it is refused); allow and
   deny are accepted from the attempt's actor alone, and a project owner may deny but not allow,
   as #3 says; anyone else, and any decision on an attempt no longer pending, is refused. A deny
@@ -637,8 +656,12 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   forwarded; a sign-in job viewed, answered or cancelled from another session refused; a
   loopback-only provider not offered in the browser; mode `ask` refused while the handshake says
   `approvals: false`; an attempt needing a decision never launched (the fake engine never
-  started) until its actor allows it, then launched once; a task revision changed after the
-  decision, the attempt not launched; a decision from another member refused, an owner's allow
+  started) until its actor allows it, then launched once; after an allow, a changed task
+  revision, a new source snapshot, a changed backend, mode, network access or workspace, and a
+  new ownership generation each leaving the attempt unlaunched until a fresh decision; an expired
+  allow not launching on a fake clock; an attempt needing no decision launched through the same
+  claim, with no other code path moving an attempt to `launching`; two claims racing on one
+  attempt, one wins; a decision from another member refused, an owner's allow
   refused and an owner's deny accepted; a repeated request with the same key returning the first
   result; a decision on a launched or closed attempt refused.
   Reason: a callback to `localhost` lands on the wrong computer, and binding the job to its
@@ -673,7 +696,12 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   crash: before calling Cloudflare, `adad` records the challenge intent (the record name, the
   exact TXT value and the ACME order) durably in its store; after the create call it adds the
   record id. The record is deleted after each validation, successful or not, and the intent is
-  closed. At start, and before each new challenge, `adad` reconciles: for every open intent it
+  closed only once the deletion is confirmed: the delete call succeeds or answers not found, or a
+  listing shows no record with the intent's value. While listing or deleting fails, the intent
+  stays open and cleanup retries on its own with backoff from 1 minute doubling to 1 hour until
+  the deletion is confirmed, independent of the next issuance, which neither waits for it nor
+  stands in for it. At start, and before each new challenge, `adad` also reconciles: for every
+  open intent it
   lists the TXT records at `_acme-challenge.<configured host>` and deletes those whose value
   equals a recorded intent's value, whether or not their id was recorded, and no others; a record
   with a value no intent holds is left alone and reported to the owner. Some home resolvers and
@@ -687,7 +715,10 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   step of the replacement, ending on a complete pair; a connection open across a renewal keeping
   its certificate while a new one gets the new pair; the challenge record deleted after success,
   after failure and at restart; a crash after the create call and before the record id is
-  recorded, after which the restart deletes that record by its value; a TXT record at the
+  recorded, after which the restart deletes that record by its value; a fake Cloudflare whose
+  listing and then deletion fail, after which the intent stays open and cleanup retries on a
+  fake clock with no issuance due, closing the intent only after a confirmed deletion; a TXT
+  record at the
   challenge name with a value no intent holds left in place; a fake Cloudflare API that fails the
   test on any call other than the challenge TXT record; the token absent from logs and errors; a
   token file readable by
@@ -732,8 +763,12 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
 
 - **2026-10-14, adanext-images compatibility manifest (#10).** The manifest lives in
   `adanext-images` as one JSON file per image revision, `manifests/<image-version>.json`,
-  immutable once an image is built from it. It holds `manifest_version` (1), the image name and
-  version, the image's SHA-256, the `adanext-images` commit, the `adanext-os` commit of the
+  immutable once added. It holds `manifest_version` (1), the image name and version; the source
+  commit, the `adanext-images` commit the image was built from, which comes before the commit
+  that adds the manifest (a commit cannot name itself); the exact built artifact Ada is given,
+  named by its file (the exported VM disk, `<image>-<version>.vmdk`, or an OVA,
+  `<image>-<version>.ova`, whichever M5's slice exports) with that file's SHA-256; the
+  `adanext-os` commit of the
   `ada-guest` it contains with that binary's SHA-256, the guest protocol versions `ada-guest`
   speaks, the Harness revision and binary SHA-256 inside the guest, the minimum `adad` version, the
   base system (Ubuntu 24.04 and its build date), the Packer and plugin versions, and the
@@ -741,33 +776,42 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   `scripts/build-engine.sh` at the pinned revision and `ada-guest` built from the named
   `adanext-os` commit, both built outside the image and copied in, so no toolchain inside the
   guest produces a binary Ada depends on. The toolchain versions are therefore inventory:
-  recorded in the manifest, compared with the built image, shown in `adad`'s diagnostics, and never
+  recorded in the manifest from what the build finds in the artifact, shown in `adad`'s
+  diagnostics, and never
   a reason to refuse an image in M5. If a later image builds `hrn` or `ada-guest` inside the
-  guest, the Go toolchain becomes a gate, decided then. `adad` refuses an image without a
-  manifest, with an unknown `manifest_version`, whose hash differs, whose guest protocol it does
-  not speak,
+  guest, the Go toolchain becomes a gate, decided then. `adad` computes the SHA-256 of the
+  artifact file it is given and refuses an image without a manifest, with an unknown
+  `manifest_version`, whose artifact hash differs from the manifest's, whose guest protocol it
+  does not speak,
   whose Harness revision differs from its own `engine/engine.json`, or whose minimum version it
   does not meet, each with its own reason, before any VM is created from it. In `adanext-images`,
-  a pull request that changes an image adds its manifest in the same pull request; CI there
-  validates the schema, that the `adanext-os` commit exists, and that its `engine/engine.json`
-  names the manifest's Harness revision; and the image build there checks the built image
-  against its manifest before publishing it: it reads `ada-guest` and `hrn` from the image's
-  filesystem and fails unless their SHA-256 equal the manifest's, asks `ada-guest` and `hrn` for
-  their protocol versions and revision and fails on a mismatch, and compares the toolchain
-  versions it finds with the manifest's, reporting a difference in the build log without
-  failing, so a manifest never claims a binary its image does not contain. A pull request in
+  a pull request that changes an image changes its source; once merged, CI builds the artifact
+  from that source commit, hashes those bytes, and inspects the same bytes (the exported disk
+  opened read-only, never a rebuild or the build VM): it reads `ada-guest` and `hrn` from the
+  artifact's filesystem and fails unless their SHA-256 equal those of the binaries built outside
+  the image from the named `adanext-os` commit and the pinned Harness revision, asks `ada-guest`
+  and `hrn` for their protocol versions and revision and fails on a mismatch, and records the
+  toolchain versions it finds, so a manifest never claims a binary its artifact does not contain.
+  It then writes the manifest with the source commit, the artifact's name and hash and what it
+  inspected, adds it in a pull request of its own, and publishes exactly the bytes it hashed and
+  inspected, checking their hash again at upload. CI on the manifest's pull request validates
+  the schema, that the source commit is an ancestor of the manifest's commit, that the
+  `adanext-os` commit exists, and that its `engine/engine.json` names the manifest's Harness
+  revision. A pull request in
   `adanext-os` that changes the guest protocol, the engine pin or the minimum image it accepts
   links the `adanext-images` pull request
   that publishes a matching manifest; `adad`'s refusal of non-matching images is what keeps the
   pair honest if one lands first. Carried by M5. Tests: an image without a manifest, with an
-  unknown manifest version, a wrong hash, an unsupported protocol, another Harness revision and a
-  minimum above `adad`'s version, each refused with its reason; a matching image accepted; the
-  `adanext-images` CI check failing a manifest whose Harness revision differs from the named
-  `adanext-os` commit's pin; against a built image, the build check failing when `ada-guest` or
-  `hrn` inside it is replaced by another binary, when a guest protocol or revision differs, and
-  passing on the unchanged image; a toolchain version that differs from the manifest's reported
-  by the build check without failing it; an image accepted by `adad` with the manifest's
-  toolchain versions shown in its diagnostics. Reason: the guest and the coordinator must run the
+  unknown manifest version, an artifact changed by one byte after the manifest was written, an
+  unsupported protocol, another Harness revision and a minimum above `adad`'s version, each
+  refused with its reason; a matching image accepted; the `adanext-images` CI check failing a
+  manifest whose Harness revision differs from the named `adanext-os` commit's pin, and one whose
+  source commit is not an ancestor of the manifest's commit; against a built artifact, the
+  build check failing when `ada-guest` or `hrn` inside it is replaced by another binary, when a
+  guest protocol or revision differs, and passing on the unchanged artifact; the publish step
+  refusing a file whose hash differs from the inspected one; an image accepted by `adad` with
+  the manifest's toolchain versions shown in its diagnostics. Reason: the guest and the
+  coordinator must run the
   same engine protocol, and a manifest checked on both sides turns a silent mismatch into a
   refusal before launch.
 

@@ -152,15 +152,17 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   client. Evidence: Playwright from a second browser context, and a real run from a second
   computer over HTTPS (own account, project, task and provider sign-in, a permission prompt
   answered there, reconnect), the fifth lane of the v1 gate (decisions log, 2026-10-13). Also
-  the tests the decisions log, 2026-10-14, gives for the browser boundary (#5: the per-request
-  preview check and the git-URL outbound policy among them), sessions (#6), the sign-in relay and
-  the `permission_decisions` gate (#7), the token, renewal and challenge reconciliation (#8), the
+  the tests the decisions log, 2026-10-14, gives for the browser boundary (#5: the import-root
+  chooser as the only browser import, no git-URL import, and the per-request preview check),
+  sessions (#6), the sign-in relay and the `permission_decisions` gate on the scheduler's
+  claim, the only launch path (#7), the token, renewal and challenge reconciliation (#8), the
   owner account's stop (#9), membership removal and artifact reads (#3), and the `EventSource`
   side of `cursor_ahead` (#4).
 - **M5 VMware execution:** Packer template, guest service, isolated network, guest login, previews,
-  recovery. Images carry the compatibility manifest of #10, the `adanext-images` build checks the
-  binaries inside each built image against it, and `adad` refuses an image it does not satisfy,
-  with the tests the decisions log, 2026-10-14, lists.
+  recovery. Images carry the compatibility manifest of #10, naming the source commit and the
+  built artifact's SHA-256; the `adanext-images` build inspects the binaries inside the artifact
+  it hashed and publishes those same bytes, and `adad` hashes the artifact it is given and
+  refuses one the manifest does not match, with the tests the decisions log, 2026-10-14, lists.
 - **M6 Resume intelligence:** evidence extraction, cited summaries, next-task proposals,
   continuation.
 - **M7 Review and integration:** review package, branch export, destination checks.
