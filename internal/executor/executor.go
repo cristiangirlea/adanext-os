@@ -656,7 +656,7 @@ func (e *Executor) append(a store.Attempt, kind string, payload []byte, session 
 		if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&seq); err != nil {
 			return err
 		}
-		if err := tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Payload: payload}); err != nil {
+		if err := e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Payload: payload}); err != nil {
 			return err
 		}
 		if kind == "session" {
@@ -672,6 +672,42 @@ func (e *Executor) append(a store.Attempt, kind string, payload []byte, session 
 		e.afterAppend()
 	}
 	return err
+}
+
+func (e *Executor) appendBoundedEvent(tx *store.Tx, event store.Event) error {
+	encodedPayload, err := json.Marshal(event.Payload)
+	if err != nil {
+		return err
+	}
+	streamBytes := len(fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", event.Seq, event.Kind, encodedPayload))
+	jsonBytes, err := json.Marshal(struct {
+		Attempt string          `json:"attempt"`
+		Seq     int64           `json:"seq"`
+		Time    string          `json:"time"`
+		Kind    string          `json:"kind"`
+		Payload json.RawMessage `json:"payload"`
+	}{event.Attempt, event.Seq, event.Time, event.Kind, event.Payload})
+	if err != nil {
+		return err
+	}
+	if streamBytes > 256<<10 || len(jsonBytes) > 256<<10 {
+		if e.cfg.Artifacts == nil {
+			return errors.New("artifact store unavailable")
+		}
+		raw := event.Payload
+		ref, err := e.cfg.Artifacts.Write(context.Background(), bytes.NewReader(raw), int64(len(raw)))
+		if err != nil {
+			return fmt.Errorf("event artifact: %w", err)
+		}
+		if err := tx.ReferenceArtifact(context.Background(), ref.Hash, ref.Size, fmt.Sprintf("attempt:%s:event:%d", event.Attempt, event.Seq)); err != nil {
+			return err
+		}
+		event.Payload, err = json.Marshal(map[string]any{"payload_artifact": ref.Hash, "payload_size": len(raw)})
+		if err != nil {
+			return err
+		}
+	}
+	return tx.AppendOwnedEvent(context.Background(), event)
 }
 
 func (e *Executor) result(a store.Attempt, m message, line []byte) error {
@@ -710,7 +746,7 @@ func (e *Executor) result(a store.Attempt, m message, line []byte) error {
 		if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&seq); err != nil {
 			return err
 		}
-		return tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "result", Payload: line})
+		return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "result", Payload: line})
 	})
 	if err == nil && e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)
@@ -812,19 +848,19 @@ func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed
 			return err
 		}
 		if attemptState == "recovery_required" {
-			if err := tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "recovery", Payload: []byte(`{"reason":"engine exit not confirmed"}`)}); err != nil {
+			if err := e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "recovery", Payload: []byte(`{"reason":"engine exit not confirmed"}`)}); err != nil {
 				return err
 			}
 			seq++
 		}
 		if !causeRecorded {
-			if err := tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload}); err != nil {
+			if err := e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload}); err != nil {
 				return err
 			}
 			seq++
 		}
 		if killed {
-			return tx.AppendOwnedEvent(context.Background(), store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: []byte(`{"error":"engine was killed after the grace period"}`)})
+			return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: []byte(`{"error":"engine was killed after the grace period"}`)})
 		}
 		return nil
 	})

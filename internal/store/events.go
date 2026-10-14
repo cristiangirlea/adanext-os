@@ -48,6 +48,27 @@ func appendEvent(ctx context.Context, tx *sql.Tx, event Event) error {
 // Events returns events strictly after afterSeq, ordered by sequence. An unknown
 // attempt or an empty tail returns an empty slice.
 func (s *Store) Events(ctx context.Context, userID, attempt string, afterSeq int64) ([]Event, error) {
+	return s.EventsPage(ctx, userID, attempt, afterSeq, 0, 0, nil)
+}
+
+// LastEventSequence returns the last recorded sequence for an accessible attempt.
+func (s *Store) LastEventSequence(ctx context.Context, userID, attempt string) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if err := requireAttemptMember(ctx, tx, userID, attempt); err != nil {
+		return 0, err
+	}
+	var last int64
+	err = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq),0) FROM events WHERE attempt=?", attempt).Scan(&last)
+	return last, err
+}
+
+// EventsPage reads strictly after afterSeq and stops before the first event that
+// would exceed maxBytes. A zero count or byte limit is unlimited for old callers.
+func (s *Store) EventsPage(ctx context.Context, userID, attempt string, afterSeq int64, limit, maxBytes int, encodedSize func(Event) int) ([]Event, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
@@ -59,12 +80,19 @@ func (s *Store) Events(ctx context.Context, userID, attempt string, afterSeq int
 		}
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT attempt,seq,time,kind,payload FROM events WHERE attempt=? AND seq>? ORDER BY seq", attempt, afterSeq)
+	query := "SELECT attempt,seq,time,kind,payload FROM events WHERE attempt=? AND seq>? ORDER BY seq"
+	args := []any{attempt, afterSeq}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	events := []Event{}
+	bytesUsed := 0
 	for rows.Next() {
 		var event Event
 		var payload string
@@ -72,6 +100,13 @@ func (s *Store) Events(ctx context.Context, userID, attempt string, afterSeq int
 			return nil, err
 		}
 		event.Payload = json.RawMessage(payload)
+		if encodedSize != nil {
+			size := encodedSize(event)
+			if maxBytes > 0 && bytesUsed+size > maxBytes && len(events) != 0 {
+				break
+			}
+			bytesUsed += size
+		}
 		events = append(events, event)
 	}
 	return events, rows.Err()
