@@ -1,8 +1,10 @@
 package executor
 
 import (
+	"fmt"
 	"os/exec"
 	"sync"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -13,7 +15,7 @@ type processSupervisor struct {
 	job windows.Handle
 }
 
-func newProcessSupervisor(*exec.Cmd) (*processSupervisor, error) {
+func newProcessSupervisor(cmd *exec.Cmd) (*processSupervisor, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, err
@@ -24,6 +26,7 @@ func newProcessSupervisor(*exec.Cmd) (*processSupervisor, error) {
 		windows.CloseHandle(job)
 		return nil, err
 	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
 	return &processSupervisor{job: job}, nil
 }
 
@@ -33,7 +36,31 @@ func (s *processSupervisor) started(cmd *exec.Cmd) error {
 		return err
 	}
 	defer windows.CloseHandle(process)
-	return windows.AssignProcessToJobObject(s.job, process)
+	if err := windows.AssignProcessToJobObject(s.job, process); err != nil {
+		return fmt.Errorf("assign suspended engine to job: %w", err)
+	}
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return fmt.Errorf("snapshot engine threads: %w", err)
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	for err = windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
+		if entry.OwnerProcessID != uint32(cmd.Process.Pid) {
+			continue
+		}
+		thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+		if err != nil {
+			return fmt.Errorf("open suspended engine thread: %w", err)
+		}
+		_, err = windows.ResumeThread(thread)
+		windows.CloseHandle(thread)
+		if err != nil {
+			return fmt.Errorf("resume engine thread: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("find suspended engine thread: %w", err)
 }
 
 func (s *processSupervisor) close() {

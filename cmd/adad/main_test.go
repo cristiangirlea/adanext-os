@@ -502,6 +502,11 @@ func TestCrashAndRestartRecoversTheRunningAttemptWithoutRelaunch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check engine %d: %v", pid, err)
 	}
+	// Windows owns the engine through a kill-on-close Job Object. Unix has no
+	// equivalent coordinator-death guarantee, so either exit or survival is valid there.
+	if runtime.GOOS == "windows" && current == engineIdentity {
+		t.Errorf("engine %d survived coordinator death", pid) // Continue to identity-checked cleanup below.
+	}
 	if current == engineIdentity {
 		engineProcess, err := os.FindProcess(pid)
 		if err == nil {

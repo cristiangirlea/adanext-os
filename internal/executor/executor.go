@@ -51,6 +51,7 @@ type Executor struct {
 	active          map[string]*active
 	stopped         bool
 	wg              sync.WaitGroup
+	beforeAccepted  func(*time.Timer, *atomic.Bool)   // Test seam for the preparing deadline race.
 	afterAppend     func()                            // Set only by tests to simulate slow event storage.
 	beforeIdleCheck func(*atomic.Int64, *atomic.Bool) // Set only by tests to order a read against the idle check.
 }
@@ -285,7 +286,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			_ = stdout.Close()
 		}
 	}
-	var readProgress atomic.Int64
+	var readProgress, readBytes atomic.Int64
 	var reading atomic.Bool
 	var timerMu sync.Mutex
 	var closeTimer, killTimer, idleTimer, exitTimer *time.Timer
@@ -339,8 +340,24 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		}
 		idleTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkIdle(current) })
 	}
+	// Bound descendant output, while allowing slow storage to consume all bytes
+	// written before exit (the pipe plus bufio buffer hold less than 1 MiB).
+	var checkExitBudget func(int64)
+	checkExitBudget = func(atExit int64) {
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		if shutdownStopped {
+			return
+		}
+		if readBytes.Load()-atExit > 1<<20 {
+			_ = stdout.Close()
+			return
+		}
+		exitTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkExitBudget(atExit) })
+	}
 	go func() {
 		err := cmd.Wait()
+		atExit := readBytes.Load()
 		processMu.Lock()
 		exitErr, exited = err, true
 		processMu.Unlock()
@@ -349,7 +366,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		if !shutdownStopped {
 			last := readProgress.Load()
 			idleTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkIdle(last) })
-			exitTimer = time.AfterFunc(2*e.cfg.CancelGrace, func() { _ = stdout.Close() })
+			exitTimer = time.AfterFunc(2*e.cfg.CancelGrace, func() { checkExitBudget(atExit) })
 		}
 		timerMu.Unlock()
 		close(processDone)
@@ -407,6 +424,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			readProgress.Add(1)
 			reading.Store(true)
 			part, err := reader.ReadSlice('\n')
+			readBytes.Add(int64(len(part)))
 			if len(part) != 0 {
 				readProgress.Add(1)
 			}
@@ -462,6 +480,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 						readProgress.Add(1)
 						reading.Store(true)
 						n, drainErr := reader.Read(buf)
+						readBytes.Add(int64(n))
 						if n != 0 {
 							readProgress.Add(1)
 						}
@@ -478,7 +497,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}
 	abort := func(cause error) {
 		causeRecorded := e.recordCause(a, cause)
-		_, killed, _ := drain()
+		_, killed, waitErr := drain()
+		if waitErr != nil && !killed {
+			cause = fmt.Errorf("%w; engine exit: %v", cause, waitErr)
+			causeRecorded = false
+		}
 		e.failFinal(a, cause, causeRecorded, killed)
 	}
 	var preparingExpired atomic.Bool
@@ -547,7 +570,13 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		abort(errors.New("invalid accepted response"))
 		return
 	}
-	preparingTimer.Stop()
+	if e.beforeAccepted != nil {
+		e.beforeAccepted(preparingTimer, &preparingExpired)
+	}
+	if !preparingTimer.Stop() {
+		abort(errors.New("preparing deadline exceeded"))
+		return
+	}
 	if err := e.owned(a.ID, func(tx *store.Tx) error {
 		var state store.State
 		var rev int64
@@ -613,13 +642,10 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 			if !errors.Is(tailErr, io.EOF) && !errors.Is(tailErr, os.ErrClosed) {
 				cause := fmt.Errorf("result tail: %w", tailErr)
-				causeRecorded := false
-				if !errors.Is(tailErr, os.ErrClosed) {
-					causeRecorded = e.recordCause(a, cause)
-				}
+				causeRecorded := e.recordCause(a, cause)
 				killed, _ := waitExit()
 				if killed {
-					if m.Result.Status == "ok" && fatalCause == nil {
+					if m.Result.Status == "ok" {
 						e.recoverAfterResult(a)
 					} else if fatalCause != nil {
 						e.failFinal(a, fatalCause, true, true)
@@ -849,16 +875,16 @@ func (e *Executor) recordCause(a store.Attempt, cause error) bool {
 }
 
 func (e *Executor) recoverAfterResult(a store.Attempt) {
-	_ = e.owned(a.ID, func(tx *store.Tx) error {
+	err := e.owned(a.ID, func(tx *store.Tx) error {
 		var state store.State
 		var rev int64
 		if err := tx.QueryRowContext(context.Background(), "SELECT state,revision FROM tasks WHERE id=?", a.Task).Scan(&state, &rev); err != nil {
 			return err
 		}
-		if state != store.Running {
+		if state != store.Running && state != store.CancelRequested {
 			return fmt.Errorf("result recovery: task is %s", state)
 		}
-		if err := tx.TransitionOwned(context.Background(), a.Task, store.Running, store.Interrupted, rev); err != nil {
+		if err := tx.TransitionOwned(context.Background(), a.Task, state, store.Interrupted, rev); err != nil {
 			return err
 		}
 		if err := tx.TransitionOwned(context.Background(), a.Task, store.Interrupted, store.RecoveryRequired, rev+1); err != nil {
@@ -873,6 +899,10 @@ func (e *Executor) recoverAfterResult(a store.Attempt) {
 		}
 		return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "recovery", Payload: []byte(`{"reason":"engine had to be killed after its result"}`)})
 	})
+	if err != nil {
+		e.failFinal(a, fmt.Errorf("result recovery: %w", err), false, true)
+		return
+	}
 	if e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)
 	}

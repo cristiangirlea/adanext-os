@@ -46,11 +46,20 @@ func TestHelperFakeEngine(t *testing.T) {
 		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
 		f.Close()
-		chunk := strings.Repeat("x", 64<<10)
+		// Exceed the 1 MiB budget promptly even with coarse Windows sleep ticks.
+		chunk := strings.Repeat("x", 256<<10)
 		for {
 			fmt.Print(chunk)
 			time.Sleep(20 * time.Millisecond)
 		}
+	}
+	if script == "backend_group" {
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		script = "grandchild_hold"
 	}
 	if script == "grandchild_hold" {
 		identity, _ := processIdentity(os.Getpid())
@@ -70,6 +79,9 @@ func TestHelperFakeEngine(t *testing.T) {
 		}
 	}
 	mark(script)
+	if script == "exit_immediately" {
+		os.Exit(23)
+	}
 	if script == "no_hello" {
 		for {
 			time.Sleep(time.Hour)
@@ -145,6 +157,19 @@ func TestHelperFakeEngine(t *testing.T) {
 	if script == "unknown_event_kind" {
 		line(3, "event", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "event": map[string]any{"kind": "mystery"}})
 		return
+	}
+	if strings.HasPrefix(script, "fatal_ok") {
+		line(3, "error", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "fatal": true, "error": map[string]any{"code": "storage", "message": "full"}})
+		line(4, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
+		if script == "fatal_ok_bad_tail_block" {
+			fmt.Println("bad json")
+		}
+		if script != "fatal_ok" {
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		os.Exit(0)
 	}
 	if script == "nonfatal_error" {
 		line(3, "error", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "fatal": false, "error": map[string]any{"code": "bad_request", "message": "ignored cancel"}})
@@ -223,19 +248,43 @@ func TestHelperFakeEngine(t *testing.T) {
 			os.Exit(3)
 		}
 	}
-	if script == "stream_after_exit" || script == "grandchild_after_result" {
+	if script == "stream_after_exit" || script == "grandchild_after_result" || script == "nested_tree" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
 		childScript := "grandchild_hold"
 		if script == "stream_after_exit" {
 			childScript = "grandchild_stream"
 		}
+		if script == "nested_tree" {
+			childScript = "backend_group"
+		}
 		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE="+childScript)
 		child.Stdout = os.Stdout
+		var nested *processSupervisor
+		if script == "nested_tree" {
+			var err error
+			// Mirror Harness: a separate backend process group on Unix, and a
+			// nested kill-on-close Job Object (without breakaway) on Windows.
+			nested, err = newProcessSupervisor(child)
+			if err != nil {
+				os.Exit(3)
+			}
+			defer nested.close()
+		}
 		if err := child.Start(); err != nil {
 			os.Exit(3)
 		}
-		for i := 0; i < 100; i++ {
-			if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
+		if nested != nil {
+			if err := nested.started(child); err != nil {
+				_ = child.Process.Kill()
+				os.Exit(3)
+			}
+		}
+		wantChildren := 1
+		if script == "nested_tree" {
+			wantChildren = 2
+		}
+		for i := 0; i < 2000; i++ {
+			if data, err := os.ReadFile(marker); err == nil && strings.Count(string(data), "child:") >= wantChildren {
 				break
 			}
 			time.Sleep(time.Millisecond)
@@ -278,6 +327,9 @@ func TestHelperFakeEngine(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 5<<20))
 		return
 	}
+	if script == "slow_storage" {
+		time.Sleep(50 * time.Millisecond)
+	}
 	final := "done"
 	if script == "big" || script == "big_block" {
 		final = strings.Repeat("x", 100*1024)
@@ -291,7 +343,7 @@ func TestHelperFakeEngine(t *testing.T) {
 			time.Sleep(time.Hour)
 		}
 	}
-	if script == "grandchild_after_result" {
+	if script == "grandchild_after_result" || script == "nested_tree" {
 		for {
 			time.Sleep(time.Hour)
 		}
@@ -412,9 +464,9 @@ func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
 }
 
 func TestResultBeforeNaturalExitWithSlowStorageEndsOK(t *testing.T) {
-	e, s, _, _ := testExecutor(t, "delayed_exit")
-	e.cfg.CancelGrace = 500 * time.Millisecond
-	e.afterAppend = func() { time.Sleep(150 * time.Millisecond) }
+	e, s, _, _ := testExecutor(t, "slow_storage")
+	e.cfg.CancelGrace = 100 * time.Millisecond
+	e.afterAppend = func() { time.Sleep(3 * e.cfg.CancelGrace) }
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
