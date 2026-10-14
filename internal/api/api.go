@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -24,10 +25,12 @@ type Authenticator func(*http.Request) (string, error)
 var errEngineUnavailable = errors.New("engine unavailable")
 
 type handler struct {
-	store *store.Store
-	hub   *Hub
-	auth  Authenticator
-	exec  Execution
+	store    *store.Store
+	hub      *Hub
+	auth     Authenticator
+	exec     Execution
+	readPage func(context.Context, string, string, int64, int, int, func(store.Event) int) ([]store.Event, error)
+	readLast func(context.Context, string, string) (int64, error)
 }
 
 // AttemptRunner is the narrow API-to-executor notification boundary.
@@ -57,7 +60,7 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var allowed []string
-		for _, method := range []string{http.MethodGet, http.MethodPost} {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 			probe := r.Clone(r.Context())
 			probe.Method = method
 			if _, pattern := mux.Handler(probe); pattern != "/" {
@@ -71,13 +74,34 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 		}
 		writeError(w, http.StatusNotFound, "not_found")
 	})
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, err := newID()
+		if err != nil {
+			id = fmt.Sprintf("%d", time.Now().UnixNano())
+		}
+		mux.ServeHTTP(&requestWriter{ResponseWriter: w, id: id}, r)
+	})
+}
+
+type requestWriter struct {
+	http.ResponseWriter
+	id string
+}
+
+func (w *requestWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *requestWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+func (w *requestWriter) FlushError() error {
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 func (h *handler) actor(w http.ResponseWriter, r *http.Request) (string, bool) {
 	user, err := h.auth(r)
 	if err != nil || user == "" {
-		writeError(w, http.StatusInternalServerError, "internal")
+		writeInternalError(w, err)
 		return "", false
 	}
 	return user, true
@@ -89,11 +113,28 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down"}[code]
+	if status == 500 {
+		writeInternalError(w, errors.New("unspecified internal error"))
+		return
+	}
 	writeJSON(w, status, struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
 	}{code, message})
+}
+
+func writeInternalError(w http.ResponseWriter, err error) {
+	id := "unknown"
+	if rw, ok := w.(*requestWriter); ok {
+		id = rw.id
+	}
+	fmt.Fprintf(os.Stderr, "adad: request %s: %v\n", id, err)
+	writeJSON(w, 500, struct {
+		Error     string `json:"error"`
+		Message   string `json:"message"`
+		RequestID string `json:"request_id"`
+	}{"internal", "internal error", id})
 }
 func storeError(w http.ResponseWriter, err error) {
 	switch {
@@ -110,11 +151,15 @@ func storeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errEngineUnavailable):
 		writeError(w, 503, "engine_unavailable")
 	default:
-		writeError(w, 500, "internal")
+		writeInternalError(w, err)
 	}
 }
 
 func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		writeInternalError(w, err)
+		return nil, false
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -153,9 +198,9 @@ func key(w http.ResponseWriter, r *http.Request) (string, bool) {
 	}
 	return k, true
 }
-func hash(r *http.Request, body []byte) string {
+func hash(r *http.Request, body []byte, revision string) string {
 	sum := sha256.New()
-	for _, part := range []string{r.Method, r.URL.Path, r.Header.Get("If-Match")} {
+	for _, part := range []string{r.Method, r.URL.Path, revision} {
 		sum.Write([]byte(part))
 		sum.Write([]byte{0})
 	}
@@ -196,9 +241,9 @@ type cachedResponse struct {
 	Body   json.RawMessage `json:"body"`
 }
 
-func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, fn func(*store.Tx) (int, any, error)) bool {
+func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, revision string, fn func(*store.Tx) (int, any, error)) bool {
 	body := r.Context().Value(bodyKey{}).([]byte)
-	cached, err := h.store.Do(r.Context(), user, k, hash(r, body), scope, func(tx *store.Tx) ([]byte, error) {
+	cached, err := h.store.Do(r.Context(), user, k, hash(r, body, revision), scope, func(tx *store.Tx) ([]byte, error) {
 		status, value, err := fn(tx)
 		if err != nil {
 			return nil, err
@@ -215,7 +260,7 @@ func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string,
 	}
 	var result cachedResponse
 	if err := json.Unmarshal(cached, &result); err != nil {
-		writeError(w, 500, "internal")
+		writeInternalError(w, err)
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -249,7 +294,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
-	h.mutate(w, r, user, k, &store.Scope{ProjectID: input.Project}, func(tx *store.Tx) (int, any, error) {
+	h.mutate(w, r, user, k, &store.Scope{ProjectID: input.Project}, "", func(tx *store.Tx) (int, any, error) {
 		id, err := newID()
 		if err != nil {
 			return 0, nil, err
@@ -287,9 +332,21 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
+	w.Header().Set("ETag", fmt.Sprintf("\"%d\"", task.Revision))
 	writeJSON(w, 200, taskValue(task))
 }
 
+func matchRevision(value string) (int64, error) {
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+	if value == "" || strings.Trim(value, "0123456789") != "" {
+		return 0, errors.New("invalid If-Match revision")
+	}
+	return strconv.ParseInt(value, 10, 64)
+}
+
+// transition accepts a bare or quoted decimal If-Match revision; * is refused.
 func (h *handler) transition(from, to store.State, after ...func(string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, ok := h.actor(w, r)
@@ -301,7 +358,7 @@ func (h *handler) transition(from, to store.State, after ...func(string)) http.H
 			return
 		}
 		match := r.Header.Get("If-Match")
-		revision, err := strconv.ParseInt(match, 10, 64)
+		revision, err := matchRevision(match)
 		if err != nil || match == "" || revision < 0 {
 			writeError(w, 400, "bad_request")
 			return
@@ -321,7 +378,7 @@ func (h *handler) transition(from, to store.State, after ...func(string)) http.H
 			return
 		}
 		r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
-		ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, func(tx *store.Tx) (int, any, error) {
+		ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
 			var current store.State
 			var currentRevision int64
 			if err := tx.QueryRowContext(r.Context(), "SELECT state,revision FROM tasks WHERE id=?", id).Scan(&current, &currentRevision); err != nil {
@@ -365,7 +422,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	match := r.Header.Get("If-Match")
-	revision, err := strconv.ParseInt(match, 10, 64)
+	revision, err := matchRevision(match)
 	if err != nil || match == "" || revision < 0 {
 		writeError(w, 400, "bad_request")
 		return
@@ -392,7 +449,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
 	var attemptID string
-	ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, func(tx *store.Tx) (int, any, error) {
+	ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
 		if h.exec.EngineSHA256 == "" || h.exec.Runner == nil {
 			return 0, nil, errEngineUnavailable
 		}
@@ -447,49 +504,205 @@ func eventValue(e store.Event) eventJSON {
 	return eventJSON{e.Attempt, e.Seq, e.Time, e.Kind, e.Payload}
 }
 
+const pageBytes = 1 << 20
+const eventBytes = 256 << 10
+
+func streamEvent(e store.Event) []byte {
+	data, _ := json.Marshal(e.Payload)
+	kind := strings.Map(func(c rune) rune {
+		if c == '\r' || c == '\n' {
+			return -1
+		}
+		return c
+	}, e.Kind)
+	return []byte(fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", e.Seq, kind, data))
+}
+
+func jsonEvent(e store.Event) []byte {
+	b, _ := json.Marshal(eventValue(e))
+	return b
+}
+
+func (h *handler) page(ctx context.Context, user, id string, after int64, stream bool) ([]store.Event, []byte, error) {
+	encode := jsonEvent
+	overhead := 1 // commas between JSON events
+	if stream {
+		encode, overhead = streamEvent, 0
+	}
+	size := func(e store.Event) int { return len(encode(e)) + overhead }
+	read := h.readPage
+	if read == nil {
+		read = h.store.EventsPage
+	}
+	limit := pageBytes
+	if !stream {
+		limit -= 3
+	} // brackets and newline
+	events, err := read(ctx, user, id, after, 256, limit, size)
+	if err != nil {
+		return nil, nil, err
+	}
+	encoded := make([][]byte, len(events))
+	total := 0
+	if !stream {
+		total = 3 // brackets and newline
+		if len(events) > 1 {
+			total += len(events) - 1 // commas
+		}
+	}
+	for i, e := range events {
+		encoded[i] = encode(e)
+		if len(encoded[i]) > eventBytes {
+			return nil, nil, errors.New("stored event exceeds encoded limit")
+		}
+		total += len(encoded[i])
+	}
+	var page []byte
+	if total != 0 {
+		page = make([]byte, 0, total)
+	}
+	if !stream {
+		page = append(page, '[')
+	}
+	for i, event := range encoded {
+		if !stream && i != 0 {
+			page = append(page, ',')
+		}
+		page = append(page, event...)
+	}
+	if !stream {
+		page = append(page, ']', '\n')
+	}
+	return events, page, nil
+}
+
 func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.actor(w, r)
 	if !ok {
 		return
 	}
 	id := r.PathValue("id")
-	if _, err := h.store.AttemptProject(r.Context(), user, id); err != nil {
-		storeError(w, err)
-		return
-	}
 	cursor := r.URL.Query().Get("after")
-	if values, exists := r.Header[http.CanonicalHeaderKey("Last-Event-ID")]; exists && strings.Join(values, ",") != "" {
-		cursor = strings.Join(values, ",")
+	if values := r.Header.Values("Last-Event-Id"); len(values) > 1 {
+		writeError(w, 400, "bad_request")
+		return
+	} else if len(values) == 1 {
+		if strings.Contains(values[0], ",") {
+			writeError(w, 400, "bad_request")
+			return
+		}
+		if values[0] != "" {
+			cursor = values[0]
+		}
 	}
-	after := int64(0)
+	var after int64
 	if cursor != "" {
 		var err error
 		after, err = strconv.ParseInt(cursor, 10, 64)
-		if err != nil || after < 0 {
+		if err != nil || after < 0 || strings.Trim(cursor, "0123456789") != "" {
 			writeError(w, 400, "bad_request")
 			return
 		}
 	}
-	if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
-		events, err := h.store.Events(r.Context(), user, id, after)
+	stream := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+	if stream {
+		release, ok := h.hub.reserveStream(user)
+		if !ok {
+			writeError(w, 429, "too_many_streams")
+			return
+		}
+		defer release()
+	}
+	if !h.hub.reserveBytes(r.Context(), pageBytes) {
+		if r.Context().Err() == nil {
+			w.Header().Set("Retry-After", "2")
+			writeError(w, 503, "shutting_down")
+		}
+		return
+	}
+	held := pageBytes
+	defer func() {
+		if held != 0 {
+			h.hub.releaseBytes(held)
+		}
+	}()
+	readLast := h.readLast
+	if readLast == nil {
+		readLast = h.store.LastEventSequence
+	}
+	last, err := readLast(r.Context(), user, id)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if after > last {
+		if !stream {
+			writeJSON(w, 409, map[string]any{"error": "cursor_ahead", "message": "cursor ahead", "last_sequence": last})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		rc := http.NewResponseController(w)
+		deadline := h.hub.WriteDeadline
+		if deadline <= 0 {
+			deadline = 10 * time.Second
+		}
+		if err := rc.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
+			return
+		}
+		w.WriteHeader(200)
+		fmt.Fprintf(w, "retry: 2000\n\nevent: cursor_ahead\ndata: {\"last_sequence\":%d}\n\n", last)
+		_ = rc.Flush()
+		_ = rc.SetWriteDeadline(time.Time{})
+		return
+	}
+	if !stream {
+		_, page, err := h.page(r.Context(), user, id, after, false)
 		if err != nil {
 			storeError(w, err)
 			return
 		}
-		result := make([]eventJSON, 0, len(events))
-		for _, e := range events {
-			result = append(result, eventValue(e))
+		h.hub.releaseBytes(held - len(page))
+		held = len(page)
+		w.Header().Set("Content-Type", "application/json")
+		rc := http.NewResponseController(w)
+		deadline := h.hub.WriteDeadline
+		if deadline <= 0 {
+			deadline = 10 * time.Second
 		}
-		writeJSON(w, 200, result)
+		_ = rc.SetWriteDeadline(time.Now().Add(deadline))
+		w.WriteHeader(200)
+		_, _ = w.Write(page)
+		_ = rc.SetWriteDeadline(time.Time{})
 		return
 	}
+	h.hub.releaseBytes(held)
+	held = 0
 	wake, unsubscribe := h.hub.subscribe(id)
 	defer unsubscribe()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(200)
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	rc := http.NewResponseController(w)
+	deadline := h.hub.WriteDeadline
+	if deadline <= 0 {
+		deadline = 10 * time.Second
+	}
+	write := func(page []byte) bool {
+		if err := rc.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
+			return false
+		}
+		n, err := w.Write(page)
+		if err == nil && n != len(page) {
+			err = io.ErrShortWrite
+		}
+		if err == nil {
+			err = rc.Flush()
+		}
+		_ = rc.SetWriteDeadline(time.Time{})
+		return err == nil
+	}
+	if !write([]byte("retry: 2000\n\n")) {
 		return
 	}
 	poll := h.hub.PollInterval
@@ -505,28 +718,43 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 	pingTicker := time.NewTicker(heartbeat)
 	defer pingTicker.Stop()
 	send := func() bool {
-		events, err := h.store.Events(r.Context(), user, id, after)
-		if err != nil {
-			return false
-		}
-		for _, e := range events {
-			data, err := json.Marshal(e.Payload)
-			if err != nil {
-				return false
-			}
-			kind := strings.Map(func(c rune) rune {
-				if c == '\r' || c == '\n' {
-					return -1
+		for {
+			count, lastSeq, pageLen, ok := func() (int, int64, int, bool) {
+				reserveCtx, cancel := context.WithTimeout(r.Context(), deadline)
+				got := h.hub.reserveBytes(reserveCtx, pageBytes)
+				cancel()
+				if !got {
+					return 0, after, 0, false
 				}
-				return c
-			}, e.Kind)
-			if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.Seq, kind, data); err != nil {
+				pageHeld := pageBytes
+				defer func() { h.hub.releaseBytes(pageHeld) }()
+				events, page, err := h.page(r.Context(), user, id, after, true)
+				if err != nil {
+					return 0, after, 0, false
+				}
+				h.hub.releaseBytes(pageHeld - len(page))
+				pageHeld = len(page)
+				count := len(events)
+				lastSeq := after
+				if count != 0 {
+					lastSeq = events[count-1].Seq
+				}
+				if len(page) != 0 && !write(page) {
+					return count, lastSeq, len(page), false
+				}
+				return count, lastSeq, len(page), true
+			}()
+			if !ok {
 				return false
 			}
-			after = e.Seq
+			if count == 0 {
+				return true
+			}
+			after = lastSeq
+			if count < 256 && pageLen < pageBytes-eventBytes {
+				return true
+			}
 		}
-		flusher.Flush()
-		return true
 	}
 	if !send() {
 		return
@@ -546,10 +774,9 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-pingTicker.C:
-			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+			if !write([]byte(": ping\n\n")) {
 				return
 			}
-			flusher.Flush()
 		}
 	}
 }

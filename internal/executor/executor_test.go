@@ -430,6 +430,50 @@ func TestLargeFinalIsStoredAsAReferencedArtifact(t *testing.T) {
 	}
 }
 
+func TestOversizeAndEscapedEventPayloadsBecomeReferencedArtifacts(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "happy")
+	a, err := s.AttemptByID(context.Background(), "attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, payload := range [][]byte{
+		[]byte(`{"text":"` + strings.Repeat("x", 256<<10) + `"}`),
+		[]byte(`{"text":"` + strings.Repeat("\u2028", 45000) + `"}`),
+	} {
+		if i == 1 && len(payload) >= 256<<10 {
+			t.Fatalf("escaping case raw length %d", len(payload))
+		}
+		if err := e.append(a, "event", payload, ""); err != nil {
+			t.Fatal(err)
+		}
+		events, err := s.Events(context.Background(), "u", "attempt", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ref struct {
+			Hash string `json:"payload_artifact"`
+			Size int    `json:"payload_size"`
+		}
+		if err := json.Unmarshal(events[i].Payload, &ref); err != nil {
+			t.Fatal(err)
+		}
+		if len(ref.Hash) != 64 || ref.Size != len(payload) {
+			t.Fatalf("event %d: artifact hash length %d, size %d", i+1, len(ref.Hash), ref.Size)
+		}
+		_, err = s.Do(context.Background(), "u", fmt.Sprintf("artifact-check-%d", i), "check", nil, func(tx *store.Tx) ([]byte, error) {
+			var size int
+			err := tx.QueryRowContext(context.Background(), "SELECT size FROM artifacts WHERE hash=? AND origin=?", ref.Hash, fmt.Sprintf("attempt:attempt:event:%d", i+1)).Scan(&size)
+			if size != len(payload) {
+				t.Errorf("size %d", size)
+			}
+			return []byte("ok"), err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 type noSpaceFile struct{ *os.File }
 
 func (f noSpaceFile) Write([]byte) (int, error) { return 0, syscall.ENOSPC }
