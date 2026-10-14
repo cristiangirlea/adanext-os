@@ -418,7 +418,7 @@ func TestRouterErrorsAreJSON(t *testing.T) {
 		allow        string
 	}{
 		{"GET", "/v1/unknown", 404, "not_found", ""},
-		{"PUT", "/v1/tasks", 405, "method_not_allowed", "GET, POST"},
+		{"PUT", "/v1/tasks", 405, "method_not_allowed", "GET, HEAD, POST"},
 		{"PUT", "/v1/tasks/example/ready", 405, "method_not_allowed", "POST"},
 	} {
 		req, err := http.NewRequest(tc.method, "http://ipc"+tc.path, nil)
