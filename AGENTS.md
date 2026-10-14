@@ -12,6 +12,8 @@ taking a slice, and don't reopen a recorded decision.
 | Path | Holds |
 |---|---|
 | `internal/engine/` | The pinned Harness engine: its source revision and the identity of a built binary. |
+| `internal/artifact/` | Durable content-addressed artifacts and their filesystem boundary. |
+| `internal/executor/` | Local supervision of the pinned engine and attempt event ingestion. |
 | `cmd/adad/` | The coordinator process and its lifecycle. |
 | `internal/api/` | Versioned HTTP API and event subscriptions. |
 | `internal/store/` | SQLite state, schema migrations, and task records. |
@@ -24,7 +26,7 @@ taking a slice, and don't reopen a recorded decision.
 | `scripts/build-engine.sh` | Builds `hrn` from a clean Harness checkout at the pinned revision into `.engine/`. |
 | `docs/` | Plan, status and backlog. |
 
-Planned, not yet present: `internal/executor`, `ui/` (the React app both shells load,
+Planned, not yet present: `ui/` (the React app both shells load,
 from M2.4), and `cmd/ada-guest` (M5).
 
 ## Build and test

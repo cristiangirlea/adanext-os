@@ -153,9 +153,10 @@ func (s *Store) CreateTask(ctx context.Context, userID, id, project, objective, 
 }
 
 type Attempt struct {
-	ID, Task, Actor, Backend, Model, Effort, Executor string
-	OwnershipGeneration                               int64
-	EngineSHA256, State                               string
+	ID, Task, Actor, Backend, Model, Effort, Mode, Executor string
+	OwnershipGeneration                                     int64
+	EngineSHA256, RunID, NativeSession, State               string
+	Started, Ended                                          string
 }
 
 // CreateAttempt records intent with the authenticated actor. Continuations must
@@ -165,7 +166,7 @@ func (s *Store) CreateAttempt(ctx context.Context, attempt Attempt) error {
 		if err := requireTaskMember(ctx, tx, attempt.Actor, attempt.Task); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, "INSERT INTO attempts(id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,state,started) VALUES(?,?,?,?,?,?,?,?,?,?,?)", attempt.ID, attempt.Task, attempt.Actor, attempt.Backend, attempt.Model, attempt.Effort, attempt.Executor, attempt.OwnershipGeneration, attempt.EngineSHA256, attempt.State, now())
+		_, err := tx.ExecContext(ctx, "INSERT INTO attempts(id,task,actor,backend,model,effort,mode,executor,ownership_generation,engine_sha256,state,started) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", attempt.ID, attempt.Task, attempt.Actor, attempt.Backend, attempt.Model, attempt.Effort, attempt.Mode, attempt.Executor, attempt.OwnershipGeneration, attempt.EngineSHA256, attempt.State, now())
 		return err
 	})
 }
