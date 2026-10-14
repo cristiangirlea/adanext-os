@@ -388,6 +388,22 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   state directory rather than `$XDG_RUNTIME_DIR`, so that the lock and the socket cover the same
   coordinators.
 
+- **2026-10-13, M2.3b execution policy, states and recovery.** Start names the backend and mode
+  and may name a model and effort; the same transaction moves the task to preparing and records a
+  pending attempt with its actor, policy, local executor, coordinator generation and engine hash.
+  Migration 0004 adds the attempt mode and a coordinator generation row without changing earlier
+  migrations. Preparing may fail when launch is refused or interrupted when the coordinator stops
+  before acceptance. Any current project member may cancel; protocol v1 cannot deliver approval
+  prompts, so prompts addressed to the task actor wait for a later engine protocol. An okay result
+  leaves the task verifying, a completed cancel leaves it canceled, and other results or protocol,
+  storage and artifact failures fail it. On startup the coordinator advances its generation and
+  marks abandoned pending, launching and running attempts and tasks for recovery, including a
+  cancellation whose process exit was not observed, with the old generation in an event; it never
+  relaunches them. These choices make launch intent durable,
+  distinguish an engine exit from accepted work, and prevent a stale coordinator from writing.
+  CancelRequested may move to Interrupted: an unobserved cancel cannot be reported canceled because
+  the plan requires the process tree to be confirmed stopped.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).

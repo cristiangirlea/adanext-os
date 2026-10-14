@@ -21,21 +21,39 @@ import (
 
 type Authenticator func(*http.Request) (string, error)
 
+var errEngineUnavailable = errors.New("engine unavailable")
+
 type handler struct {
 	store *store.Store
 	hub   *Hub
 	auth  Authenticator
+	exec  Execution
 }
 
-func New(s *store.Store, hub *Hub, auth Authenticator) http.Handler {
+// AttemptRunner is the narrow API-to-executor notification boundary.
+type AttemptRunner interface {
+	LaunchAttempt(string)
+	CancelTask(string)
+}
+
+type Execution struct {
+	EngineSHA256 string
+	Generation   int64
+	Runner       AttemptRunner
+}
+
+func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
 	h := &handler{store: s, hub: hub, auth: auth}
+	if len(execution) != 0 {
+		h.exec = execution[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/tasks", h.create)
 	mux.HandleFunc("GET /v1/tasks", h.list)
 	mux.HandleFunc("GET /v1/tasks/{id}", h.get)
 	mux.HandleFunc("POST /v1/tasks/{id}/ready", h.transition(store.Draft, store.Ready))
-	mux.HandleFunc("POST /v1/tasks/{id}/start", h.transition(store.Ready, store.Preparing))
-	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.transition(store.Running, store.CancelRequested))
+	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
+	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var allowed []string
@@ -71,7 +89,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "internal": "internal error"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error"}[code]
 	writeJSON(w, status, struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
@@ -87,6 +105,10 @@ func storeError(w http.ResponseWriter, err error) {
 		writeError(w, 409, "invalid_transition")
 	case errors.Is(err, store.ErrIdempotencyConflict):
 		writeError(w, 422, "idempotency_conflict")
+	case errors.Is(err, store.ErrStaleOwnership):
+		writeError(w, 503, "engine_unavailable")
+	case errors.Is(err, errEngineUnavailable):
+		writeError(w, 503, "engine_unavailable")
 	default:
 		writeError(w, 500, "internal")
 	}
@@ -160,6 +182,11 @@ type taskJSON struct {
 	Updated   string      `json:"updated"`
 }
 
+type startedTaskJSON struct {
+	taskJSON
+	AttemptID string `json:"attempt_id"`
+}
+
 func taskValue(t store.Task) taskJSON {
 	return taskJSON{t.ID, t.Project, t.CreatedBy, t.Objective, t.AcceptanceCriteria, t.State, t.Revision, t.Created, t.Updated}
 }
@@ -169,7 +196,7 @@ type cachedResponse struct {
 	Body   json.RawMessage `json:"body"`
 }
 
-func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, fn func(*store.Tx) (int, any, error)) {
+func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, fn func(*store.Tx) (int, any, error)) bool {
 	body := r.Context().Value(bodyKey{}).([]byte)
 	cached, err := h.store.Do(r.Context(), user, k, hash(r, body), scope, func(tx *store.Tx) ([]byte, error) {
 		status, value, err := fn(tx)
@@ -184,16 +211,17 @@ func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string,
 	})
 	if err != nil {
 		storeError(w, err)
-		return
+		return false
 	}
 	var result cachedResponse
 	if err := json.Unmarshal(cached, &result); err != nil {
 		writeError(w, 500, "internal")
-		return
+		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(result.Status)
 	_, _ = w.Write(append(result.Body, '\n'))
+	return true
 }
 
 type bodyKey struct{}
@@ -262,7 +290,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, taskValue(task))
 }
 
-func (h *handler) transition(from, to store.State) http.HandlerFunc {
+func (h *handler) transition(from, to store.State, after ...func(string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, ok := h.actor(w, r)
 		if !ok {
@@ -293,7 +321,7 @@ func (h *handler) transition(from, to store.State) http.HandlerFunc {
 			return
 		}
 		r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
-		h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, func(tx *store.Tx) (int, any, error) {
+		ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, func(tx *store.Tx) (int, any, error) {
 			var current store.State
 			var currentRevision int64
 			if err := tx.QueryRowContext(r.Context(), "SELECT state,revision FROM tasks WHERE id=?", id).Scan(&current, &currentRevision); err != nil {
@@ -313,6 +341,97 @@ func (h *handler) transition(from, to store.State) http.HandlerFunc {
 			err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
 			return 200, taskValue(task), err
 		})
+		if ok && len(after) != 0 && after[0] != nil {
+			after[0](id)
+		}
+	}
+}
+
+func (h *handler) cancel(w http.ResponseWriter, r *http.Request) {
+	h.transition(store.Running, store.CancelRequested, func(id string) {
+		if h.exec.Runner != nil {
+			h.exec.Runner.CancelTask(id)
+		}
+	})(w, r)
+}
+
+func (h *handler) start(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.actor(w, r)
+	if !ok {
+		return
+	}
+	k, ok := key(w, r)
+	if !ok {
+		return
+	}
+	match := r.Header.Get("If-Match")
+	revision, err := strconv.ParseInt(match, 10, 64)
+	if err != nil || match == "" || revision < 0 {
+		writeError(w, 400, "bad_request")
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Backend string `json:"backend"`
+		Model   string `json:"model"`
+		Effort  string `json:"effort"`
+		Mode    string `json:"mode"`
+	}
+	if err := decode(body, &input); err != nil || input.Backend == "" || (input.Mode != "readonly" && input.Mode != "auto" && input.Mode != "yolo") {
+		writeError(w, 400, "bad_request")
+		return
+	}
+	id := r.PathValue("id")
+	project, err := h.store.TaskProject(r.Context(), user, id)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
+	var attemptID string
+	ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, func(tx *store.Tx) (int, any, error) {
+		if h.exec.EngineSHA256 == "" || h.exec.Runner == nil {
+			return 0, nil, errEngineUnavailable
+		}
+		var generation int64
+		if err := tx.QueryRowContext(r.Context(), "SELECT generation FROM coordinator WHERE id=1").Scan(&generation); err != nil {
+			return 0, nil, err
+		}
+		if generation != h.exec.Generation {
+			return 0, nil, store.ErrStaleOwnership
+		}
+		var current store.State
+		var currentRevision int64
+		if err := tx.QueryRowContext(r.Context(), "SELECT state,revision FROM tasks WHERE id=?", id).Scan(&current, &currentRevision); err != nil {
+			return 0, nil, err
+		}
+		if currentRevision != revision {
+			return 0, nil, store.ErrStaleRevision
+		}
+		if current != store.Ready {
+			return 0, nil, store.ErrInvalidTransition
+		}
+		if err := tx.Transition(r.Context(), id, store.Ready, store.Preparing, revision); err != nil {
+			return 0, nil, err
+		}
+		attemptID, err = newID()
+		if err != nil {
+			return 0, nil, err
+		}
+		_, err = tx.ExecContext(r.Context(), "INSERT INTO attempts(id,task,actor,backend,model,effort,mode,executor,ownership_generation,engine_sha256,state,started) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?)", attemptID, id, user, input.Backend, input.Model, input.Effort, input.Mode, "local", h.exec.Generation, h.exec.EngineSHA256, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return 0, nil, err
+		}
+		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated FROM tasks WHERE id=?", id)
+		var task store.Task
+		err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
+		return 200, startedTaskJSON{taskValue(task), attemptID}, err
+	})
+	if ok && attemptID != "" && h.exec.Runner != nil {
+		h.exec.Runner.LaunchAttempt(attemptID)
 	}
 }
 

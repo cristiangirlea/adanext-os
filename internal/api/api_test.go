@@ -29,7 +29,7 @@ type fixture struct {
 	server *http.Server
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T, execution ...Execution) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	dir, err := os.MkdirTemp("", "ada")
@@ -80,7 +80,7 @@ func newFixture(t *testing.T) *fixture {
 	hub := NewHub()
 	hub.PollInterval = 10 * time.Millisecond
 	hub.HeartbeatInterval = 50 * time.Millisecond
-	server := &http.Server{Handler: New(s, hub, func(*http.Request) (string, error) { return "alice", nil })}
+	server := &http.Server{Handler: New(s, hub, func(*http.Request) (string, error) { return "alice", nil }, execution...)}
 	server.RegisterOnShutdown(hub.Close)
 	go server.Serve(l)
 	t.Cleanup(func() { server.Shutdown(context.Background()) })
@@ -212,21 +212,22 @@ func TestCreateKeysReplayAndConcurrentClientsMakeOneTaskPerKey(t *testing.T) {
 }
 
 func TestReadyStartReplayAndRefusedCancelPreserveRevision(t *testing.T) {
-	f := newFixture(t)
+	f := newFixture(t, Execution{EngineSHA256: strings.Repeat("a", 64), Runner: noopRunner{}})
 	id := create(t, f, "create", "work")["id"].(string)
 	code, ready := f.request(t, "POST", "/v1/tasks/"+id+"/ready", "ready", "0", nil)
 	if code != 200 {
 		t.Fatalf("ready %d %s", code, ready)
 	}
-	code, started := f.request(t, "POST", "/v1/tasks/"+id+"/start", "start", "1", nil)
+	policy := []byte(`{"backend":"codex","mode":"auto"}`)
+	code, started := f.request(t, "POST", "/v1/tasks/"+id+"/start", "start", "1", policy)
 	if code != 200 {
 		t.Fatalf("start %d %s", code, started)
 	}
-	code, replay := f.request(t, "POST", "/v1/tasks/"+id+"/start", "start", "1", nil)
+	code, replay := f.request(t, "POST", "/v1/tasks/"+id+"/start", "start", "1", policy)
 	if code != 200 || !bytes.Equal(started, replay) {
 		t.Fatal("start replay differed")
 	}
-	code, stale := f.request(t, "POST", "/v1/tasks/"+id+"/start", "new-start", "1", nil)
+	code, stale := f.request(t, "POST", "/v1/tasks/"+id+"/start", "new-start", "1", policy)
 	if code != 409 || !bytes.Contains(stale, []byte("stale_revision")) {
 		t.Fatalf("stale %d %s", code, stale)
 	}
@@ -381,8 +382,9 @@ func TestStartForeignAndUnknownTasksHaveIdenticalResponses(t *testing.T) {
 	if err := f.s.CreateTask(context.Background(), "bob", "foreign", "b", "other", "done"); err != nil {
 		t.Fatal(err)
 	}
-	unknownCode, unknown := f.request(t, "POST", "/v1/tasks/missing/start", "unknown", "0", nil)
-	foreignCode, foreign := f.request(t, "POST", "/v1/tasks/foreign/start", "foreign", "0", nil)
+	policy := []byte(`{"backend":"codex","mode":"auto"}`)
+	unknownCode, unknown := f.request(t, "POST", "/v1/tasks/missing/start", "unknown", "0", policy)
+	foreignCode, foreign := f.request(t, "POST", "/v1/tasks/foreign/start", "foreign", "0", policy)
 	if unknownCode != 404 || foreignCode != 404 || !bytes.Equal(unknown, foreign) {
 		t.Fatalf("unknown %d %s, foreign %d %s", unknownCode, unknown, foreignCode, foreign)
 	}
