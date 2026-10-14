@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +117,59 @@ func TestEngineFlagsRequirePairAndLowercaseSHA256(t *testing.T) {
 	}
 }
 
+func TestCanceledStartupStopsCleanly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var output bytes.Buffer
+	code := run(ctx, []string{"-state-dir", t.TempDir(), "-name", testEndpointName(t)}, &output, &output)
+	if code != 0 || !strings.Contains(output.String(), "adad: stopped during start-up") {
+		t.Fatalf("%d %s", code, output.String())
+	}
+}
+
+func TestRelativeXDGStateHomeIsIgnored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG applies on Unix")
+	}
+	t.Setenv("XDG_STATE_HOME", "relative/state")
+	if got := defaultStateDir(); strings.Contains(got, "relative") || !filepath.IsAbs(got) {
+		t.Fatal(got)
+	}
+}
+
+func TestEmptyLocalAppDataHasAnAbsoluteFallbackOrClearRefusal(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows state directory")
+	}
+	t.Setenv("LOCALAPPDATA", "")
+	if dir := defaultStateDir(); dir != "" {
+		if !filepath.IsAbs(dir) {
+			t.Fatalf("relative fallback: %s", dir)
+		}
+		return
+	}
+	var output bytes.Buffer
+	if code := run(context.Background(), []string{"-state-dir", ""}, &output, &output); code != 2 || !strings.Contains(output.String(), "state directory unavailable") {
+		t.Fatalf("%d %s", code, output.String())
+	}
+}
+
+func TestDefaultStateDirectoryRejectsWorldWritableExistingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0700)
+	var output bytes.Buffer
+	code := run(context.Background(), []string{"-state-dir", dir, "-name", testEndpointName(t)}, &output, &output)
+	if code == 0 || !strings.Contains(output.String(), "state directory") {
+		t.Fatalf("%d %s", code, output.String())
+	}
+}
+
 func TestHelperServesCoordinator(t *testing.T) {
 	if os.Getenv("ADA_ADAD_HELPER") != "1" {
 		return
@@ -205,6 +259,19 @@ func TestSecondCoordinatorReportsPIDAndStaleLockRecovers(t *testing.T) {
 	first.Process.Kill()
 	first.Wait()
 	second := startHelper(t, dir, name)
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return ipc.Dial(ctx, ipc.Config{StateDir: dir, Name: name})
+	}}}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("http://ipc/v1/tasks")
+	if err != nil {
+		t.Fatalf("restarted coordinator did not serve /v1: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("restarted coordinator /v1: %d", resp.StatusCode)
+	}
 	second.Process.Kill()
 	second.Wait()
 }
@@ -247,8 +314,18 @@ func TestShutdownClosesOpenSSEStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	done := make(chan int, 1)
+	runFinished := false
+	defer func() {
+		cancel()
+		if !runFinished {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Error("run did not stop after test failure")
+			}
+		}
+	}()
 	name := testEndpointName(t)
 	var output bytes.Buffer
 	go func() { done <- run(runCtx, []string{"-state-dir", dir, "-name", name}, &output, &output) }()
@@ -287,6 +364,7 @@ func TestShutdownClosesOpenSSEStream(t *testing.T) {
 	cancel()
 	select {
 	case code := <-done:
+		runFinished = true
 		if code != 0 {
 			t.Fatalf("run returned %d: %s", code, output.String())
 		}

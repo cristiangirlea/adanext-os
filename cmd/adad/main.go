@@ -33,9 +33,12 @@ func defaultStateDir() string {
 		if base := os.Getenv("LOCALAPPDATA"); base != "" {
 			return filepath.Join(base, "AdaNext")
 		}
+		if cache, err := os.UserCacheDir(); err == nil && cache != "" {
+			return filepath.Join(cache, "AdaNext")
+		}
 		return ""
 	}
-	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
+	if base := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(base) {
 		return filepath.Join(base, "adanext")
 	}
 	home, err := os.UserHomeDir()
@@ -62,15 +65,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *stateDir == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "adad: invalid state directory or arguments")
+		fmt.Fprintln(stderr, "adad: state directory unavailable; set LOCALAPPDATA or pass -state-dir, and check arguments")
 		return 2
 	}
 	if (*enginePath == "") != (*engineHash == "") || (*engineHash != "" && (len(*engineHash) != 64 || !isLowerHex(*engineHash))) {
 		fmt.Fprintln(stderr, "adad: -engine and -engine-sha256 must be paired; SHA-256 must be 64 lowercase hex characters")
 		return 2
 	}
+	if ctx.Err() != nil {
+		fmt.Fprintln(stderr, "adad: stopped during start-up")
+		return 0
+	}
 	if err := os.MkdirAll(*stateDir, 0700); err != nil {
 		fmt.Fprintln(stderr, "adad: create state directory:", err)
+		return 1
+	}
+	if err := validateStateDir(*stateDir); err != nil {
+		fmt.Fprintln(stderr, "adad: state directory:", err)
 		return 1
 	}
 	lock, err := ipc.Acquire(ipc.Config{StateDir: *stateDir, Name: *name})
@@ -86,6 +97,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defer lock.Release()
 	s, err := store.Open(ctx, filepath.Join(*stateDir, "adanext.db"))
 	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Fprintln(stderr, "adad: stopped during start-up")
+			return 0
+		}
 		fmt.Fprintln(stderr, "adad: open store:", err)
 		return 1
 	}
@@ -95,6 +110,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return []byte("ok"), err
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Fprintln(stderr, "adad: stopped during start-up")
+			return 0
+		}
 		fmt.Fprintln(stderr, "adad: create local user:", err)
 		return 1
 	}
