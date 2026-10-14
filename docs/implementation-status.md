@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated 2026-10-13. Statuses: not started, in progress, implemented (code merged), verified
+Updated 2026-10-14. Statuses: not started, in progress, implemented (code merged), verified
 (evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
 are in `docs/backlog.md`.
 
@@ -404,6 +404,422 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   CancelRequested may move to Interrupted: an unobserved cancel cannot be reported canceled because
   the plan requires the process tree to be confirmed stopped.
 
+- **2026-10-14, review, acceptance and revoked membership (#3).** What M2.1, M2.2b and M2.3b
+  settled stands: actors from the authenticated context, membership for listing
+  and direct access, per-user idempotency keys and continuations, cancel by any member. Three
+  roles are kept apart: the task's creator (`tasks.created_by`), an attempt's actor
+  (`attempts.actor`, the user who started it and under whose provider sign-in it runs, recorded at
+  start by M2.3b), and a reviewer (any current member who records findings); the project role
+  owner is a membership role, not one of these. Any current member of the task's project may open
+  its review package and record findings. Accepting a reviewed result, requesting a refinement and
+  exporting the branch are allowed to the actor of the attempt that produced the result and to
+  the project's members with role owner, to no one else: not the creator as such, not a reviewer
+  as such. An acceptance binds the content hash and ownership generation (`docs/plan.md` section
+  2), so one recorded against an older hash is refused. A permission prompt (#7's pre-launch
+  decision now, an engine prompt from the first protocol with approvals) is answered by the
+  attempt's actor alone; a project owner may deny it but never approve it on the actor's behalf.
+  Artifacts read directly (by id, outside a review package) need the reader's current membership
+  of the project of the attempt or task that references the artifact, checked on every read,
+  so a revoked member's next read is refused; an artifact no record references is readable by no
+  one through `/v1`. Removing a member, in one transaction, denies that user's pending prompts in
+  the project with the reason "membership revoked", requests cancellation of every attempt in the
+  project whose actor is that user with the reason "actor removed from the project", and leaves
+  their later responses refused like any non-member's request. Removing a project's last owner is
+  refused. Carried by M7 (review and acceptance), M4b (membership removal through the owner's
+  account administration, pre-launch decisions) and the slice that pins an engine with approvals
+  (engine prompts); the artifact read check lands with the first `/v1` artifact route. Tests:
+  findings from a non-member refused; an acceptance, refinement or export by the creator or a
+  reviewer who is neither the attempt's actor nor an owner refused; an acceptance against a stale
+  content hash refused; a member removed while their attempt runs, which ends canceled with the
+  reason; a member removed while a prompt is pending, the prompt denied and the late response
+  refused; an owner's denial of another user's prompt accepted and an owner's approval refused;
+  an artifact read by a member accepted, by a non-member refused, and by the same user after
+  their removal refused; the last owner's removal refused. Reason: acceptance leads to
+  integration, which is the starter's or the project owner's call, and an attempt runs on its
+  actor's provider plan, so it must not outlive that actor's membership.
+
+- **2026-10-14, SSE limits, cursors and the desktop client (#4).** M2.2b settled per-attempt
+  sequences, `Last-Event-ID` over `?after=`, `id:` lines and a replay-to-live handoff with no gap
+  or duplicate. The remainder: bytes are bounded as well as counts. Every byte limit below counts
+  encoded bytes on the wire: an event as written, with its `id:`, `event:` and `data:` framing in
+  the stream form and its JSON encoding in the JSON form, not the stored payload, which escaping
+  and framing make larger. An encoded event is at most 256 KiB, matching the engine's bound on
+  event text; the executor stores a payload whose encoded event would exceed it as an artifact
+  at ingestion and the event carries its reference and size instead, so no stored event exceeds
+  the cap. The stream reads the store in pages that end at 256 events or 1 MiB encoded,
+  whichever comes first (one event always fits, being under the cap), and writes each
+  page under a 10-second write deadline (`http.ResponseController`); a subscriber that misses it
+  is disconnected and resumes from its cursor, so the server holds at most one page per
+  subscriber and the store is the buffer. Across all streams and JSON reads the pages held at
+  once share a 32 MiB budget (a byte-weighted semaphore). Capacity is reserved before a page is
+  read from the store: a reader acquires the page maximum, 1 MiB, then reads and encodes, and
+  releases what the encoded page did not use; it holds the rest until the page is written or the
+  stream ends. A reader that cannot get its reservation waits without touching the store, and a
+  stream that cannot get it within its write deadline is disconnected like a slow one. At most
+  16 open streams per user and 128 in all; one more is answered 429 `too_many_streams` before any
+  event. Every stream starts with `retry: 2000`. The JSON form returns one page by the same rule
+  and the client asks again from the last sequence. A cursor that is not a non-negative integer
+  stays 400 `bad_request`. A cursor above the attempt's last recorded sequence (a restored
+  database, a confused client) is answered by form: the JSON form returns 409 `cursor_ahead`; the
+  stream form, since `EventSource` cannot read a refused response's body and would retry the
+  stale `Last-Event-ID` for ever, answers 200 with one message, `event: cursor_ahead` with a JSON
+  body naming the last recorded sequence and no `id:` line, and then closes. A client receiving
+  it closes its connection before any retry, discards its cursor and view, and opens a fresh
+  stream from 0 without `Last-Event-ID` (the browser adapter a new `EventSource`, which sends none;
+  the Node client a new request without the header). Events are
+  not pruned in v1, so a gap in retained history cannot occur; when a retention policy arrives
+  (M8), a cursor below the first retained sequence gets a `gap` event naming that sequence and
+  then the events from there, never a silent jump. On shutdown `adad` ends every stream after the
+  last complete event. Electron's main process reads SSE over the pipe or socket with its own
+  parser (Node's `http` with `socketPath`; it has no `EventSource`), keeps the last `id:`, and
+  reconnects with `Last-Event-ID` after 0.5 s doubling to 10 s, or after the server's `retry:`;
+  when the pipe or socket is gone it follows M2.4's reconnect-or-start path. The renderer gets
+  events through the bridge and keeps no cursor; the browser (M4b) uses `EventSource`, which sends
+  `Last-Event-ID` itself, and handles `cursor_ahead` as above. Carried by M2.4, with the
+  server-side limits in #30. Tests: a real Node client to Go over a Windows named pipe (the
+  `windows-latest` leg) and a Linux socket; a subscriber that stops reading is disconnected within
+  the deadline with the hub's subscriber count back to zero; the 17th stream of one user refused;
+  a payload whose encoded event exceeds 256 KiB stored as an artifact with the event holding its
+  reference, including one under 256 KiB raw that escaping takes over; a page cut at 1 MiB of
+  encoded bytes before 256 events, including one whose payloads alone fit but whose framing does
+  not; many slow streams together never holding more than the 32 MiB budget, the excess
+  disconnected; with the budget exhausted, no store read started until a reservation is granted;
+  a malformed cursor; `cursor_ahead` as 409 in the JSON form and
+  as the closing event in the stream form, after which the Node client and, in a browser test, the
+  `EventSource` adapter reopen from 0 without `Last-Event-ID` and do not retry the stale cursor;
+  events appended while replay pages are read; `adad` killed and restarted during a replay longer
+  than one page, after which the client holds every sequence exactly once. Expired cursors are
+  tested when retention exists, since nothing expires before. Reason: a deadline and paged reads
+  bound memory without dropping events, and the browser's reconnection works only through `id:`
+  lines, which the desktop client then imitates.
+
+- **2026-10-14, the shared UI's browser boundary (#5).** The React app in `ui/` talks only to an
+  `AdaClient` interface that mirrors `/v1`, with two adapters: the preload bridge (desktop: the
+  renderer calls typed methods, main forwards them to `adad` over the pipe or socket after
+  validating the sender frame) and an HTTPS adapter (browser: same-origin `fetch` to `/v1` with the
+  session cookie, `EventSource` for events). Authorization is always `adad`'s: the bridge forwards
+  and refuses only malformed calls, and decides no permission. Import on the desktop keeps the
+  native dialog in main, whose path goes to `adad` without passing through the renderer. Import in
+  the browser is a server-side chooser and nothing else: `adad` lists the import roots the owner
+  allowed on the coordinator host (a setting edited only from the desktop, each root granted to
+  named users; none by default but the owner), browses the directories below a root, and imports
+  a root id plus a relative path; `..`, absolute paths, and links or junctions leaving the root
+  are refused with M3's import blockers. Importing from a git URL is not offered in M4b, in the
+  browser or through `/v1`. A clone is a request the coordinator makes on a user's behalf, and
+  git can connect where an address pin does not reach: another port in the URL, URL rewriting
+  (`url.<base>.insteadOf`) and proxies from git configuration or the environment, submodules,
+  Git LFS and filters fetching from other hosts, and IPv6 or other address forms a host check
+  can miss. Git-URL import waits for a slice that controls every outbound fetch, and that slice
+  must meet at least: HTTPS on port 443 only; git run with an isolated configuration (no system,
+  global or repository config read, `GIT_CONFIG_NOSYSTEM`, an empty `HOME` and
+  `GIT_CONFIG_GLOBAL`) and a cleared proxy environment; no submodules and no LFS or filter
+  downloads (`protocol.allow=never` with `https` alone allowed, LFS and filters disabled);
+  the host resolved by `adad` and the connection pinned to the checked address
+  (`http.curloptResolve`), the check covering IPv4 and IPv6 and refusing loopback, link-local,
+  unspecified, private (RFC 1918), unique-local (`fc00::/7`), CGNAT (`100.64.0.0/10`),
+  IPv4-mapped and other embedded forms of these, and the coordinator's own addresses;
+  redirects refused (`http.followRedirects=false`); no credentials in the URL; and a time and
+  disk limit after which the process tree ends and the partial clone is removed. Each condition
+  comes with its test then; `ssh`, `file` and private repositories wait further for per-user git
+  credentials in the credential profile. Previews are served by
+  `adad`'s preview listener, a reverse proxy to the managed preview process, on its own host name
+  and port (`preview.home.adanext.si`, the listener's port plus one by default, a DNS-only record
+  on the same private address, the certificate naming both hosts). The UI embeds a preview in an
+  iframe with `sandbox="allow-scripts allow-same-origin allow-forms"` (its own origin, never Ada's;
+  no top navigation, no popups escaping the sandbox) and a URL holding a ticket from `/v1`: random,
+  single use, 60 seconds, bound to the user and the preview, issued to project members only and
+  exchanged for a host-only `__Host-ada-preview` cookie that `/v1` never accepts. On every
+  request through the preview listener, page loads, assets and the upgrade of a WebSocket alike,
+  the proxy checks the cookie's user, that the cookie names this preview, and that user's
+  current membership of the preview's project, read from the store at that request, not cached
+  from the ticket; an open WebSocket is closed when its user's membership or session ends (the
+  same hook that ends event streams, #6). Revoking membership therefore ends preview access at
+  once. The two hosts
+  are the same site, so `SameSite` does not separate them: the barrier is `/v1` sending no CORS
+  headers, refusing any mutating request whose `Origin` is not Ada's (#6), and Ada's pages sending
+  `frame-ancestors 'none'`. The desktop loads the same preview listener on loopback in a view
+  with its own session partition and no preload. Carried by M2.4 (`AdaClient` and the desktop
+  adapter), M4 (desktop previews) and M4b (the HTTPS adapter, the chooser, the preview host).
+  Tests: no module outside the adapters touches `window.ada` or `fetch`; the component tests run
+  against both adapters with one fake `adad`; an action `adad` refuses comes back as `adad`'s
+  refusal through the bridge; browsing outside a granted root, through `..`, an absolute path or
+  an escaping link or junction, and a root granted to another user, refused; the browser offering
+  no git-URL import and `/v1` refusing an import by URL; from a preview page, reading `/v1`
+  fails, a mutating request with the user's cookies is refused, framing an Ada page fails; a
+  preview without a ticket, with a reused or
+  expired one, or for a non-member refused; the preview cookie refused by `/v1`; a member
+  removed while viewing a preview, after which their next page, asset
+  and WebSocket upgrade are refused and an open WebSocket is closed; a cookie for one preview
+  refused on another. Reason: a typed bridge is an interface, not authorization, so the one place
+  that authorizes must be `adad` for both shells, and a browser can neither open a host dialog nor
+  be trusted with a typed host path; a git clone is held to the checked address only once every
+  fetch git can make is controlled, so until then the smaller safe option is no clone at all.
+
+- **2026-10-14, LAN session security (#6).** The desktop form's implicit local user is the owner
+  account: when web access is enabled the owner adds a credential to that same `users` row, so
+  their projects and tasks carry over, and the desktop keeps reaching `adad` as that user through
+  the pipe or socket, whose OS ownership is its authentication. As the 2026-10-13 entry says,
+  accounts are created by the owner and never from the network: creating an account and issuing
+  an enrollment code are desktop-channel operations only, and a network session, the owner's
+  included, is refused both. Creation yields a one-time enrollment code (single use, 24 hours)
+  that the new user enters on their own computer to register a credential. Without a session
+  the TLS listener answers only the login, enrollment-with-code and static asset routes: being
+  on the network grants nothing. Credentials: passkeys (WebAuthn, relying party
+  `home.adanext.si`, user verification required, discoverable credentials) through a pinned
+  WebAuthn library chosen by the
+  dependency rule; a password is a fallback the owner enables per account, at least 12
+  characters, hashed with Argon2id (`golang.org/x/crypto/argon2`, 64 MiB, 3 passes, 1 lane, a
+  16-byte salt; at most two hashes computed at once; rehashed at login when the parameters rise),
+  compared in constant time. Sessions: 32 random bytes in a `__Host-ada-session` cookie (Secure,
+  HttpOnly, SameSite=Strict, Path=/), stored only as a SHA-256 hash in a `sessions` table added by
+  a forward migration, with user, credential, creation, last use and address; idle expiry 8
+  hours, absolute 7 days; login creates a new session with a new token, and a token presented
+  from before login is never promoted. Revocation is deleting the row: the user's own sessions
+  from their account page, anyone's by the owner. A role change (in any project), a credential
+  added, removed or changed, and an account disabled or removed each delete, in the same
+  transaction, every session of that account, not only the one in use, and close that account's
+  open event streams and preview WebSockets; the user signs in again. An open event stream also
+  rechecks its session at each page and heartbeat and ends when it is gone. CSRF: every mutating
+  request must carry an `Origin` equal to the configured Ada origin (missing, `null` and foreign
+  origins refused) and a JSON content type; GET never mutates; the `Host` header must be the
+  configured name, which also refuses DNS rebinding.
+  Throttling: per account, after 5 failures a delay that doubles from 1 second to 15 minutes, with
+  no permanent lockout; per address, 20 failures in 10 minutes block that address for 15 minutes;
+  counters in memory, bounded to 10,000 addresses. Recovery: from the desktop only (the local
+  channel), the owner enrolls a new credential for themselves or any account and clears its
+  throttling; there is no email or network recovery. Carried by M4b. Tests: the issue's four (two
+  separate computers in the M4b evidence; session isolation and revocation, including an open
+  stream; cross-origin mutations rejected, with missing, `null`, foreign and preview origins; a
+  permission response from the wrong user refused, through #7's pre-launch decisions); and
+  rotation (a pre-login token refused after login); a role change, a credential change and an
+  account disabled each ending all of that account's sessions on two browsers at once, with
+  their open streams closed; idle and absolute
+  expiry and both throttles on a fake clock, a wrong `Host` refused, enrollment codes single use
+  and expiring, account creation and code issuance refused to every network session including a
+  freshly authenticated owner's, the stored hash and token
+  never equal to their inputs. Reason: passkeys leave nothing reusable to steal on the LAN, the
+  password fallback covers devices without one, and server-side sessions make revocation
+  immediate; the owner's desktop is the root of trust because it is the one channel the network
+  cannot reach.
+
+- **2026-10-14, provider sign-in relay and approvals (#7).** The relay runs a provider CLI's own
+  sign-in only where it needs no callback to the coordinator's loopback: a device code, or an
+  authorization code the user copies from the provider's page into Ada, which passes it to the
+  CLI's input. `adad` starts the CLI's sign-in command (the executable the launcher would give
+  the engine) with the user's credential-profile environment, built explicitly as the 2026-10-13
+  profile entry says, and parses its output with a per-CLI, per-version extractor. Only
+  allow-listed fields reach the browser: the verification URL (checked against the provider's
+  known sign-in hosts), the user code (checked against the provider's code format) and the
+  expiry; the CLI's raw output never does. These go only to the session that started the job. A
+  sign-in job is bound to that user and session: no other session can see, answer or cancel it;
+  one job per user and provider at a time; 15 minutes, then the process tree ends. Success is the
+  CLI's own status command reporting the profile signed in. The raw output is held in memory for
+  the extractor and dropped with the job; it is not persisted, and neither it nor the extracted
+  fields go to logs, events, artifacts or the store (an extractor failure is logged as the
+  provider, the CLI version and "unrecognised sign-in output", nothing more). A provider whose
+  CLI offers only a loopback callback is not relayed; its sign-in is done in the desktop shell
+  on the coordinator host until Harness supports a relay. Which CLIs qualify
+  is checked live per CLI version in the M4b slice and recorded with the date. Approvals: the
+  pinned protocol advertises `approvals: false` and rejects mode `ask`, so Ada never describes
+  any of its decisions as intercepting a CLI's tool approvals and offers `ask` only when the
+  engine's handshake advertises approvals, which needs a Harness protocol version and a new
+  engine pin, each its own decision. Until then the permission prompts of the M4b evidence are
+  Ada's own decisions before launch (`PermissionDecision`, `docs/plan.md` section 2), held by a
+  scheduler gate. The scheduler, #9's queue, is the only launch path in M4b: it replaces the
+  direct launch after a start, so every attempt, needing a decision or not, launches through the
+  same claim. The claim stays M2.3b's atomic claim-once update of `pending` to `launching`,
+  extended with the decision check in the same transaction: an attempt moves from `pending` to
+  `launching` only if no decision is required for it (its scope, judged at the claim against the
+  project's current default, does not exceed it), or a matching, unexpired allow decision exists.
+  A decision binds the task revision, the source snapshot's content identity, the exact
+  permitted scope (backend, mode, network access and workspace), the permission policy's version
+  and the coordinator's ownership generation (`docs/plan.md` section 2); it matches only while
+  all five still equal the attempt's, and any change to a binding (a task edited, a new
+  snapshot, another scope, a changed policy) requires a fresh decision, never a reuse of the old
+  one. A restart never revives a decision or its attempt: recovery (M2.3b) moves an abandoned
+  pending attempt to `recovery_required`, and work continues only as a new attempt of the new
+  generation with a new decision. A decision expires 24 hours after it is made. A forward
+  migration in the M4b slice adds
+  `permission_decisions`: the attempt, the five bindings, the decision (allow or deny), the
+  deciding user, the time, the expiry and the request's idempotency key. A start whose scope
+  exceeds the project's default (a write mode or network access) records the attempt `pending` as
+  M2.3b does and marks it as needing a decision; in the queue such an attempt keeps its place but
+  is passed over until decided, so it never holds up other users' work, and no process starts
+  before approval. `POST /v1/attempts/{id}/decision` takes the decision and an
+  `Idempotency-Key` (the
+  same key and body return the first result, a different body under it is refused); allow and
+  deny are accepted from the attempt's actor alone, and a project owner may deny but not allow,
+  as #3 says; anyone else, and any decision on an attempt no longer pending, is refused. A deny
+  closes the attempt canceled with the reason "permission denied". Carried by M4b. Tests:
+  a provider sign-in completed from the remote computer for each relayed provider (M4b
+  evidence); a missing or invalid selected sign-in refuses execution with no fallback; a fake CLI
+  whose output carries a secret marker beside the URL and code, after which the marker appears
+  in nothing the browser receives and in no log, event, artifact or database row, while the
+  allow-listed fields arrive; output the extractor does not recognise refused with no output
+  forwarded; a sign-in job viewed, answered or cancelled from another session refused; a
+  loopback-only provider not offered in the browser; mode `ask` refused while the handshake says
+  `approvals: false`; an attempt needing a decision never launched (the fake engine never
+  started) until its actor allows it, then launched once; after an allow, a changed task
+  revision, a new source snapshot, a changed backend, mode, network access or workspace, and a
+  changed policy version each leaving the attempt unlaunched until a fresh decision; a restart
+  with an allowed but unlaunched attempt sending it to `recovery_required`, never launched, and a
+  new attempt of the new generation needing its own decision; an expired
+  allow not launching on a fake clock; an attempt needing no decision launched through the same
+  claim, with no other code path moving an attempt to `launching`; two claims racing on one
+  attempt, one wins; a decision from another member refused, an owner's allow
+  refused and an owner's deny accepted; a repeated request with the same key returning the first
+  result; a decision on a launched or closed attempt refused.
+  Reason: a callback to `localhost` lands on the wrong computer, and binding the job to its
+  session is what keeps one user's sign-in out of another's profile.
+
+- **2026-10-14, Cloudflare token and certificate renewal (#8).** The token: `Zone > DNS > Edit` on
+  `adanext.si` alone, the narrowest scope Cloudflare offers (it has no per-record tokens, and a
+  separate zone for the challenge would cost a second domain). It lives in a file in `adad`'s
+  configuration directory, owner-only (0600 on Unix, a DACL with the user's SID alone on Windows,
+  as the store's files), which `adad` refuses to use when anyone else can read it; never in a
+  repository, the store, the engine's environment, logs or error text (the client strips the
+  `Authorization` header from every error). `adad`'s DNS client only lists, creates and deletes TXT
+  records named `_acme-challenge.<configured host>`, checked before every call; the residual risk,
+  that a stolen file could change the zone, is accepted and bounded by the owner setting an expiry
+  on the token. Rotation is the owner's: a new token replaces the file from the desktop settings,
+  `adad` reads it at the next issuance, and the owner revokes the old one at Cloudflare. Renewal
+  starts 30 days before expiry, or at half the lifetime for certificates shorter than 60 days,
+  whichever comes first; a failure retries with backoff from 1 hour doubling to 24 hours, within
+  Let's Encrypt's rate limits. Each failed attempt is shown to the owner when it happens (a
+  notice on the desktop and on the owner's web session, with the time, the step that failed and
+  the next retry), and from 14 days before expiry the warning stays on screen until a renewal
+  succeeds. The
+  old certificate is served until it expires; after that the TLS listener refuses handshakes
+  rather than serve an expired certificate, and the desktop channel, unaffected, is where the
+  owner repairs it. Missing or mismatched files (the first slice, from files) leave the TLS
+  listener off with the reason shown on the desktop; never plain HTTP, never a self-signed
+  fallback. Replacement: each issued pair is written, synced, into its own directory, checked
+  (key matches, chain parses, not expired), and then a pointer file is replaced by rename; in
+  memory, `GetCertificate` reads an atomic pointer swapped after the same checks, so new
+  handshakes get the new pair and open connections keep theirs. At start `adad` loads the pair the
+  pointer names, or the previous pair while it is still valid. Challenge cleanup survives a
+  crash: before calling Cloudflare, `adad` records the challenge intent (the record name, the
+  exact TXT value and the ACME order) durably in its store; after the create call it adds the
+  record id. The record is deleted after each validation, successful or not, and the intent is
+  closed only once the deletion is confirmed: the delete call succeeds or answers not found, or a
+  listing shows no record with the intent's value. While listing or deleting fails, the intent
+  stays open and cleanup retries on its own with backoff from 1 minute doubling to 1 hour until
+  the deletion is confirmed, independent of the next issuance, which neither waits for it nor
+  stands in for it. At start, and before each new challenge, `adad` also reconciles: for every
+  open intent it
+  lists the TXT records at `_acme-challenge.<configured host>` and deletes those whose value
+  equals a recorded intent's value, whether or not their id was recorded, and no others; a record
+  with a value no intent holds is left alone and reported to the owner. Some home resolvers and
+  routers drop public answers holding private addresses (DNS rebinding protection); the setup
+  page then
+  directs the owner to a local entry for `home.adanext.si` and `preview.home.adanext.si` in the
+  router's local DNS or each computer's hosts file, which keeps the certificate valid. Carried by
+  M4b's DNS-01 slice (files first, as decided on 2026-10-13). Tests: missing, mismatched and
+  expired certificate files; renewal failure and its retries on a fake clock, each failure
+  notified to the owner when it happens and not only within 14 days of expiry; a restart at each
+  step of the replacement, ending on a complete pair; a connection open across a renewal keeping
+  its certificate while a new one gets the new pair; the challenge record deleted after success,
+  after failure and at restart; a crash after the create call and before the record id is
+  recorded, after which the restart deletes that record by its value; a fake Cloudflare whose
+  listing and then deletion fail, after which the intent stays open and cleanup retries on a
+  fake clock with no issuance due, closing the intent only after a confirmed deletion; a TXT
+  record at the
+  challenge name with a value no intent holds left in place; a fake Cloudflare API that fails the
+  test on any call other than the challenge TXT record; the token absent from logs and errors; a
+  token file readable by
+  others refused. The ACME side runs against a fake ACME server, never Let's Encrypt in tests.
+  Reason: zone scope is the narrowest the provider allows, so the client's own limits and the
+  token's expiry carry the rest; refusing TLS after expiry is visible and safe, an expired
+  certificate teaches users to click through warnings.
+
+- **2026-10-14, stopping a shared coordinator and queueing (#9).** Only the owner account may
+  stop the coordinator: the coordinator's owner, the desktop's implicit local user (#6), which is
+  distinct from the owner role a member holds in a project. "Quit Ada and stop work" is offered in
+  the desktop shell, which only the owner account runs; in the browser, other users get "Leave",
+  which signs out of the page and stops nothing.
+  When anyone else's work is affected, the owner first sees how many running and queued tasks
+  of other users will be cancelled. Stopping cancels every running attempt through M2.3b's
+  cancel path and every queued one, each with an event and a recorded reason "coordinator stopped
+  by the owner", which affected users see on the task when they next load it or as the last event
+  of an open stream; an attempt whose exit is not confirmed within the stop budget goes to
+  recovery as M2.3b decided. Host logout and reboot keep recovery semantics (`docs/plan.md`
+  section 2). Queueing keeps the recorded limits: the concurrency cap stays one and one writer per
+  workspace. Starting a task while another attempt is launching or running, from any user, moves
+  it to `preparing` with a pending attempt, as M2.3b already records; pending attempts launch one
+  at a time in order of creation across all users, and the snapshot is revalidated at launch,
+  not at queueing. A user may have at most 3 queued attempts; a fourth start is refused with
+  `queue_full`. The UI shows a queued task's position. A queued task is withdrawn by cancelling it:
+  the store gains a `preparing → canceled` edge, allowed only in the transaction that closes the
+  task's attempt as canceled while it is still `pending` (a forward migration if the attempt's
+  states need it); an attempt already launching follows the running cancel path once the engine
+  accepts it, or ends failed or interrupted as M2.3b decided. Any member may cancel a queued task,
+  as for a running one. A queued attempt left by a crash is marked for recovery, never relaunched,
+  as M2.3b decided. Carried by M2.4 (the queue, the new edge, "Quit" with its reason) and M4b
+  (the owner-only stop, "Leave", the notice to other users). Tests: two tasks started at once, the
+  second queued and launched only after the first ends; FIFO order across two users; the fourth
+  queued start refused; a queued task cancelled with no process started; a cancel racing the
+  launch ends either canceled before launch or through the running path, never both; `preparing →
+  canceled` refused once the attempt left `pending`; "Quit" cancels running and queued tasks with
+  the reason visible to their actors; a stop request from any other account refused, a project
+  owner's included; "Leave"
+  leaves running work untouched. Reason: one user's quit ending another's work must be the owner's
+  explicit act, and a FIFO queue in `preparing` reuses the pending attempt M2.3b already records
+  instead of adding a state.
+
+- **2026-10-14, adanext-images compatibility manifest (#10).** The manifest lives in
+  `adanext-images` as one JSON file per image revision, `manifests/<image-version>.json`,
+  immutable once added. It holds `manifest_version` (1), the image name and version; the source
+  commit, the `adanext-images` commit the image was built from, which comes before the commit
+  that adds the manifest (a commit cannot name itself); the exact built artifact Ada is given,
+  named by its file (the exported VM disk, `<image>-<version>.vmdk`, or an OVA,
+  `<image>-<version>.ova`, whichever M5's slice exports) with that file's SHA-256; the
+  `adanext-os` commit of the
+  `ada-guest` it contains with that binary's SHA-256, the guest protocol versions `ada-guest`
+  speaks, the Harness revision and binary SHA-256 inside the guest, the minimum `adad` version, the
+  base system (Ubuntu 24.04 and its build date), the Packer and plugin versions, and the
+  toolchains with exact versions (Git, Go, Node). The image takes `hrn` built by
+  `scripts/build-engine.sh` at the pinned revision and `ada-guest` built from the named
+  `adanext-os` commit, both built outside the image and copied in, so no toolchain inside the
+  guest produces a binary Ada depends on. The toolchain versions are therefore inventory:
+  recorded in the manifest from what the build finds in the artifact, shown in `adad`'s
+  diagnostics, and never
+  a reason to refuse an image in M5. If a later image builds `hrn` or `ada-guest` inside the
+  guest, the Go toolchain becomes a gate, decided then. `adad` computes the SHA-256 of the
+  artifact file it is given and refuses an image without a manifest, with an unknown
+  `manifest_version`, whose artifact hash differs from the manifest's, whose guest protocol it
+  does not speak,
+  whose Harness revision differs from its own `engine/engine.json`, or whose minimum version it
+  does not meet, each with its own reason, before any VM is created from it. In `adanext-images`,
+  a pull request that changes an image changes its source; once merged, CI builds the artifact
+  from that source commit, hashes those bytes, and inspects the same bytes (the exported disk
+  opened read-only, never a rebuild or the build VM): it reads `ada-guest` and `hrn` from the
+  artifact's filesystem and fails unless their SHA-256 equal those of the binaries built outside
+  the image from the named `adanext-os` commit and the pinned Harness revision, asks `ada-guest`
+  and `hrn` for their protocol versions and revision and fails on a mismatch, and records the
+  toolchain versions it finds, so a manifest never claims a binary its artifact does not contain.
+  It then writes the manifest with the source commit, the artifact's name and hash and what it
+  inspected, adds it in a pull request of its own, and publishes exactly the bytes it hashed and
+  inspected, checking their hash again at upload. CI on the manifest's pull request validates
+  the schema, that the source commit is an ancestor of the manifest's commit, that the
+  `adanext-os` commit exists, and that its `engine/engine.json` names the manifest's Harness
+  revision. A pull request in
+  `adanext-os` that changes the guest protocol, the engine pin or the minimum image it accepts
+  links the `adanext-images` pull request
+  that publishes a matching manifest; `adad`'s refusal of non-matching images is what keeps the
+  pair honest if one lands first. Carried by M5. Tests: an image without a manifest, with an
+  unknown manifest version, an artifact changed by one byte after the manifest was written, an
+  unsupported protocol, another Harness revision and a minimum above `adad`'s version, each
+  refused with its reason; a matching image accepted; the `adanext-images` CI check failing a
+  manifest whose Harness revision differs from the named `adanext-os` commit's pin, and one whose
+  source commit is not an ancestor of the manifest's commit; against a built artifact, the
+  build check failing when `ada-guest` or `hrn` inside it is replaced by another binary, when a
+  guest protocol or revision differs, and passing on the unchanged artifact; the publish step
+  refusing a file whose hash differs from the inspected one; an image accepted by `adad` with
+  the manifest's toolchain versions shown in its diagnostics. Reason: the guest and the
+  coordinator must run the
+  same engine protocol, and a manifest checked on both sides turns a silent mismatch into a
+  refusal before launch.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
@@ -422,7 +838,18 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
    `main`. Until then the protection is the deny rules, the push guard and merging only through
    pull requests.
 7. For M4b: a Cloudflare API token with `Zone > DNS > Edit` on `adanext.si` alone, kept in
-   `adad`'s configuration and never in a repository, and the `home.adanext.si` record.
+   `adad`'s configuration and never in a repository, and two DNS-only records on the same
+   private address: `home.adanext.si` and `preview.home.adanext.si` (the preview host, decisions
+   log, 2026-10-14, #5).
 8. Now that the repository is public: say which machine details and local paths leave
    `docs/plan.md` (section 8's availability snapshot) and this file (the VMware host table).
    Suggested: the provider sign-in states and the local paths go; the hardware stays.
+9. Confirm the M4b credential defaults (decisions log, 2026-10-14, #6): passkeys first, a
+   password only where the owner enables it per account, sessions idle 8 hours and absolute 7
+   days.
+10. Confirm which providers M4b relays first (decisions log, 2026-10-14, #7). Suggested: Codex
+    and Claude, the two plans in use, each relayed only if its CLI offers a sign-in without a
+    loopback callback when M4b starts; the others desktop-only.
+11. When creating the Cloudflare token of item 7 (decisions log, 2026-10-14, #8): set an expiry
+    (suggested one year) and say whether to restrict it to the home's public address, which
+    breaks renewal whenever that address changes.
