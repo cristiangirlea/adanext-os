@@ -130,7 +130,11 @@ records stay loadable, README and PLAN.md updated, tests first.
   or starts it independently of its own process tree.
   Acceptance, with Playwright against a real `adad` and a fake engine: start a task, close the
   window, `adad` and the task keep running, reopen, the task and its events are there; the explicit
-  "Quit Ada and stop work" cancels and stops.
+  "Quit Ada and stop work" cancels and stops. Also the event-stream tests of #4 (paged reads, write
+  deadline, stream limits, `cursor_ahead`, a restart during replay, the Node client's reconnect over
+  the pipe and the socket), the `AdaClient` tests of #5, and the queue tests of #9 (FIFO launch,
+  `queue_full`, a queued task cancelled before launch, "Quit" with its reason), as the decisions
+  log, 2026-10-14, lists them.
 
 ## Later milestones
 
@@ -147,9 +151,13 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   relayed provider sign-in, `home.adanext.si` with a certificate from files, then the DNS-01
   client. Evidence: Playwright from a second browser context, and a real run from a second
   computer over HTTPS (own account, project, task and provider sign-in, a permission prompt
-  answered there, reconnect), the fifth lane of the v1 gate (decisions log, 2026-10-13).
+  answered there, reconnect), the fifth lane of the v1 gate (decisions log, 2026-10-13). Also
+  the tests the decisions log, 2026-10-14, gives for the browser boundary (#5), sessions (#6), the
+  sign-in relay and pre-launch decisions (#7), the token and renewal (#8), the owner-only stop
+  (#9) and membership removal (#3).
 - **M5 VMware execution:** Packer template, guest service, isolated network, guest login, previews,
-  recovery.
+  recovery. Images carry the compatibility manifest of #10 and `adad` refuses one it does not
+  satisfy, with the tests the decisions log, 2026-10-14, lists.
 - **M6 Resume intelligence:** evidence extraction, cited summaries, next-task proposals,
   continuation.
 - **M7 Review and integration:** review package, branch export, destination checks.
