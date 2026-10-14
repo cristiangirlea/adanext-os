@@ -820,6 +820,8 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   same engine protocol, and a manifest checked on both sides turns a silent mismatch into a
   refusal before launch.
 
+- **2026-10-14, successful result with slow engine exit.** A slow exit after a successful result goes to recovery, by the owner's decision. Ada keeps the stored `ok` result and records that the engine had to be killed; the task moves `running` → `interrupted` → `recovery_required` so the owner can reconcile the run before proceeding.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).

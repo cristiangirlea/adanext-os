@@ -36,6 +36,7 @@ type Config struct {
 	Hub                                Notifier
 	Generation                         int64
 	CancelGrace                        time.Duration
+	PreparingDeadline                  time.Duration
 	Env                                []string // Extra controlled environment entries for helper-process tests.
 }
 
@@ -45,17 +46,21 @@ type active struct {
 	once   sync.Once
 }
 type Executor struct {
-	cfg         Config
-	mu          sync.Mutex
-	active      map[string]*active
-	stopped     bool
-	wg          sync.WaitGroup
-	afterAppend func() // Set only by tests to simulate slow event storage.
+	cfg             Config
+	mu              sync.Mutex
+	active          map[string]*active
+	stopped         bool
+	wg              sync.WaitGroup
+	afterAppend     func()                            // Set only by tests to simulate slow event storage.
+	beforeIdleCheck func(*atomic.Int64, *atomic.Bool) // Set only by tests to order a read against the idle check.
 }
 
 func New(cfg Config) *Executor {
 	if cfg.CancelGrace <= 0 {
 		cfg.CancelGrace = 10 * time.Second
+	}
+	if cfg.PreparingDeadline <= 0 {
+		cfg.PreparingDeadline = 2 * time.Minute
 	}
 	return &Executor{cfg: cfg, active: make(map[string]*active)}
 }
@@ -213,6 +218,12 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	cmd.Dir = work
 	cmd.Env = e.environment(base)
 	cmd.Stderr = &capWriter{file: stderr, left: 1 << 20}
+	supervisor, err := newProcessSupervisor(cmd)
+	if err != nil {
+		e.fail(a, fmt.Errorf("process supervision: %w", err))
+		return
+	}
+	defer supervisor.close()
 	e.mu.Lock()
 	stopped := e.stopped
 	e.mu.Unlock()
@@ -246,6 +257,15 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		e.fail(a, fmt.Errorf("launch: %w", err))
 		return
 	}
+	if err := supervisor.started(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		stdin.Close()
+		stdout.Close()
+		stdoutWriter.Close()
+		e.fail(a, fmt.Errorf("process supervision: %w", err))
+		return
+	}
 	_ = stdoutWriter.Close()
 	defer stdout.Close()
 	var inputMu sync.Mutex
@@ -256,7 +276,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	processDone := make(chan struct{})
 	kill := func() {
 		processMu.Lock()
-		killed := !exited && cmd.Process.Kill() == nil
+		killed := !exited && supervisor.kill(cmd) == nil
 		if killed {
 			killRequested = true
 		}
@@ -268,7 +288,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	var readProgress atomic.Int64
 	var reading atomic.Bool
 	var timerMu sync.Mutex
-	var closeTimer, killTimer, idleTimer *time.Timer
+	var closeTimer, killTimer, idleTimer, exitTimer *time.Timer
 	shutdownStarted := false
 	shutdownStopped := false
 	startShutdown := func() {
@@ -294,6 +314,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		if idleTimer != nil {
 			idleTimer.Stop()
 		}
+		if exitTimer != nil {
+			exitTimer.Stop()
+		}
 	}
 	var checkIdle func(int64)
 	checkIdle = func(last int64) {
@@ -301,6 +324,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		defer timerMu.Unlock()
 		if shutdownStopped {
 			return
+		}
+		if e.beforeIdleCheck != nil {
+			e.beforeIdleCheck(&readProgress, &reading)
 		}
 		inRead := reading.Load()
 		current := readProgress.Load()
@@ -323,6 +349,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		if !shutdownStopped {
 			last := readProgress.Load()
 			idleTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkIdle(last) })
+			exitTimer = time.AfterFunc(2*e.cfg.CancelGrace, func() { _ = stdout.Close() })
 		}
 		timerMu.Unlock()
 		close(processDone)
@@ -454,9 +481,21 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		_, killed, _ := drain()
 		e.failFinal(a, cause, causeRecorded, killed)
 	}
+	var preparingExpired atomic.Bool
+	preparingTimer := time.AfterFunc(e.cfg.PreparingDeadline, func() {
+		preparingExpired.Store(true)
+		_ = stdout.Close()
+	})
+	defer preparingTimer.Stop()
+	preparingCause := func(cause error) error {
+		if preparingExpired.Load() {
+			return errors.New("preparing deadline exceeded")
+		}
+		return cause
+	}
 	hello, _, err := next("hello", false)
 	if err != nil {
-		abort(fmt.Errorf("hello: %w", err))
+		abort(preparingCause(fmt.Errorf("hello: %w", err)))
 		return
 	}
 	if hello.Protocol != "v1" {
@@ -497,7 +536,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}
 	answer, _, err := next("", true)
 	if err != nil {
-		abort(fmt.Errorf("start response: %w", err))
+		abort(preparingCause(fmt.Errorf("start response: %w", err)))
 		return
 	}
 	if answer.Type == "rejected" {
@@ -508,6 +547,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		abort(errors.New("invalid accepted response"))
 		return
 	}
+	preparingTimer.Stop()
 	if err := e.owned(a.ID, func(tx *store.Tx) error {
 		var state store.State
 		var rev int64
@@ -543,8 +583,8 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		}
 		switch m.Type {
 		case "event":
-			if m.Event.Kind == "" {
-				abort(errors.New("event missing kind"))
+			if !contains([]string{"text", "thinking", "tool_call", "tool_result", "info", "error", "session"}, m.Event.Kind) {
+				abort(fmt.Errorf("event kind %q is not in protocol v1", m.Event.Kind))
 				return
 			}
 			if err := e.append(a, m.Event.Kind, line, m.Event.Text); err != nil {
@@ -552,7 +592,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 				return
 			}
 		case "error":
-			if err := e.append(a, "error", line, ""); err != nil {
+			if err := e.append(a, "engine_notice", line, ""); err != nil {
 				abort(fmt.Errorf("error storage: %w", err))
 				return
 			}
@@ -571,7 +611,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 				abort(errors.New("line after result"))
 				return
 			}
-			if !errors.Is(tailErr, io.EOF) {
+			if !errors.Is(tailErr, io.EOF) && !errors.Is(tailErr, os.ErrClosed) {
 				cause := fmt.Errorf("result tail: %w", tailErr)
 				causeRecorded := false
 				if !errors.Is(tailErr, os.ErrClosed) {
@@ -579,7 +619,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 				}
 				killed, _ := waitExit()
 				if killed {
-					if fatalCause != nil {
+					if m.Result.Status == "ok" && fatalCause == nil {
+						e.recoverAfterResult(a)
+					} else if fatalCause != nil {
 						e.failFinal(a, fatalCause, true, true)
 					} else {
 						e.failFinal(a, cause, causeRecorded, true)
@@ -591,8 +633,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 			killed, waitErr := waitExit()
 			if killed {
-				cause := errors.New("engine was killed after the grace period")
-				e.failFinal(a, cause, false, false)
+				if m.Result.Status == "ok" {
+					e.recoverAfterResult(a)
+				} else {
+					e.failFinal(a, errors.New("engine was killed after the grace period"), false, false)
+				}
 				return
 			}
 			if fatalCause != nil {
@@ -800,7 +845,37 @@ func (e *Executor) fail(a store.Attempt, cause error) {
 
 func (e *Executor) recordCause(a store.Attempt, cause error) bool {
 	payload, _ := json.Marshal(map[string]any{"error": cause.Error()})
-	return e.append(a, "error", payload, "") == nil
+	return e.append(a, "executor_error", payload, "") == nil
+}
+
+func (e *Executor) recoverAfterResult(a store.Attempt) {
+	_ = e.owned(a.ID, func(tx *store.Tx) error {
+		var state store.State
+		var rev int64
+		if err := tx.QueryRowContext(context.Background(), "SELECT state,revision FROM tasks WHERE id=?", a.Task).Scan(&state, &rev); err != nil {
+			return err
+		}
+		if state != store.Running {
+			return fmt.Errorf("result recovery: task is %s", state)
+		}
+		if err := tx.TransitionOwned(context.Background(), a.Task, store.Running, store.Interrupted, rev); err != nil {
+			return err
+		}
+		if err := tx.TransitionOwned(context.Background(), a.Task, store.Interrupted, store.RecoveryRequired, rev+1); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(context.Background(), "UPDATE attempts SET state='recovery_required',ended=? WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), a.ID); err != nil {
+			return err
+		}
+		var seq int64
+		if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&seq); err != nil {
+			return err
+		}
+		return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "recovery", Payload: []byte(`{"reason":"engine had to be killed after its result"}`)})
+	})
+	if e.cfg.Hub != nil {
+		e.cfg.Hub.Notify(a.ID)
+	}
 }
 
 func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed bool) {
@@ -854,13 +929,13 @@ func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed
 			seq++
 		}
 		if !causeRecorded {
-			if err := e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: payload}); err != nil {
+			if err := e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "executor_error", Payload: payload}); err != nil {
 				return err
 			}
 			seq++
 		}
 		if killed {
-			return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "error", Payload: []byte(`{"error":"engine was killed after the grace period"}`)})
+			return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "executor_error", Payload: []byte(`{"error":"engine was killed after the grace period"}`)})
 		}
 		return nil
 	})
