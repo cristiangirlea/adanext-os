@@ -632,12 +632,15 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   `launching` only if no decision is required for it (its scope, judged at the claim against the
   project's current default, does not exceed it), or a matching, unexpired allow decision exists.
   A decision binds the task revision, the source snapshot's content identity, the exact
-  permitted scope (backend, mode, network access and workspace) and the coordinator's ownership
-  generation (`docs/plan.md` section 2); it matches only while all four still equal the
-  attempt's, and any change to a binding (a task edited, a new snapshot, another scope, a new
-  generation after a restart) requires a fresh decision, never a reuse of the old one. A decision
-  expires 24 hours after it is made. A forward migration in the M4b slice adds
-  `permission_decisions`: the attempt, the four bindings, the decision (allow or deny), the
+  permitted scope (backend, mode, network access and workspace), the permission policy's version
+  and the coordinator's ownership generation (`docs/plan.md` section 2); it matches only while
+  all five still equal the attempt's, and any change to a binding (a task edited, a new
+  snapshot, another scope, a changed policy) requires a fresh decision, never a reuse of the old
+  one. A restart never revives a decision or its attempt: recovery (M2.3b) moves an abandoned
+  pending attempt to `recovery_required`, and work continues only as a new attempt of the new
+  generation with a new decision. A decision expires 24 hours after it is made. A forward
+  migration in the M4b slice adds
+  `permission_decisions`: the attempt, the five bindings, the decision (allow or deny), the
   deciding user, the time, the expiry and the request's idempotency key. A start whose scope
   exceeds the project's default (a write mode or network access) records the attempt `pending` as
   M2.3b does and marks it as needing a decision; in the queue such an attempt keeps its place but
@@ -658,7 +661,9 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   `approvals: false`; an attempt needing a decision never launched (the fake engine never
   started) until its actor allows it, then launched once; after an allow, a changed task
   revision, a new source snapshot, a changed backend, mode, network access or workspace, and a
-  new ownership generation each leaving the attempt unlaunched until a fresh decision; an expired
+  changed policy version each leaving the attempt unlaunched until a fresh decision; a restart
+  with an allowed but unlaunched attempt sending it to `recovery_required`, never launched, and a
+  new attempt of the new generation needing its own decision; an expired
   allow not launching on a fake clock; an attempt needing no decision launched through the same
   claim, with no other code path moving an attempt to `launching`; two claims racing on one
   attempt, one wins; a decision from another member refused, an owner's allow
