@@ -4,106 +4,133 @@ package ipc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestClosingThePipeListenerWhileClientsConnectNeverHangs(t *testing.T) {
 	for iteration := 0; iteration < 200; iteration++ {
-		cfg := Config{StateDir: t.TempDir(), Name: fmt.Sprintf("close-%d-%d", os.Getpid(), iteration)}
-		lock, err := Acquire(cfg)
-		if err != nil {
-			t.Fatalf("iteration %d: acquire lock: %v", iteration, err)
-		}
-		listener, err := lock.Listen()
-		if err != nil {
-			_ = lock.Release()
-			t.Fatalf("iteration %d: listen: %v", iteration, err)
-		}
-
-		accepted := make(chan struct{})
-		go func() {
-			defer close(accepted)
-			for {
-				conn, err := listener.Accept()
-				if err != nil {
-					return
-				}
-				_ = conn.Close()
+		t.Run(fmt.Sprintf("iteration_%d", iteration), func(t *testing.T) {
+			cfg := Config{StateDir: t.TempDir(), Name: fmt.Sprintf("close-%d-%d", os.Getpid(), iteration)}
+			lock, err := Acquire(cfg)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}()
+			t.Cleanup(func() {
+				if err := lock.Release(); err != nil {
+					t.Error(err)
+				}
+			})
+			listener, err := lock.Listen()
+			if err != nil {
+				t.Fatal(err)
+			}
+			acceptDone := make(chan struct{})
+			t.Cleanup(func() {
+				closed := make(chan struct{})
+				go func() { _ = listener.Close(); close(closed) }()
+				select {
+				case <-closed:
+				case <-time.After(2 * time.Second):
+					t.Error("listener cleanup did not finish")
+				}
+				select {
+				case <-acceptDone:
+				case <-time.After(2 * time.Second):
+					t.Error("accept goroutine did not stop")
+				}
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			stop := make(chan struct{})
+			var stopOnce sync.Once
+			stopDialers := func() { cancel(); stopOnce.Do(func() { close(stop) }) }
 
-		ctx, cancel := context.WithCancel(context.Background())
-		stop := make(chan struct{})
-		attempted := make(chan struct{}, 4)
-		finished := make(chan struct{}, 4)
-		for dialer := 0; dialer < 4; dialer++ {
+			accepted := make(chan error, 1)
 			go func() {
-				defer func() { finished <- struct{}{} }()
-				first := true
+				defer close(acceptDone)
 				for {
-					select {
-					case <-stop:
+					conn, err := listener.Accept()
+					if err != nil {
+						accepted <- err
 						return
-					default:
 					}
-					conn, err := Dial(ctx, cfg)
-					if err == nil {
-						_ = conn.Close()
-					}
-					if first {
-						attempted <- struct{}{}
-						first = false
-					}
+					_ = conn.Close()
 				}
 			}()
-		}
-
-		for dialer := 0; dialer < 4; dialer++ {
+			attempted := make(chan struct{}, 4)
+			finished := make(chan struct{}, 4)
+			var dialers sync.WaitGroup
+			for dialer := 0; dialer < 4; dialer++ {
+				dialers.Add(1)
+				go func() {
+					defer dialers.Done()
+					defer func() { finished <- struct{}{} }()
+					first := true
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						conn, err := Dial(ctx, cfg)
+						if err == nil {
+							_ = conn.Close()
+						}
+						if first {
+							attempted <- struct{}{}
+							first = false
+						}
+					}
+				}()
+			}
+			t.Cleanup(func() {
+				stopDialers()
+				done := make(chan struct{})
+				go func() { dialers.Wait(); close(done) }()
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					t.Error("dialers did not stop during cleanup")
+				}
+			})
+			for dialer := 0; dialer < 4; dialer++ {
+				select {
+				case <-attempted:
+				case <-time.After(2 * time.Second):
+					t.Fatal("dialers did not start within 2 seconds")
+				}
+			}
+			closed := make(chan error, 1)
+			go func() { closed <- listener.Close() }()
 			select {
-			case <-attempted:
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("close listener: %v", err)
+				}
 			case <-time.After(2 * time.Second):
-				close(stop)
-				cancel()
-				t.Fatalf("iteration %d: dialers did not start within 2 seconds", iteration)
+				t.Fatal("listener Close hung for more than 2 seconds")
 			}
-		}
-
-		closed := make(chan error, 1)
-		go func() { closed <- listener.Close() }()
-		select {
-		case err := <-closed:
-			if err != nil {
-				close(stop)
-				cancel()
-				_ = lock.Release()
-				t.Fatalf("iteration %d: close listener: %v", iteration, err)
+			stopDialers()
+			for dialer := 0; dialer < 4; dialer++ {
+				select {
+				case <-finished:
+				case <-time.After(2 * time.Second):
+					t.Fatal("dialers did not stop")
+				}
 			}
-		case <-time.After(2 * time.Second):
-			close(stop)
-			cancel()
-			_ = lock.Release()
-			t.Fatalf("iteration %d: listener Close hung for more than 2 seconds", iteration)
-		}
-
-		close(stop)
-		cancel()
-		for dialer := 0; dialer < 4; dialer++ {
 			select {
-			case <-finished:
+			case err := <-accepted:
+				if !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("Accept after Close: %v, want net.ErrClosed", err)
+				}
 			case <-time.After(2 * time.Second):
-				t.Fatalf("iteration %d: dialers did not stop", iteration)
+				t.Fatal("Accept did not stop after Close")
 			}
-		}
-		select {
-		case <-accepted:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("iteration %d: Accept did not stop after Close", iteration)
-		}
-		if err := lock.Release(); err != nil {
-			t.Fatalf("iteration %d: release lock: %v", iteration, err)
-		}
+		})
 	}
 }

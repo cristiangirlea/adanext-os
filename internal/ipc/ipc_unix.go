@@ -28,6 +28,9 @@ func privateSocketDir(cfg Config, create bool) (string, error) {
 			return "", err
 		}
 	}
+	if err := validateStateDir(cfg.StateDir); err != nil {
+		return "", err
+	}
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return "", err
@@ -41,11 +44,21 @@ func privateSocketDir(cfg Config, create bool) (string, error) {
 
 // listen binds an owner-only Unix socket in a verified private directory.
 func listen(cfg Config) (net.Listener, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(socketDir(cfg), cfg.Name+".sock")
+	if err := validateSocketPath(path); err != nil {
+		return nil, err
+	}
+	if err := peerChecksSupported(); err != nil {
+		return nil, err
+	}
 	dir, err := privateSocketDir(cfg, true)
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, cfg.Name+".sock")
+	path = filepath.Join(dir, cfg.Name+".sock")
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("ipc: existing endpoint is not a socket")
@@ -76,26 +89,34 @@ func listen(cfg Config) (net.Listener, error) {
 
 type ownerListener struct {
 	*net.UnixListener
-	path      string
-	boundInfo os.FileInfo
+	path       string
+	boundInfo  os.FileInfo
+	removePath func(string) error
 }
 
 func (l *ownerListener) Close() error {
-	closeErr := l.UnixListener.Close()
 	info, err := os.Lstat(l.path)
 	if os.IsNotExist(err) {
-		return closeErr
+		return l.UnixListener.Close()
 	}
 	if err != nil {
+		closeErr := l.UnixListener.Close()
 		if closeErr != nil {
 			return closeErr
 		}
 		return err
 	}
+	var removeErr error
 	if os.SameFile(l.boundInfo, info) {
-		if err := os.Remove(l.path); err != nil && closeErr == nil {
-			return err
+		remove := l.removePath
+		if remove == nil {
+			remove = os.Remove
 		}
+		removeErr = remove(l.path)
+	}
+	closeErr := l.UnixListener.Close()
+	if removeErr != nil {
+		return removeErr
 	}
 	return closeErr
 }
@@ -114,10 +135,29 @@ func (l *ownerListener) Accept() (net.Conn, error) {
 	}
 }
 
-func allowPeerUID(uid uint32) bool { return uid == uint32(os.Getuid()) }
+var currentPeerUID = func() uint32 { return uint32(os.Getuid()) }
+
+func allowPeerUID(uid uint32) bool { return uid == currentPeerUID() }
+
+func validateSocketPath(path string) error {
+	if len(path) >= socketPathLimit() {
+		return fmt.Errorf("ipc: socket path %q exceeds the %d-byte sun_path limit", path, socketPathLimit())
+	}
+	return nil
+}
 
 // Dial checks the socket directory and server UID before returning a connection.
 func Dial(ctx context.Context, cfg Config) (net.Conn, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(socketDir(cfg), cfg.Name+".sock")
+	if err := validateSocketPath(path); err != nil {
+		return nil, err
+	}
+	if err := peerChecksSupported(); err != nil {
+		return nil, err
+	}
 	dir, err := privateSocketDir(cfg, false)
 	if err != nil {
 		return nil, err

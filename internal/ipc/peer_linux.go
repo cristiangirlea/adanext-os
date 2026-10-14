@@ -8,6 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func peerChecksSupported() error { return nil }
+
+func socketPathLimit() int { return 108 }
+
 func peerUID(conn *net.UnixConn) (uint32, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {

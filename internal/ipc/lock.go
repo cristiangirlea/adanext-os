@@ -31,12 +31,16 @@ func Acquire(cfg Config) (*Lock, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(cfg.StateDir, "adad.lock")
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-	if errors.Is(err, os.ErrExist) {
-		f, err = os.OpenFile(path, os.O_RDWR, 0)
+	if err := validateStateDir(cfg.StateDir); err != nil {
+		return nil, err
 	}
+	path := filepath.Join(cfg.StateDir, "adad.lock")
+	f, err := openLockFile(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateLockFile(f); err != nil {
+		f.Close()
 		return nil, err
 	}
 	if err := tryLockFile(f); err != nil {
@@ -44,12 +48,14 @@ func Acquire(cfg Config) (*Lock, error) {
 			f.Close()
 			return nil, err
 		}
-		var record lockRecord
-		if _, readErr := f.Seek(0, io.SeekStart); readErr == nil {
-			_ = json.NewDecoder(f).Decode(&record)
+		record := readLockRecord(f)
+		if locked, retryErr := retryStaleLock(f, record); retryErr != nil {
+			f.Close()
+			return nil, retryErr
+		} else if !locked {
+			f.Close()
+			return nil, &AlreadyRunningError{PID: record.PID, Created: record.Created}
 		}
-		f.Close()
-		return nil, &AlreadyRunningError{PID: record.PID}
 	}
 	created, err := processCreated(os.Getpid())
 	if err != nil {
@@ -72,6 +78,14 @@ func Acquire(cfg Config) (*Lock, error) {
 		return nil, err
 	}
 	return &Lock{file: f, cfg: cfg}, nil
+}
+
+func readLockRecord(f *os.File) lockRecord {
+	var record lockRecord
+	if _, err := f.Seek(0, io.SeekStart); err == nil {
+		_ = json.NewDecoder(f).Decode(&record)
+	}
+	return record
 }
 
 // Listen binds the endpoint while the coordinator lock is held.

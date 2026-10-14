@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,11 +106,88 @@ func TestHelperHoldsCoordinatorLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Release()
+	if os.Getenv("ADANEXT_IPC_EMPTY_RECORD") == "1" {
+		if err := os.Truncate(filepath.Join(cfg.StateDir, "adad.lock"), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if os.Getenv("ADANEXT_IPC_MALFORMED_RECORD") == "1" {
+		if err := os.WriteFile(filepath.Join(cfg.StateDir, "adad.lock"), []byte("not-json"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if os.Getenv("ADANEXT_IPC_STALE_RECORD") == "1" {
+		if err := os.WriteFile(filepath.Join(cfg.StateDir, "adad.lock"), []byte(`{"pid":99999999,"created":"0"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_, _ = os.Stdout.WriteString("ready\n")
+	if os.Getenv("ADANEXT_IPC_STALE_RECORD") == "1" {
+		time.Sleep(300 * time.Millisecond)
+		return
+	}
 	_, _ = io.Copy(io.Discard, os.Stdin)
 }
 
-func TestADeadCoordinatorLockIsRecoveredAndALiveOneReportsItsPID(t *testing.T) {
+func TestAlreadyRunningErrorReportsTheHolderIdentityOrUnknown(t *testing.T) {
+	known := (&AlreadyRunningError{PID: 42, Created: "start-42"}).Error()
+	if !strings.Contains(known, "PID 42") || !strings.Contains(known, "start-42") {
+		t.Fatalf("known holder: %q", known)
+	}
+	unknown := (&AlreadyRunningError{}).Error()
+	if !strings.Contains(unknown, "unknown") || strings.Contains(unknown, "PID 0") {
+		t.Fatalf("unknown holder: %q", unknown)
+	}
+}
+
+func TestConfigRefusesANameLongerThan64Bytes(t *testing.T) {
+	for _, name := range []string{strings.Repeat("a", 65), strings.Repeat("a", 64)} {
+		err := (Config{StateDir: t.TempDir(), Name: name}).validate()
+		if (err == nil) != (len(name) == 64) {
+			t.Fatalf("name length %d: %v", len(name), err)
+		}
+	}
+}
+
+func TestAnUnreadableHolderRecordReportsAnUnknownHolder(t *testing.T) {
+	for _, tc := range []struct{ name, env string }{
+		{"empty", "ADANEXT_IPC_EMPTY_RECORD=1"},
+		{"malformed", "ADANEXT_IPC_MALFORMED_RECORD=1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{StateDir: t.TempDir(), Name: "helper"}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
+			cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", tc.env, "ADANEXT_IPC_STATE="+cfg.StateDir)
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stdin.Close()
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			ready := make([]byte, 6)
+			if _, err := io.ReadFull(stdout, ready); err != nil || string(ready) != "ready\n" {
+				t.Fatalf("helper ready: %q %v", ready, err)
+			}
+			lock, err := Acquire(cfg)
+			if lock != nil {
+				lock.Release()
+			}
+			var running *AlreadyRunningError
+			if !errors.As(err, &running) || running.PID != 0 || running.Created != "" || !strings.Contains(running.Error(), "unknown") {
+				t.Fatalf("got %v, want unknown holder", err)
+			}
+		})
+	}
+}
+
+func TestADeadCoordinatorLockIsRecoveredAndALiveOneReportsItsIdentity(t *testing.T) {
 	cfg := Config{StateDir: t.TempDir(), Name: "helper"}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
 	cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", "ADANEXT_IPC_STATE="+cfg.StateDir)
@@ -137,6 +215,10 @@ func TestADeadCoordinatorLockIsRecoveredAndALiveOneReportsItsPID(t *testing.T) {
 	var running *AlreadyRunningError
 	if !errors.As(err, &running) || running.PID != cmd.Process.Pid {
 		t.Fatalf("got %v, want AlreadyRunningError for PID %d", err, cmd.Process.Pid)
+	}
+	created, err := processCreated(cmd.Process.Pid)
+	if err != nil || running.Created != created {
+		t.Fatalf("creation time = %q, want %q: %v", running.Created, created, err)
 	}
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
