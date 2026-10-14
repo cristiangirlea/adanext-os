@@ -35,6 +35,29 @@ func assertHubReleased(t *testing.T, hub *Hub, user string) {
 	}
 }
 
+func waitHubReleased(t *testing.T, hub *Hub, user string, deadline time.Time, maxBudget int) {
+	t.Helper()
+	for {
+		hub.mu.Lock()
+		subs := 0
+		for _, group := range hub.subs {
+			subs += len(group)
+		}
+		used, total, perUser := hub.budgetUsed, hub.streamTotal, hub.streamUsers[user]
+		hub.mu.Unlock()
+		if maxBudget > 0 && used > maxBudget {
+			t.Fatalf("budget exceeded: %d", used)
+		}
+		if subs == 0 && used == 0 && total == 0 && perUser == 0 {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("resources remain: subscribers=%d bytes=%d streams=%d user=%d", subs, used, total, perUser)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestEventsRejectMalformedAndAheadCursorsInBothForms(t *testing.T) {
 	f := newFixture(t)
 	attemptForLimits(t, f)
@@ -368,21 +391,7 @@ func TestSlowStreamReleasesItsSubscriberAndBudgetWithinDeadline(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		f.hub.mu.Lock()
-		used := f.hub.budgetUsed
-		f.hub.mu.Unlock()
-		if used > pageBytes {
-			t.Fatalf("budget exceeded: %d", used)
-		}
-		if f.hub.SubscriberCount() == 0 {
-			assertHubReleased(t, f.hub, "alice")
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("subscribers remained: %d", f.hub.SubscriberCount())
+	waitHubReleased(t, f.hub, "alice", time.Now().Add(2*time.Second), pageBytes)
 }
 
 func TestClientDisconnectReleasesStream(t *testing.T) {
@@ -399,13 +408,7 @@ func TestClientDisconnectReleasesStream(t *testing.T) {
 	}
 	resp.Body.Close()
 	deadline := time.Now().Add(time.Second)
-	for f.hub.SubscriberCount() != 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := f.hub.SubscriberCount(); got != 0 {
-		t.Fatalf("subscribers remain: %d", got)
-	}
-	assertHubReleased(t, f.hub, "alice")
+	waitHubReleased(t, f.hub, "alice", deadline, 0)
 }
 
 func TestHubCloseReleasesStream(t *testing.T) {
@@ -466,29 +469,96 @@ func TestPanicInEventPageReleasesReservation(t *testing.T) {
 	}
 }
 
-func TestClosingHubDuringJSONReservationReturnsShuttingDown(t *testing.T) {
-	f := newFixture(t)
-	attemptForLimits(t, f)
-	f.hub.BudgetBytes = pageBytes
-	if !f.hub.reserveBytes(context.Background(), pageBytes) {
-		t.Fatal("initial reservation")
+func TestClosingHubDuringReservationReturnsShuttingDown(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint("stream=", stream), func(t *testing.T) {
+			f := newFixture(t)
+			attemptForLimits(t, f)
+			f.hub.BudgetBytes = pageBytes
+			if !f.hub.reserveBytes(context.Background(), pageBytes) {
+				t.Fatal("initial reservation")
+			}
+			defer f.hub.releaseBytes(pageBytes)
+			h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
+			req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil)
+			req.SetPathValue("id", "limits-attempt")
+			if stream {
+				req.Header.Set("Accept", "text/event-stream")
+			}
+			w := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() { h.events(w, req); close(done) }()
+			time.Sleep(20 * time.Millisecond)
+			f.hub.Close()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("reader did not stop")
+			}
+			if w.Code != 503 || !bytes.Contains(w.Body.Bytes(), []byte(`"error":"shutting_down"`)) || w.Header().Get("Retry-After") != "2" {
+				t.Fatalf("shutdown response: %d %s, Retry-After=%q", w.Code, w.Body.String(), w.Header().Get("Retry-After"))
+			}
+		})
 	}
-	defer f.hub.releaseBytes(pageBytes)
-	h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
-	req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil)
-	req.SetPathValue("id", "limits-attempt")
-	w := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() { h.events(w, req); close(done) }()
-	time.Sleep(20 * time.Millisecond)
-	f.hub.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("JSON reader did not stop")
+}
+
+type blockingPageWriter struct {
+	*httptest.ResponseRecorder
+	started chan int
+	unblock chan struct{}
+	stream  bool
+}
+
+func (*blockingPageWriter) SetWriteDeadline(time.Time) error { return nil }
+
+func (w *blockingPageWriter) Write(p []byte) (int, error) {
+	if (!w.stream && bytes.HasPrefix(p, []byte("["))) || (w.stream && bytes.HasPrefix(p, []byte("id: "))) {
+		w.started <- len(p)
+		<-w.unblock
 	}
-	if w.Code != 503 || !bytes.Contains(w.Body.Bytes(), []byte(`"error":"shutting_down"`)) {
-		t.Fatalf("shutdown response: %d %s", w.Code, w.Body.String())
+	return w.ResponseRecorder.Write(p)
+}
+
+func TestSlowPageWriteHoldsOnlyEncodedBytes(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint("stream=", stream), func(t *testing.T) {
+			f := newFixture(t)
+			attemptForLimits(t, f)
+			if err := f.s.AppendEvent(context.Background(), "alice", store.Event{Attempt: "limits-attempt", Seq: 1, Kind: "update", Payload: json.RawMessage(`{"small":true}`)}); err != nil {
+				t.Fatal(err)
+			}
+			f.hub.BudgetBytes = pageBytes
+			h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil).WithContext(ctx)
+			req.SetPathValue("id", "limits-attempt")
+			if stream {
+				req.Header.Set("Accept", "text/event-stream")
+			}
+			w := &blockingPageWriter{ResponseRecorder: httptest.NewRecorder(), started: make(chan int, 1), unblock: make(chan struct{}), stream: stream}
+			done := make(chan struct{})
+			go func() { h.events(w, req); close(done) }()
+			select {
+			case pageSize := <-w.started:
+				f.hub.mu.Lock()
+				used := f.hub.budgetUsed
+				f.hub.mu.Unlock()
+				if used != pageSize {
+					t.Errorf("during %d-byte write, budget held %d bytes", pageSize, used)
+				}
+			case <-time.After(time.Second):
+				t.Error("page write did not start")
+			}
+			close(w.unblock)
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("writer did not stop")
+			}
+			assertHubReleased(t, f.hub, "alice")
+		})
 	}
 }
 

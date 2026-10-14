@@ -603,7 +603,8 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		defer release()
 	}
 	if !h.hub.reserveBytes(r.Context(), pageBytes) {
-		if !stream && r.Context().Err() == nil {
+		if r.Context().Err() == nil {
+			w.Header().Set("Retry-After", "2")
 			writeError(w, 503, "shutting_down")
 		}
 		return
@@ -650,6 +651,8 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 			storeError(w, err)
 			return
 		}
+		h.hub.releaseBytes(held - len(page))
+		held = len(page)
 		w.Header().Set("Content-Type", "application/json")
 		rc := http.NewResponseController(w)
 		deadline := h.hub.WriteDeadline
@@ -712,11 +715,14 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 				if !got {
 					return 0, after, 0, false
 				}
-				defer h.hub.releaseBytes(pageBytes)
+				pageHeld := pageBytes
+				defer func() { h.hub.releaseBytes(pageHeld) }()
 				events, page, err := h.page(r.Context(), user, id, after, true)
 				if err != nil {
 					return 0, after, 0, false
 				}
+				h.hub.releaseBytes(pageHeld - len(page))
+				pageHeld = len(page)
 				count := len(events)
 				lastSeq := after
 				if count != 0 {
