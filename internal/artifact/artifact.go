@@ -11,12 +11,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 var (
-	ErrTooLarge = errors.New("artifact exceeds size limit")
-	ErrCorrupt  = errors.New("artifact is corrupt")
-	ErrDiskFull = errors.New("artifact disk is full")
+	ErrTooLarge    = errors.New("artifact exceeds size limit")
+	ErrCorrupt     = errors.New("artifact is corrupt")
+	ErrDiskFull    = errors.New("artifact disk is full")
+	ErrInvalidHash = errors.New("invalid artifact hash")
 )
 
 type Ref struct {
@@ -70,7 +73,7 @@ type filesystem interface {
 	mkdirAll(path string, mode os.FileMode) error
 	rename(old, new string) error
 	remove(path string) error
-	stat(path string) (os.FileInfo, error)
+	lstat(path string) (os.FileInfo, error)
 	open(path string) (*os.File, error)
 	syncDir(path string) error
 }
@@ -81,11 +84,13 @@ func (osFS) createTemp(dir, pattern string) (file, error) { return os.CreateTemp
 func (osFS) mkdirAll(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
 func (osFS) rename(old, new string) error                 { return os.Rename(old, new) }
 func (osFS) remove(path string) error                     { return os.Remove(path) }
-func (osFS) stat(path string) (os.FileInfo, error)        { return os.Stat(path) }
-func (osFS) open(path string) (*os.File, error)           { return os.Open(path) }
+func (osFS) lstat(path string) (os.FileInfo, error)       { return os.Lstat(path) }
+func (osFS) open(path string) (*os.File, error)           { return openBlob(path) }
 func (osFS) syncDir(path string) error                    { return syncDirectory(path) }
 
-// Open prepares a private artifact directory and its temporary-file directory.
+// Open prepares private artifact directories and removes stale temporary files.
+// The coordinator must hold its singleton lock while calling Open, so cleanup
+// cannot remove a temporary file belonging to another active writer.
 func Open(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("artifact directory is empty")
@@ -100,7 +105,37 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 	}
+	if err := removeStaleTemps(filepath.Join(absolute, "tmp")); err != nil {
+		return nil, err
+	}
 	return &Store{dir: absolute, fs: fs}, nil
+}
+
+func removeStaleTemps(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return classify(err)
+	}
+	cutoff := time.Now().Add(-time.Hour)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "artifact-") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return classify(err)
+		}
+		if info.Mode().IsRegular() && info.ModTime().Before(cutoff) {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return classify(err)
+			}
+		}
+	}
+	return nil
 }
 
 func privateDirectory(fs filesystem, path string) error {
@@ -110,7 +145,10 @@ func privateDirectory(fs filesystem, path string) error {
 	if err := fs.mkdirAll(path, 0o700); err != nil {
 		return classify(err)
 	}
-	return refuseSymlink(path)
+	if err := refuseSymlink(path); err != nil {
+		return err
+	}
+	return makePrivateDirectory(path)
 }
 
 // Write streams a blob to a private temporary file and publishes it by hash.
@@ -204,24 +242,54 @@ func (s *Store) Write(ctx context.Context, r io.Reader, limit int64) (ref Ref, e
 		return Ref{}, err
 	}
 	dest := filepath.Join(fanout, ref.Hash)
-	if info, statErr := s.fs.stat(dest); statErr == nil {
+	if info, statErr := s.fs.lstat(dest); statErr == nil {
 		if !info.Mode().IsRegular() || info.Size() != ref.Size {
 			return Ref{}, fmt.Errorf("existing artifact %s: %w", ref.Hash, ErrCorrupt)
 		}
-		if err := s.fs.remove(tmpPath); err != nil {
-			return Ref{}, classify(err)
+		matches, err := s.blobMatches(dest, ref)
+		if err != nil {
+			return Ref{}, err
 		}
-		if err := s.fs.syncDir(fanout); err != nil {
-			return Ref{}, classify(err)
+		if matches {
+			return s.reuse(tmpPath, fanout, ref)
 		}
-		if err := s.fs.syncDir(s.dir); err != nil {
-			return Ref{}, classify(err)
-		}
-		return ref, nil
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return Ref{}, classify(statErr)
 	}
 	if err := s.fs.rename(tmpPath, dest); err != nil {
+		if info, statErr := s.fs.lstat(dest); statErr == nil && info.Mode().IsRegular() && info.Size() == ref.Size {
+			matches, matchErr := s.blobMatches(dest, ref)
+			if matchErr == nil && matches {
+				return s.reuse(tmpPath, fanout, ref)
+			}
+		}
+		return Ref{}, classify(err)
+	}
+	if err := s.fs.syncDir(fanout); err != nil {
+		return Ref{}, classify(err)
+	}
+	if err := s.fs.syncDir(s.dir); err != nil {
+		return Ref{}, classify(err)
+	}
+	return ref, nil
+}
+
+func (s *Store) blobMatches(path string, ref Ref) (bool, error) {
+	f, err := s.fs.open(path)
+	if err != nil {
+		return false, classify(err)
+	}
+	h := sha256.New()
+	n, readErr := io.Copy(h, f)
+	closeErr := f.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return false, classify(err)
+	}
+	return n == ref.Size && hex.EncodeToString(h.Sum(nil)) == ref.Hash, nil
+}
+
+func (s *Store) reuse(tmpPath, fanout string, ref Ref) (Ref, error) {
+	if err := s.fs.remove(tmpPath); err != nil {
 		return Ref{}, classify(err)
 	}
 	if err := s.fs.syncDir(fanout); err != nil {
@@ -240,17 +308,25 @@ func classify(err error) error {
 	return err
 }
 
-// Open returns a reader that checks the blob's size and hash at EOF.
+// Open returns a reader that checks the blob's size and hash only at EOF.
+// Callers must read through EOF to verify content; closing early does not verify it.
 func (s *Store) Open(hashString string) (io.ReadCloser, error) {
 	if !validHash(hashString) {
-		return nil, errors.New("invalid artifact hash")
+		return nil, ErrInvalidHash
 	}
 	path := filepath.Join(s.dir, hashString[:2], hashString)
+	info, err := s.fs.lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, ErrCorrupt
+	}
 	f, err := s.fs.open(path)
 	if err != nil {
 		return nil, err
 	}
-	info, err := f.Stat()
+	info, err = f.Stat()
 	if err != nil {
 		f.Close()
 		return nil, err
