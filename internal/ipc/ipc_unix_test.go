@@ -1,12 +1,15 @@
-//go:build !windows
+//go:build linux
 
 package ipc
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -166,7 +169,7 @@ func TestDifferentStateDirsWithSameNameKeepBothSockets(t *testing.T) {
 		{StateDir: t.TempDir(), Name: "shared"},
 		{StateDir: t.TempDir(), Name: "shared"},
 	}
-	for _, cfg := range configs {
+	for i, cfg := range configs {
 		lock, err := Acquire(cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -177,13 +180,74 @@ func TestDifferentStateDirsWithSameNameKeepBothSockets(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer listener.Close()
+		go func(want byte) {
+			conn, err := listener.Accept()
+			if err == nil {
+				defer conn.Close()
+				_, _ = conn.Write([]byte{want})
+			}
+		}(byte('A' + i))
 	}
-	for _, cfg := range configs {
+	for i, cfg := range configs {
 		conn, err := Dial(context.Background(), cfg)
 		if err != nil {
 			t.Fatalf("Dial(%s): %v", cfg.StateDir, err)
 		}
+		var got [1]byte
+		if _, err := io.ReadFull(conn, got[:]); err != nil {
+			t.Fatal(err)
+		}
+		if want := byte('A' + i); got[0] != want {
+			t.Fatalf("Dial(%s) reached %q, want %q", cfg.StateDir, got[0], want)
+		}
 		conn.Close()
+	}
+}
+
+func TestListenAndDialNameAUnixSocketPathThatIsTooLong(t *testing.T) {
+	cfg := Config{StateDir: filepath.Join(t.TempDir(), strings.Repeat("a", 108)), Name: "long"}
+	path := filepath.Join(cfg.StateDir, "run", cfg.Name+".sock")
+	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if listener, err := listen(cfg); err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "sun_path limit") {
+		if listener != nil {
+			listener.Close()
+		}
+		t.Fatalf("Listen error = %v, want sun_path limit and path %q", err, path)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StateDir, "run")); !os.IsNotExist(err) {
+		t.Fatalf("Listen created run directory for overlong path: %v", err)
+	}
+	if conn, err := Dial(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "sun_path limit") {
+		if conn != nil {
+			conn.Close()
+		}
+		t.Fatalf("Dial error = %v, want sun_path limit and path %q", err, path)
+	}
+}
+
+func TestDialRefusesAServerWhenTheExpectedUIDChanges(t *testing.T) {
+	cfg := Config{StateDir: t.TempDir(), Name: "uid-check"}
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	listener, err := lock.Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	old := currentPeerUID
+	currentPeerUID = func() uint32 { return uint32(os.Getuid() + 1) }
+	defer func() { currentPeerUID = old }()
+	conn, err := Dial(context.Background(), cfg)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "different user") {
+		t.Fatalf("Dial accepted a mismatched server UID: %v", err)
 	}
 }
 
@@ -239,5 +303,33 @@ func TestCloseDoesNotRemoveReplacementSocket(t *testing.T) {
 	}
 	if !os.SameFile(secondInfo, currentInfo) {
 		t.Fatal("replacement socket changed")
+	}
+}
+
+func TestCloseRemovesItsSocketWhileTheListenerIsOpen(t *testing.T) {
+	cfg := Config{StateDir: t.TempDir(), Name: "close-order"}
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	listener, err := lock.Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := listener.(*ownerListener)
+	defer owner.Close()
+	owner.removePath = func(path string) error {
+		raw, err := owner.UnixListener.SyscallConn()
+		if err != nil {
+			return fmt.Errorf("listener was closed before socket removal: %w", err)
+		}
+		if err := raw.Control(func(uintptr) {}); err != nil {
+			return fmt.Errorf("listener was closed before socket removal: %w", err)
+		}
+		return os.Remove(path)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

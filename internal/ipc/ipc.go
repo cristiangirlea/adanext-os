@@ -16,15 +16,21 @@ type Config struct {
 var validName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 func (c Config) validate() error {
-	if c.StateDir == "" || !validName.MatchString(c.Name) {
+	if c.StateDir == "" || len(c.Name) > 64 || !validName.MatchString(c.Name) {
 		return errors.New("ipc: state directory and a simple nonempty name are required")
 	}
 	return nil
 }
 
 // AlreadyRunningError reports the process recorded as holding the coordinator lock.
-type AlreadyRunningError struct{ PID int }
+type AlreadyRunningError struct {
+	PID     int
+	Created string
+}
 
 func (e *AlreadyRunningError) Error() string {
-	return fmt.Sprintf("ipc: coordinator already running as PID %d", e.PID)
+	if e.PID <= 0 || e.Created == "" {
+		return "ipc: coordinator already running (holder unknown)"
+	}
+	return fmt.Sprintf("ipc: coordinator already running as PID %d (created %s)", e.PID, e.Created)
 }

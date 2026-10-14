@@ -19,8 +19,14 @@ func currentSID() (string, error) {
 	return u.User.Sid.String(), nil
 }
 
+var pipeCheckSID = currentSID
+var pipeReadOwnerSID = pipeOwnerSID
+
 func pipePath(cfg Config) (string, error) {
 	if err := cfg.validate(); err != nil {
+		return "", err
+	}
+	if err := validateStateDir(cfg.StateDir); err != nil {
 		return "", err
 	}
 	sid, err := currentSID()
@@ -67,11 +73,40 @@ func verifyPipeServer(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	current, err := currentSID()
+	owner, err := pipeReadOwnerSID(conn)
 	if err != nil {
 		return err
 	}
-	return allowPipeServerSID(server, current)
+	current, err := pipeCheckSID()
+	if err != nil {
+		return err
+	}
+	if err := allowPipeServerSID(server, current); err != nil {
+		return err
+	}
+	return allowPipeOwnerSID(owner, current)
+}
+
+func pipeOwnerSID(conn net.Conn) (string, error) {
+	f, ok := conn.(interface{ Fd() uintptr })
+	if !ok {
+		return "", fmt.Errorf("ipc: pipe connection has no Windows handle")
+	}
+	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return "", fmt.Errorf("ipc: get pipe owner: %w", err)
+	}
+	if sd == nil {
+		return "", fmt.Errorf("ipc: pipe has no security descriptor")
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return "", fmt.Errorf("ipc: read pipe owner: %w", err)
+	}
+	if owner == nil {
+		return "", fmt.Errorf("ipc: pipe has no owner")
+	}
+	return owner.String(), nil
 }
 
 func pipeServerSID(conn net.Conn) (string, error) {
@@ -103,6 +138,13 @@ func pipeServerSID(conn net.Conn) (string, error) {
 func allowPipeServerSID(server, current string) error {
 	if server != current {
 		return fmt.Errorf("ipc: pipe server belongs to a different user")
+	}
+	return nil
+}
+
+func allowPipeOwnerSID(owner, current string) error {
+	if owner != current {
+		return fmt.Errorf("ipc: pipe owner belongs to a different user")
 	}
 	return nil
 }
