@@ -3,6 +3,7 @@
 package ipc
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -236,21 +238,75 @@ func TestWindowsRetryReportsTheHolderAfterTheRecordChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	ready := make([]byte, 6)
-	if _, err := io.ReadFull(stdout, ready); err != nil || string(ready) != "ready\n" {
-		t.Fatalf("helper ready: %q %v", ready, err)
+	output := bufio.NewReader(stdout)
+	if signal, err := output.ReadString('\n'); err != nil || signal != "fake\n" {
+		t.Fatalf("helper fake record: %q %v", signal, err)
 	}
-	lock, err := Acquire(cfg)
-	if lock != nil {
-		lock.Release()
+	type acquireResult struct {
+		lock *Lock
+		err  error
+	}
+	result := make(chan acquireResult, 1)
+	start := time.Now()
+	go func() {
+		lock, err := Acquire(cfg)
+		result <- acquireResult{lock, err}
+	}()
+	// Observe the retry before restoring the record, so the returned PID
+	// must come from Acquire's final read rather than its initial read.
+	stack := make([]byte, 64<<10)
+	enteredRetry := time.NewTimer(time.Second)
+	defer enteredRetry.Stop()
+	for {
+		n := runtime.Stack(stack, true)
+		if strings.Contains(string(stack[:n]), "ipc.retryStaleLock(") {
+			break
+		}
+		select {
+		case got := <-result:
+			if got.lock != nil {
+				got.lock.Release()
+			}
+			t.Fatalf("Acquire returned before retrying: %v", got.err)
+		case <-enteredRetry.C:
+			t.Fatal("Acquire did not enter the stale-lock retry")
+		default:
+			runtime.Gosched()
+		}
+	}
+	if _, err := io.WriteString(stdin, "restore\n"); err != nil {
+		t.Fatal(err)
+	}
+	if signal, err := output.ReadString('\n'); err != nil || signal != "restored\n" {
+		t.Fatalf("helper restored record: %q %v", signal, err)
+	}
+	var got acquireResult
+	select {
+	case got = <-result:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Acquire exceeded the 2s retry bound plus 1s margin")
+	}
+	elapsed := time.Since(start)
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got.lock != nil {
+		got.lock.Release()
 	}
 	var running *AlreadyRunningError
-	if !errors.As(err, &running) || running.PID != cmd.Process.Pid {
-		t.Fatalf("Acquire = %v, want current holder PID %d", err, cmd.Process.Pid)
+	if !errors.As(got.err, &running) || running.PID != cmd.Process.Pid {
+		t.Fatalf("Acquire = %v, want current holder PID %d", got.err, cmd.Process.Pid)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("Acquire took %v, want at most 2s retry bound plus 1s margin", elapsed)
 	}
 }
 

@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -121,25 +122,41 @@ func TestHelperHoldsCoordinatorLock(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var originalRecord []byte
 	if os.Getenv("ADANEXT_IPC_REPLACE_RECORD") == "1" {
-		originalRecord, err = os.ReadFile(filepath.Join(cfg.StateDir, "adad.lock"))
+		path := filepath.Join(cfg.StateDir, "adad.lock")
+		originalRecord, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(cfg.StateDir, "adad.lock"), []byte(`{"pid":99999999,"created":"0"}`), 0600); err != nil {
-			t.Fatal(err)
+		writeRecord := func(body []byte) {
+			f, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			n, err := f.WriteAt(body, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != len(body) {
+				t.Fatal(io.ErrShortWrite)
+			}
+			if err := f.Truncate(int64(len(body))); err != nil {
+				t.Fatal(err)
+			}
 		}
-	}
-	_, _ = os.Stdout.WriteString("ready\n")
-	if originalRecord != nil {
-		time.Sleep(100 * time.Millisecond)
-		if err := os.WriteFile(filepath.Join(cfg.StateDir, "adad.lock"), originalRecord, 0600); err != nil {
-			t.Fatal(err)
+		writeRecord([]byte(`{"pid":99999999,"created":"0"}`))
+		_, _ = os.Stdout.WriteString("fake\n")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil || line != "restore\n" {
+			t.Fatalf("restore signal: %q %v", line, err)
 		}
-		time.Sleep(2300 * time.Millisecond)
+		writeRecord(originalRecord)
+		_, _ = os.Stdout.WriteString("restored\n")
+		_, _ = io.Copy(io.Discard, os.Stdin)
 		return
 	}
+	_, _ = os.Stdout.WriteString("ready\n")
 	if os.Getenv("ADANEXT_IPC_STALE_RECORD") == "1" {
 		time.Sleep(300 * time.Millisecond)
 		return
