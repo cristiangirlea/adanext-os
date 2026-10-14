@@ -8,6 +8,10 @@ step() { printf '\n== %s\n' "$*"; }
 step "go vet"
 go vet ./...
 
+step "go module tidy and verify"
+go mod tidy -diff
+go mod verify
+
 step "go build"
 go build ./...
 
