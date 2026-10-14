@@ -20,6 +20,7 @@ func currentSID() (string, error) {
 }
 
 var pipeCheckSID = currentSID
+var pipeReadOwnerSID = pipeOwnerSID
 
 func pipePath(cfg Config) (string, error) {
 	if err := cfg.validate(); err != nil {
@@ -72,7 +73,7 @@ func verifyPipeServer(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	owner, err := pipeOwnerSID(conn)
+	owner, err := pipeReadOwnerSID(conn)
 	if err != nil {
 		return err
 	}
@@ -94,6 +95,9 @@ func pipeOwnerSID(conn net.Conn) (string, error) {
 	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		return "", fmt.Errorf("ipc: get pipe owner: %w", err)
+	}
+	if sd == nil {
+		return "", fmt.Errorf("ipc: pipe has no security descriptor")
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {

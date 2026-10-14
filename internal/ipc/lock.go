@@ -53,6 +53,7 @@ func Acquire(cfg Config) (*Lock, error) {
 			f.Close()
 			return nil, retryErr
 		} else if !locked {
+			record = readLockRecord(f)
 			f.Close()
 			return nil, &AlreadyRunningError{PID: record.PID, Created: record.Created}
 		}

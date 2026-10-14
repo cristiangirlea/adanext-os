@@ -383,7 +383,7 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
 
 - **2026-10-13, M2.2 in two slices.** M2.2 is split into M2.2a, `internal/ipc` with the
   single-coordinator lock (#25), and M2.2b, `cmd/adad` with the `/v1` API (#26), so each is
-  reviewable on its own. M2.2a's choices: the Windows pipe through go-winio v0.6.2 (first instance,
+  reviewable on its own. M2.2a's choices: the Windows pipe through go-winio v0.6.3 (first instance,
   remote clients rejected, owner and DACL the user's SID alone), and the Unix socket under the
   state directory rather than `$XDG_RUNTIME_DIR`, so that the lock and the socket cover the same
   coordinators.

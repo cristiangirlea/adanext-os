@@ -4,7 +4,9 @@ package ipc
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +46,14 @@ func TestPipeDescriptorGrantsOnlyTheCurrentUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	wantSID, err := currentSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerSID, err := pipeOwnerSID(conn)
+	if err != nil || ownerSID != wantSID {
+		t.Fatalf("pipe owner = %q, want %q: %v", ownerSID, wantSID, err)
+	}
 	f := conn.(interface{ Fd() uintptr })
 	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
@@ -144,6 +154,103 @@ func TestDialRefusesAPipeWhenTheExpectedSIDChanges(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "different user") {
 		t.Fatalf("Dial accepted mismatched pipe: %v", err)
+	}
+}
+
+func TestDialRefusesAPipeWhenOnlyTheOwnerSIDChanges(t *testing.T) {
+	cfg := Config{StateDir: t.TempDir(), Name: "owner-check"}
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	listener, err := lock.Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	done := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			defer conn.Close()
+			<-done
+		}
+	}()
+	defer close(done)
+	readOwner := pipeReadOwnerSID
+	pipeReadOwnerSID = func(net.Conn) (string, error) { return "S-1-5-18", nil }
+	defer func() { pipeReadOwnerSID = readOwner }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, cfg)
+	if conn != nil {
+		conn.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "pipe owner belongs to a different user") {
+		t.Fatalf("Dial accepted mismatched pipe owner: %v", err)
+	}
+}
+
+func TestALiveWindowsHolderReturnsWithoutStaleRetry(t *testing.T) {
+	cfg := Config{StateDir: t.TempDir(), Name: "helper"}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
+	cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", "ADANEXT_IPC_STATE="+cfg.StateDir)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	ready := make([]byte, 6)
+	if _, err := io.ReadFull(stdout, ready); err != nil || string(ready) != "ready\n" {
+		t.Fatalf("helper ready: %q %v", ready, err)
+	}
+	start := time.Now()
+	lock, err := Acquire(cfg)
+	elapsed := time.Since(start)
+	if lock != nil {
+		lock.Release()
+	}
+	var running *AlreadyRunningError
+	if !errors.As(err, &running) || running.PID != cmd.Process.Pid {
+		t.Fatalf("Acquire = %v, want live holder PID %d", err, cmd.Process.Pid)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("live holder took %v, want under 500ms", elapsed)
+	}
+}
+
+func TestWindowsRetryReportsTheHolderAfterTheRecordChanges(t *testing.T) {
+	cfg := Config{StateDir: t.TempDir(), Name: "helper"}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
+	cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", "ADANEXT_IPC_REPLACE_RECORD=1", "ADANEXT_IPC_STATE="+cfg.StateDir)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	ready := make([]byte, 6)
+	if _, err := io.ReadFull(stdout, ready); err != nil || string(ready) != "ready\n" {
+		t.Fatalf("helper ready: %q %v", ready, err)
+	}
+	lock, err := Acquire(cfg)
+	if lock != nil {
+		lock.Release()
+	}
+	var running *AlreadyRunningError
+	if !errors.As(err, &running) || running.PID != cmd.Process.Pid {
+		t.Fatalf("Acquire = %v, want current holder PID %d", err, cmd.Process.Pid)
 	}
 }
 

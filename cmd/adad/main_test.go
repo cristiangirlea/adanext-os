@@ -202,11 +202,39 @@ func TestSecondCoordinatorReportsPIDAndStaleLockRecovers(t *testing.T) {
 	if code != 0 || !strings.Contains(stderr.String(), fmt.Sprintf("already running as PID %d", first.Process.Pid)) {
 		t.Fatalf("second run: %d %q", code, stderr.String())
 	}
+	var holder struct {
+		Created string `json:"created"`
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "adad.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, &holder); err != nil || holder.Created == "" {
+		t.Fatalf("holder record = %q: %v", content, err)
+	}
+	if !strings.Contains(stderr.String(), "created "+holder.Created) {
+		t.Fatalf("second run omitted creation time %q: %q", holder.Created, stderr.String())
+	}
 	first.Process.Kill()
 	first.Wait()
 	second := startHelper(t, dir, name)
 	second.Process.Kill()
 	second.Wait()
+}
+
+func TestSecondCoordinatorReportsUnknownHolderForAnEmptyRecord(t *testing.T) {
+	dir := t.TempDir()
+	name := testEndpointName(t)
+	first := startHelper(t, dir, name)
+	defer func() { _ = first.Process.Kill(); _ = first.Wait() }()
+	if err := os.Truncate(filepath.Join(dir, "adad.lock"), 0); err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-state-dir", dir, "-name", name}, &out, &stderr)
+	if code != 0 || !strings.Contains(stderr.String(), "holder unknown") {
+		t.Fatalf("second run: %d %q", code, stderr.String())
+	}
 }
 
 func TestShutdownClosesOpenSSEStream(t *testing.T) {

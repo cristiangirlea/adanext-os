@@ -121,7 +121,25 @@ func TestHelperHoldsCoordinatorLock(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var originalRecord []byte
+	if os.Getenv("ADANEXT_IPC_REPLACE_RECORD") == "1" {
+		originalRecord, err = os.ReadFile(filepath.Join(cfg.StateDir, "adad.lock"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cfg.StateDir, "adad.lock"), []byte(`{"pid":99999999,"created":"0"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_, _ = os.Stdout.WriteString("ready\n")
+	if originalRecord != nil {
+		time.Sleep(100 * time.Millisecond)
+		if err := os.WriteFile(filepath.Join(cfg.StateDir, "adad.lock"), originalRecord, 0600); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2300 * time.Millisecond)
+		return
+	}
 	if os.Getenv("ADANEXT_IPC_STALE_RECORD") == "1" {
 		time.Sleep(300 * time.Millisecond)
 		return
