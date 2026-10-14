@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testStore(t *testing.T) *Store {
@@ -87,9 +88,11 @@ func TestAChangedBlobIsCorruptAndInvalidOrUnknownHashesAreRefused(t *testing.T) 
 		t.Fatalf("changed blob: %v", err)
 	}
 	for _, hash := range []string{"bad", strings.ToUpper(ref.Hash), "../" + ref.Hash} {
-		if r, err := s.Open(hash); err == nil {
-			r.Close()
-			t.Fatalf("accepted %q", hash)
+		if r, err := s.Open(hash); !errors.Is(err, ErrInvalidHash) {
+			if r != nil {
+				r.Close()
+			}
+			t.Fatalf("invalid hash %q: %v", hash, err)
 		}
 	}
 	unknown := strings.Repeat("0", 64)
@@ -101,9 +104,195 @@ func TestAChangedBlobIsCorruptAndInvalidOrUnknownHashesAreRefused(t *testing.T) 
 	}
 }
 
+func TestAChangedBlobWithTheRightSizeIsReplacedOnTheNextWrite(t *testing.T) {
+	s := testStore(t)
+	data := []byte("original")
+	ref, err := s.Write(context.Background(), bytes.NewReader(data), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.dir, ref.Hash[:2], ref.Hash)
+	if err := os.WriteFile(path, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Write(context.Background(), bytes.NewReader(data), 100)
+	if err != nil || got != ref {
+		t.Fatalf("repair: %+v %v", got, err)
+	}
+	repaired, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(repaired, data) {
+		t.Fatalf("repaired content: %q %v", repaired, err)
+	}
+}
+
+func TestAChangedBlobWithTheWrongSizeIsReplacedOnTheNextWrite(t *testing.T) {
+	s := testStore(t)
+	data := []byte("original")
+	ref, err := s.Write(context.Background(), bytes.NewReader(data), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.dir, ref.Hash[:2], ref.Hash)
+	if err := os.WriteFile(path, []byte("wrong size"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Write(context.Background(), bytes.NewReader(data), 100)
+	if err != nil || got != ref {
+		t.Fatalf("repair: %+v %v", got, err)
+	}
+	repaired, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(repaired, data) {
+		t.Fatalf("repaired content: %q %v", repaired, err)
+	}
+}
+
+func TestOpenRemovesOnlyStaleArtifactTemporaryFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	tmp := filepath.Join(dir, "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(tmp, "artifact-old")
+	fresh := filepath.Join(tmp, "artifact-fresh")
+	unrelated := filepath.Join(tmp, "other-old")
+	for _, path := range []string{old, fresh, unrelated} {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ago := time.Now().Add(-2 * time.Hour)
+	for _, path := range []string{old, unrelated} {
+		if err := os.Chtimes(path, ago, ago); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(old); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale temporary file: %v", err)
+	}
+	for _, path := range []string{fresh, unrelated} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("retained file %s: %v", path, err)
+		}
+	}
+}
+
+func TestOpenContinuesWhenAStaleTempCannotBeRemoved(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	tmp := filepath.Join(dir, "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(tmp, "artifact-stale")
+	otherStale := filepath.Join(tmp, "artifact-other-stale")
+	for _, path := range []string{stale, otherStale} {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ago := time.Now().Add(-2 * time.Hour)
+	for _, path := range []string{stale, otherStale} {
+		if err := os.Chtimes(path, ago, ago); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removeErr := errors.New("file held open")
+	called := false
+	_, err := openWithStaleTempRemover(dir, func(path string) error {
+		if path == otherStale {
+			return os.Remove(path)
+		}
+		if path != stale {
+			t.Fatalf("removed unexpected path %s", path)
+		}
+		called = true
+		return removeErr
+	})
+	if err != nil || !called {
+		t.Fatalf("open with failed sweep: %v, remove called: %v", err, called)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("stale file should remain: %v", err)
+	}
+	if _, err := os.Stat(otherStale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("other stale file should be removed: %v", err)
+	}
+}
+
+type renameRaceFS struct{ osFS }
+
+func (f renameRaceFS) rename(old, new string) error {
+	data, err := os.ReadFile(old)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(new, data, 0o600); err != nil {
+		return err
+	}
+	return os.ErrPermission
+}
+
+func TestARenameFailureReusesAConcurrentMatchingBlob(t *testing.T) {
+	s := testStore(t)
+	s.fs = renameRaceFS{}
+	data := []byte("same content")
+	ref, err := s.Write(context.Background(), bytes.NewReader(data), 100)
+	if err != nil || ref.Size != int64(len(data)) {
+		t.Fatalf("concurrent reuse: %+v %v", ref, err)
+	}
+	if countFiles(t, filepath.Join(s.dir, "tmp")) != 0 {
+		t.Fatal("temporary file remains")
+	}
+}
+
+type corruptRenameRaceFS struct {
+	osFS
+	fault error
+}
+
+func (f corruptRenameRaceFS) rename(_, new string) error {
+	if err := os.WriteFile(new, []byte("invalid"), 0o600); err != nil {
+		return err
+	}
+	return f.fault
+}
+
+func TestARenameFailureReturnsErrorWhenDestinationDoesNotMatch(t *testing.T) {
+	s := testStore(t)
+	fault := errors.New("rename refused")
+	s.fs = corruptRenameRaceFS{fault: fault}
+	data := []byte("content")
+	_, err := s.Write(context.Background(), bytes.NewReader(data), 100)
+	if !errors.Is(err, fault) {
+		t.Fatalf("rename error was masked: %v", err)
+	}
+	digest := sha256.Sum256(data)
+	hash := hex.EncodeToString(digest[:])
+	got, err := os.ReadFile(filepath.Join(s.dir, hash[:2], hash))
+	if err != nil || string(got) != "invalid" {
+		t.Fatalf("bad destination was changed: %q %v", got, err)
+	}
+	if countFiles(t, filepath.Join(s.dir, "tmp")) != 0 {
+		t.Fatal("temporary file remains")
+	}
+}
+
+type renameCountFS struct {
+	osFS
+	renames int
+}
+
+func (f *renameCountFS) rename(old, new string) error {
+	f.renames++
+	return f.osFS.rename(old, new)
+}
+
 type failingFS struct {
 	osFS
-	fail string
+	fail  string
+	fault error
 }
 
 type failingFile struct {
@@ -121,6 +310,9 @@ func (f failingFS) createTemp(dir, pattern string) (file, error) {
 
 func (f failingFS) rename(old, new string) error {
 	if f.fail == "rename" {
+		if f.fault != nil {
+			return f.fault
+		}
 		return injectedDiskFull()
 	}
 	return f.osFS.rename(old, new)
@@ -172,6 +364,8 @@ func TestDiskFullOnWriteSyncCloseOrRenameLeavesNoBlob(t *testing.T) {
 
 func TestAnUnreferencedBlobIsReusedAfterAWriteOnlyCrash(t *testing.T) {
 	s := testStore(t)
+	fs := &renameCountFS{}
+	s.fs = fs
 	data := []byte("orphaned until referenced")
 	digest := sha256.Sum256(data)
 	first := Ref{Hash: hex.EncodeToString(digest[:]), Size: int64(len(data))}
@@ -191,6 +385,9 @@ func TestAnUnreferencedBlobIsReusedAfterAWriteOnlyCrash(t *testing.T) {
 	}
 	if countFiles(t, filepath.Join(s.dir, "tmp")) != 1 {
 		t.Fatal("write left an additional temporary file")
+	}
+	if fs.renames != 0 {
+		t.Fatalf("reuse renamed the blob %d times", fs.renames)
 	}
 }
 
@@ -266,27 +463,20 @@ func TestReaderWithoutProgressLeavesNoTemporaryFile(t *testing.T) {
 }
 
 func TestExistingNonBlobDestinationIsCorrupt(t *testing.T) {
-	for _, directory := range []bool{false, true} {
-		s := testStore(t)
-		data := []byte("content")
-		digest := sha256.Sum256(data)
-		hash := hex.EncodeToString(digest[:])
-		fanout := filepath.Join(s.dir, hash[:2])
-		if err := os.Mkdir(fanout, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		path := filepath.Join(fanout, hash)
-		if directory {
-			if err := os.Mkdir(path, 0o700); err != nil {
-				t.Fatal(err)
-			}
-		} else if err := os.WriteFile(path, []byte("wrong size"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		_, err := s.Write(context.Background(), bytes.NewReader(data), 100)
-		if !errors.Is(err, ErrCorrupt) || countFiles(t, filepath.Join(s.dir, "tmp")) != 0 {
-			t.Fatalf("directory=%v: %v", directory, err)
-		}
+	s := testStore(t)
+	data := []byte("content")
+	digest := sha256.Sum256(data)
+	hash := hex.EncodeToString(digest[:])
+	fanout := filepath.Join(s.dir, hash[:2])
+	if err := os.Mkdir(fanout, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(fanout, hash), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Write(context.Background(), bytes.NewReader(data), 100)
+	if !errors.Is(err, ErrCorrupt) || countFiles(t, filepath.Join(s.dir, "tmp")) != 0 {
+		t.Fatalf("directory destination: %v", err)
 	}
 }
 

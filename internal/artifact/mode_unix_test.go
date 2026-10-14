@@ -4,6 +4,7 @@ package artifact
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,5 +50,74 @@ func TestSymlinkedTemporaryDirectoryIsRefused(t *testing.T) {
 	}
 	if _, err := Open(dir); err == nil {
 		t.Fatal("accepted symlinked tmp directory")
+	}
+}
+
+func TestASymlinkBlobIsRefusedByOpenAndReuse(t *testing.T) {
+	s := testStore(t)
+	data := []byte("private")
+	ref, err := s.Write(context.Background(), strings.NewReader(string(data)), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.dir, ref.Hash[:2], ref.Hash)
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if reader, err := s.Open(ref.Hash); !errors.Is(err, ErrCorrupt) {
+		if reader != nil {
+			reader.Close()
+		}
+		t.Fatalf("open symlink: %v", err)
+	}
+	if _, err := s.Write(context.Background(), strings.NewReader(string(data)), 100); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("reuse symlink: %v", err)
+	}
+	if countFiles(t, filepath.Join(s.dir, "tmp")) != 0 {
+		t.Fatal("temporary file remains")
+	}
+}
+
+func TestOpenTightensExistingOwnedDirectories(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	tmp := filepath.Join(dir, "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, tmp} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, tmp} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("directory %s: %v %v", path, info, err)
+		}
+	}
+}
+
+func TestAnotherUsersDirectoryIsRefusedWithoutChmod(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	otherUID := uint32(os.Geteuid()) + 1
+	if err := makePrivateDirectoryForUID(dir, otherUID); err == nil {
+		t.Fatal("accepted another user's directory")
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("another user's directory was chmodded: %v %v", info, err)
 	}
 }
