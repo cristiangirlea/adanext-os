@@ -4,6 +4,10 @@ package store
 
 import "os"
 
+func publishBackupNoReplace(tmpPath, destPath string) error {
+	return os.Link(tmpPath, destPath)
+}
+
 func syncBackupDirectory(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {

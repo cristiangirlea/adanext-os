@@ -172,7 +172,10 @@ func retryBusy(ctx context.Context, timeout time.Duration, busy func(error) bool
 		}
 		err := fn(ctx)
 		if !busy(err) {
-			return err
+			if err != nil {
+				return stopped(err)
+			}
+			return nil
 		}
 		cause = err
 		timer := time.NewTimer(10 * time.Millisecond)
@@ -397,35 +400,37 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 	return response, nil
 }
 
-// Backup uses SQLite's live, consistent snapshot and syncs the destination file
-// and its directory on Unix. destPath must be an absolute filesystem path, not
-// a file: URI, and must not already exist.
+// Backup uses SQLite's live, consistent snapshot, syncs it, and publishes it
+// without replacing a destination. destPath must be an absolute filesystem path,
+// not a file: URI, and must not already exist.
 func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	if strings.HasPrefix(strings.ToLower(destPath), "file:") || !filepath.IsAbs(destPath) {
 		return errors.New("backup destination must be an absolute filesystem path, not a file: URI")
 	}
-	file, err := os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
+	if _, err := os.Lstat(destPath); err == nil {
+		return fmt.Errorf("backup destination exists: %w", os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check backup destination: %w", err)
 	}
-	cleanup := true
+	file, err := os.CreateTemp(filepath.Dir(destPath), ".adanext-backup-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create backup temporary file: %w", err)
+	}
+	tmpPath := file.Name()
 	defer func() {
-		if cleanup && err != nil {
-			if removeErr := os.Remove(destPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				err = errors.Join(err, fmt.Errorf("remove failed backup: %w", removeErr))
-			}
+		if removeErr := os.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove backup temporary file: %w", removeErr))
 		}
 	}()
 	if err := file.Close(); err != nil {
-		return err
+		return fmt.Errorf("close backup temporary file: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", destPath); err != nil {
-		return err
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmpPath); err != nil {
+		return fmt.Errorf("vacuum backup: %w", err)
 	}
-	cleanup = false // finishBackup removes this call's destination on sync failure.
-	return finishBackup(destPath, func(path string) (backupFile, error) {
+	return finishBackup(tmpPath, destPath, func(path string) (backupFile, error) {
 		return os.OpenFile(path, os.O_RDWR, 0)
-	}, syncBackupDirectory)
+	}, publishBackupNoReplace, syncBackupDirectory)
 }
 
 type backupFile interface {
@@ -434,15 +439,13 @@ type backupFile interface {
 }
 
 // finishBackup permits filesystem faults to be tested without filling a disk.
-func finishBackup(destPath string, open func(string) (backupFile, error), syncDir func(string) error) (err error) {
+func finishBackup(tmpPath, destPath string, open func(string) (backupFile, error), publish func(string, string) error, syncDir func(string) error) (err error) {
 	defer func() {
-		if err != nil {
-			if removeErr := os.Remove(destPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				err = errors.Join(err, fmt.Errorf("remove failed backup: %w", removeErr))
-			}
+		if removeErr := os.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove backup temporary file: %w", removeErr))
 		}
 	}()
-	file, err := open(destPath)
+	file, err := open(tmpPath)
 	if err != nil {
 		return fmt.Errorf("open backup for sync: %w", err)
 	}
@@ -453,6 +456,15 @@ func finishBackup(destPath string, open func(string) (backupFile, error), syncDi
 	}
 	if closeErr != nil {
 		return closeErr
+	}
+	if err := publish(tmpPath, destPath); err != nil {
+		if _, statErr := os.Lstat(destPath); statErr == nil {
+			return fmt.Errorf("backup destination exists: %w", os.ErrExist)
+		}
+		return fmt.Errorf("publish backup: %w", err)
+	}
+	if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove backup temporary file after publish: %w", err)
 	}
 	if err := syncDir(filepath.Dir(destPath)); err != nil {
 		return fmt.Errorf("sync backup directory: %w", err)

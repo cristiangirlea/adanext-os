@@ -215,6 +215,25 @@ func TestBusyRetryRetriesOnlyBusyAndStopsAtItsDeadline(t *testing.T) {
 	}
 }
 
+func TestBusyRetryPreservesBusyCauseWhenDriverReturnsCancellation(t *testing.T) {
+	busy := busyError{}
+	calls := 0
+	err := retryBusy(ctx, time.Second, func(err error) bool {
+		var target busyError
+		return errors.As(err, &target)
+	}, func(context.Context) error {
+		calls++
+		if calls == 1 {
+			return busy
+		}
+		return context.Canceled
+	})
+	var busyCause busyError
+	if calls != 2 || !errors.Is(err, context.Canceled) || !errors.Is(err, busy) || !errors.As(err, &busyCause) {
+		t.Fatalf("retry: calls=%d error=%v", calls, err)
+	}
+}
+
 func TestOpenAndEventsHonorCanceledContexts(t *testing.T) {
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
@@ -329,6 +348,7 @@ func TestBackupUnderConcurrentWritesRestoresAConsistentCommitPrefix(t *testing.T
 	if err := s.Backup(backupCtx, dest); err != nil {
 		t.Fatal(err)
 	}
+	assertNoBackupTemps(t, filepath.Dir(dest))
 	cancel()
 	writerErr := <-done
 	done = nil
