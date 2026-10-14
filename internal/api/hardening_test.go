@@ -26,6 +26,15 @@ func attemptForLimits(t *testing.T, f *fixture) {
 	}
 }
 
+func assertHubReleased(t *testing.T, hub *Hub, user string) {
+	t.Helper()
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if hub.budgetUsed != 0 || hub.streamTotal != 0 || hub.streamUsers[user] != 0 {
+		t.Fatalf("resources remain: bytes=%d streams=%d user=%d", hub.budgetUsed, hub.streamTotal, hub.streamUsers[user])
+	}
+}
+
 func TestEventsRejectMalformedAndAheadCursorsInBothForms(t *testing.T) {
 	f := newFixture(t)
 	attemptForLimits(t, f)
@@ -53,6 +62,7 @@ func TestEventsRejectMalformedAndAheadCursorsInBothForms(t *testing.T) {
 	if resp.StatusCode != 200 || !bytes.HasPrefix(stream, []byte("retry: 2000\n\n")) || bytes.Count(stream, []byte("event: cursor_ahead\n")) != 1 || !bytes.Contains(stream, []byte(`"last_sequence":0`)) || bytes.Contains(stream, []byte("id:")) {
 		t.Fatalf("stream: %d %s", resp.StatusCode, stream)
 	}
+	assertHubReleased(t, f.hub, "alice")
 }
 
 func TestSeveralLastEventIDsAreRejected(t *testing.T) {
@@ -234,6 +244,7 @@ func TestRemovedMemberStreamEnds(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("removed member stream remained open")
 	}
+	assertHubReleased(t, f.hub, "alice")
 }
 
 func TestEncodedPageStopsBeforeOneMiBIncludingFraming(t *testing.T) {
@@ -276,37 +287,56 @@ func TestEncodedPageStopsBeforeOneMiBIncludingFraming(t *testing.T) {
 }
 
 func TestBudgetReservationPrecedesStoreRead(t *testing.T) {
-	f := newFixture(t)
-	attemptForLimits(t, f)
-	f.hub.BudgetBytes = pageBytes
-	if !f.hub.reserveBytes(context.Background(), pageBytes) {
-		t.Fatal("initial reservation")
-	}
-	started := make(chan struct{})
-	h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
-	h.readPage = func(ctx context.Context, user, attempt string, after int64, limit, max int, size func(store.Event) int) ([]store.Event, error) {
-		close(started)
-		return f.s.EventsPage(ctx, user, attempt, after, limit, max, size)
-	}
-	req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil)
-	req.SetPathValue("id", "limits-attempt")
-	done := make(chan struct{})
-	go func() { h.events(httptest.NewRecorder(), req); close(done) }()
-	select {
-	case <-started:
-		t.Fatal("store read began without reservation")
-	case <-time.After(50 * time.Millisecond):
-	}
-	f.hub.releaseBytes(pageBytes)
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("store read did not start")
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("reader did not finish")
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint("stream=", stream), func(t *testing.T) {
+			f := newFixture(t)
+			attemptForLimits(t, f)
+			f.hub.BudgetBytes = pageBytes
+			if !f.hub.reserveBytes(context.Background(), pageBytes) {
+				t.Fatal("initial reservation")
+			}
+			defer f.hub.releaseBytes(pageBytes)
+			lastRead := make(chan struct{}, 1)
+			pageRead := make(chan struct{}, 1)
+			h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
+			h.readLast = func(ctx context.Context, user, attempt string) (int64, error) {
+				lastRead <- struct{}{}
+				return f.s.LastEventSequence(ctx, user, attempt)
+			}
+			h.readPage = func(ctx context.Context, user, attempt string, after int64, limit, max int, size func(store.Event) int) ([]store.Event, error) {
+				pageRead <- struct{}{}
+				return f.s.EventsPage(ctx, user, attempt, after, limit, max, size)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil).WithContext(ctx)
+			req.SetPathValue("id", "limits-attempt")
+			if stream {
+				req.Header.Set("Accept", "text/event-stream")
+			}
+			done := make(chan struct{})
+			go func() { h.events(httptest.NewRecorder(), req); close(done) }()
+			select {
+			case <-lastRead:
+				t.Fatal("last sequence read began without reservation")
+			case <-pageRead:
+				t.Fatal("page read began without reservation")
+			case <-time.After(50 * time.Millisecond):
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("reader did not stop")
+			}
+			select {
+			case <-lastRead:
+				t.Fatal("last sequence read after canceled reservation")
+			case <-pageRead:
+				t.Fatal("page read after canceled reservation")
+			default:
+			}
+		})
 	}
 }
 
@@ -323,7 +353,9 @@ func TestSlowStreamReleasesItsSubscriberAndBudgetWithinDeadline(t *testing.T) {
 	}
 	var responses []*http.Response
 	for i := 0; i < 3; i++ {
-		req, _ := http.NewRequest("GET", "http://ipc/v1/attempts/limits-attempt/events", nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, "GET", "http://ipc/v1/attempts/limits-attempt/events", nil)
 		req.Header.Set("Accept", "text/event-stream")
 		resp, err := f.client.Do(req)
 		if err != nil {
@@ -345,11 +377,158 @@ func TestSlowStreamReleasesItsSubscriberAndBudgetWithinDeadline(t *testing.T) {
 			t.Fatalf("budget exceeded: %d", used)
 		}
 		if f.hub.SubscriberCount() == 0 {
+			assertHubReleased(t, f.hub, "alice")
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("subscribers remained: %d", f.hub.SubscriberCount())
+}
+
+func TestClientDisconnectReleasesStream(t *testing.T) {
+	f := newFixture(t)
+	attemptForLimits(t, f)
+	req, _ := http.NewRequest("GET", "http://ipc/v1/attempts/limits-attempt/events", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatal(resp.StatusCode)
+	}
+	resp.Body.Close()
+	deadline := time.Now().Add(time.Second)
+	for f.hub.SubscriberCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := f.hub.SubscriberCount(); got != 0 {
+		t.Fatalf("subscribers remain: %d", got)
+	}
+	assertHubReleased(t, f.hub, "alice")
+}
+
+func TestHubCloseReleasesStream(t *testing.T) {
+	f := newFixture(t)
+	attemptForLimits(t, f)
+	req, _ := http.NewRequest("GET", "http://ipc/v1/attempts/limits-attempt/events", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatal(resp.StatusCode)
+	}
+	f.hub.Close()
+	done := make(chan struct{})
+	go func() { io.Copy(io.Discard, resp.Body); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stream remained open after hub close")
+	}
+	if got := f.hub.SubscriberCount(); got != 0 {
+		t.Fatalf("subscribers remain: %d", got)
+	}
+	assertHubReleased(t, f.hub, "alice")
+}
+
+type streamRecorder struct{ *httptest.ResponseRecorder }
+
+func (*streamRecorder) SetWriteDeadline(time.Time) error { return nil }
+
+func TestPanicInEventPageReleasesReservation(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint("stream=", stream), func(t *testing.T) {
+			f := newFixture(t)
+			attemptForLimits(t, f)
+			h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
+			h.readPage = func(context.Context, string, string, int64, int, int, func(store.Event) int) ([]store.Event, error) {
+				panic("injected page read")
+			}
+			req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil)
+			req.SetPathValue("id", "limits-attempt")
+			if stream {
+				req.Header.Set("Accept", "text/event-stream")
+			}
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Error("page read did not panic")
+					}
+				}()
+				h.events(&streamRecorder{httptest.NewRecorder()}, req)
+			}()
+			assertHubReleased(t, f.hub, "alice")
+		})
+	}
+}
+
+func TestClosingHubDuringJSONReservationReturnsShuttingDown(t *testing.T) {
+	f := newFixture(t)
+	attemptForLimits(t, f)
+	f.hub.BudgetBytes = pageBytes
+	if !f.hub.reserveBytes(context.Background(), pageBytes) {
+		t.Fatal("initial reservation")
+	}
+	defer f.hub.releaseBytes(pageBytes)
+	h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
+	req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil)
+	req.SetPathValue("id", "limits-attempt")
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { h.events(w, req); close(done) }()
+	time.Sleep(20 * time.Millisecond)
+	f.hub.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("JSON reader did not stop")
+	}
+	if w.Code != 503 || !bytes.Contains(w.Body.Bytes(), []byte(`"error":"shutting_down"`)) {
+		t.Fatalf("shutdown response: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestIdleStreamPageHasNoLargeBuffer(t *testing.T) {
+	f := newFixture(t)
+	attemptForLimits(t, f)
+	h := &handler{store: f.s}
+	events, page, err := h.page(context.Background(), "alice", "limits-attempt", 0, true)
+	if err != nil || len(events) != 0 || cap(page) != 0 {
+		t.Fatalf("idle page: events=%d bytes=%d capacity=%d err=%v", len(events), len(page), cap(page), err)
+	}
+}
+
+func TestIfMatchSpellingsReplayOneTransition(t *testing.T) {
+	f := newFixture(t)
+	id := create(t, f, "revision-spellings-create", "work")["id"].(string)
+	_, err := f.s.Do(context.Background(), "alice", "revision-spellings-setup", "setup", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(context.Background(), "UPDATE tasks SET revision=5 WHERE id=?", id)
+		return []byte("ok"), err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/tasks/" + id + "/ready"
+	var first []byte
+	for _, match := range []string{"5", `"5"`, "005"} {
+		code, body := f.request(t, "POST", path, "revision-spellings", match, nil)
+		if code != 200 {
+			t.Fatalf("If-Match %q: %d %s", match, code, body)
+		}
+		if first == nil {
+			first = body
+		} else if !bytes.Equal(first, body) {
+			t.Fatalf("If-Match %q changed reply: %s / %s", match, first, body)
+		}
+	}
+	task, err := f.s.Task(context.Background(), "alice", id)
+	if err != nil || task.State != store.Ready || task.Revision != 6 {
+		t.Fatalf("task = %+v: %v", task, err)
+	}
 }
 
 func TestEveryStreamBeginsWithTwoSecondRetry(t *testing.T) {

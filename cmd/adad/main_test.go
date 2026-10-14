@@ -137,19 +137,16 @@ func TestRelativeXDGStateHomeIsIgnored(t *testing.T) {
 	}
 }
 
-func TestEmptyLocalAppDataHasAnAbsoluteFallbackOrClearRefusal(t *testing.T) {
+func TestEmptyLocalAppDataRequiresExplicitStateDir(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows state directory")
 	}
 	t.Setenv("LOCALAPPDATA", "")
 	if dir := defaultStateDir(); dir != "" {
-		if !filepath.IsAbs(dir) {
-			t.Fatalf("relative fallback: %s", dir)
-		}
-		return
+		t.Fatalf("default state directory: %q", dir)
 	}
 	var output bytes.Buffer
-	if code := run(context.Background(), []string{"-state-dir", ""}, &output, &output); code != 2 || !strings.Contains(output.String(), "state directory unavailable") {
+	if code := run(context.Background(), nil, &output, &output); code != 2 || !strings.Contains(output.String(), "adad: LOCALAPPDATA is not set; pass -state-dir") {
 		t.Fatalf("%d %s", code, output.String())
 	}
 }
@@ -165,7 +162,7 @@ func TestDefaultStateDirectoryRejectsWorldWritableExistingDirectory(t *testing.T
 	defer os.Chmod(dir, 0700)
 	var output bytes.Buffer
 	code := run(context.Background(), []string{"-state-dir", dir, "-name", testEndpointName(t)}, &output, &output)
-	if code == 0 || !strings.Contains(output.String(), "state directory") {
+	if code == 0 || !strings.Contains(output.String(), "ipc: state directory") || !strings.Contains(output.String(), "must be a real directory owned by the user and not group- or other-writable") {
 		t.Fatalf("%d %s", code, output.String())
 	}
 }

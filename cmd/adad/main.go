@@ -33,9 +33,6 @@ func defaultStateDir() string {
 		if base := os.Getenv("LOCALAPPDATA"); base != "" {
 			return filepath.Join(base, "AdaNext")
 		}
-		if cache, err := os.UserCacheDir(); err == nil && cache != "" {
-			return filepath.Join(cache, "AdaNext")
-		}
 		return ""
 	}
 	if base := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(base) {
@@ -64,8 +61,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if *stateDir == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "adad: state directory unavailable; set LOCALAPPDATA or pass -state-dir, and check arguments")
+	if *stateDir == "" {
+		fmt.Fprintln(stderr, "adad: LOCALAPPDATA is not set; pass -state-dir")
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "adad: unexpected arguments")
 		return 2
 	}
 	if (*enginePath == "") != (*engineHash == "") || (*engineHash != "" && (len(*engineHash) != 64 || !isLowerHex(*engineHash))) {
@@ -78,10 +79,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if err := os.MkdirAll(*stateDir, 0700); err != nil {
 		fmt.Fprintln(stderr, "adad: create state directory:", err)
-		return 1
-	}
-	if err := validateStateDir(*stateDir); err != nil {
-		fmt.Fprintln(stderr, "adad: state directory:", err)
 		return 1
 	}
 	lock, err := ipc.Acquire(ipc.Config{StateDir: *stateDir, Name: *name})

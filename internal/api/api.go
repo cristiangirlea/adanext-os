@@ -30,6 +30,7 @@ type handler struct {
 	auth     Authenticator
 	exec     Execution
 	readPage func(context.Context, string, string, int64, int, int, func(store.Event) int) ([]store.Event, error)
+	readLast func(context.Context, string, string) (int64, error)
 }
 
 // AttemptRunner is the narrow API-to-executor notification boundary.
@@ -112,7 +113,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down"}[code]
 	if status == 500 {
 		writeInternalError(w, errors.New("unspecified internal error"))
 		return
@@ -197,9 +198,9 @@ func key(w http.ResponseWriter, r *http.Request) (string, bool) {
 	}
 	return k, true
 }
-func hash(r *http.Request, body []byte) string {
+func hash(r *http.Request, body []byte, revision string) string {
 	sum := sha256.New()
-	for _, part := range []string{r.Method, r.URL.Path, r.Header.Get("If-Match")} {
+	for _, part := range []string{r.Method, r.URL.Path, revision} {
 		sum.Write([]byte(part))
 		sum.Write([]byte{0})
 	}
@@ -240,9 +241,9 @@ type cachedResponse struct {
 	Body   json.RawMessage `json:"body"`
 }
 
-func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, fn func(*store.Tx) (int, any, error)) bool {
+func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, revision string, fn func(*store.Tx) (int, any, error)) bool {
 	body := r.Context().Value(bodyKey{}).([]byte)
-	cached, err := h.store.Do(r.Context(), user, k, hash(r, body), scope, func(tx *store.Tx) ([]byte, error) {
+	cached, err := h.store.Do(r.Context(), user, k, hash(r, body, revision), scope, func(tx *store.Tx) ([]byte, error) {
 		status, value, err := fn(tx)
 		if err != nil {
 			return nil, err
@@ -293,7 +294,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
-	h.mutate(w, r, user, k, &store.Scope{ProjectID: input.Project}, func(tx *store.Tx) (int, any, error) {
+	h.mutate(w, r, user, k, &store.Scope{ProjectID: input.Project}, "", func(tx *store.Tx) (int, any, error) {
 		id, err := newID()
 		if err != nil {
 			return 0, nil, err
@@ -377,7 +378,7 @@ func (h *handler) transition(from, to store.State, after ...func(string)) http.H
 			return
 		}
 		r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
-		ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, func(tx *store.Tx) (int, any, error) {
+		ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
 			var current store.State
 			var currentRevision int64
 			if err := tx.QueryRowContext(r.Context(), "SELECT state,revision FROM tasks WHERE id=?", id).Scan(&current, &currentRevision); err != nil {
@@ -448,7 +449,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
 	var attemptID string
-	ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, func(tx *store.Tx) (int, any, error) {
+	ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
 		if h.exec.EngineSHA256 == "" || h.exec.Runner == nil {
 			return 0, nil, errEngineUnavailable
 		}
@@ -541,7 +542,10 @@ func (h *handler) page(ctx context.Context, user, id string, after int64, stream
 	if err != nil {
 		return nil, nil, err
 	}
-	page := make([]byte, 0, pageBytes)
+	var page []byte
+	if len(events) != 0 {
+		page = make([]byte, 0, pageBytes)
+	}
 	if !stream {
 		page = append(page, '[')
 	}
@@ -567,10 +571,6 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if _, err := h.store.AttemptProject(r.Context(), user, id); err != nil {
-		storeError(w, err)
-		return
-	}
 	cursor := r.URL.Query().Get("after")
 	if values := r.Header.Values("Last-Event-Id"); len(values) > 1 {
 		writeError(w, 400, "bad_request")
@@ -602,7 +602,23 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		}
 		defer release()
 	}
-	last, err := h.store.LastEventSequence(r.Context(), user, id)
+	if !h.hub.reserveBytes(r.Context(), pageBytes) {
+		if !stream && r.Context().Err() == nil {
+			writeError(w, 503, "shutting_down")
+		}
+		return
+	}
+	held := pageBytes
+	defer func() {
+		if held != 0 {
+			h.hub.releaseBytes(held)
+		}
+	}()
+	readLast := h.readLast
+	if readLast == nil {
+		readLast = h.store.LastEventSequence
+	}
+	last, err := readLast(r.Context(), user, id)
 	if err != nil {
 		storeError(w, err)
 		return
@@ -629,17 +645,11 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !stream {
-		if !h.hub.reserveBytes(r.Context(), pageBytes) {
-			return
-		}
-		events, page, err := h.page(r.Context(), user, id, after, false)
-		_ = events
+		_, page, err := h.page(r.Context(), user, id, after, false)
 		if err != nil {
-			h.hub.releaseBytes(pageBytes)
 			storeError(w, err)
 			return
 		}
-		h.hub.releaseBytes(pageBytes - len(page))
 		w.Header().Set("Content-Type", "application/json")
 		rc := http.NewResponseController(w)
 		deadline := h.hub.WriteDeadline
@@ -649,10 +659,11 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		_ = rc.SetWriteDeadline(time.Now().Add(deadline))
 		w.WriteHeader(200)
 		_, _ = w.Write(page)
-		h.hub.releaseBytes(len(page))
 		_ = rc.SetWriteDeadline(time.Time{})
 		return
 	}
+	h.hub.releaseBytes(held)
+	held = 0
 	wake, unsubscribe := h.hub.subscribe(id)
 	defer unsubscribe()
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -694,34 +705,36 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 	defer pingTicker.Stop()
 	send := func() bool {
 		for {
-			reserveCtx, cancel := context.WithTimeout(r.Context(), deadline)
-			got := h.hub.reserveBytes(reserveCtx, pageBytes)
-			cancel()
-			if !got {
+			count, lastSeq, pageLen, ok := func() (int, int64, int, bool) {
+				reserveCtx, cancel := context.WithTimeout(r.Context(), deadline)
+				got := h.hub.reserveBytes(reserveCtx, pageBytes)
+				cancel()
+				if !got {
+					return 0, after, 0, false
+				}
+				defer h.hub.releaseBytes(pageBytes)
+				events, page, err := h.page(r.Context(), user, id, after, true)
+				if err != nil {
+					return 0, after, 0, false
+				}
+				count := len(events)
+				lastSeq := after
+				if count != 0 {
+					lastSeq = events[count-1].Seq
+				}
+				if len(page) != 0 && !write(page) {
+					return count, lastSeq, len(page), false
+				}
+				return count, lastSeq, len(page), true
+			}()
+			if !ok {
 				return false
 			}
-			events, page, err := h.page(r.Context(), user, id, after, true)
-			if err != nil {
-				h.hub.releaseBytes(pageBytes)
-				return false
-			}
-			count := len(events)
-			lastSeq := after
-			if count != 0 {
-				lastSeq = events[count-1].Seq
-			}
-			events = nil
-			h.hub.releaseBytes(pageBytes - len(page))
-			if len(page) != 0 && !write(page) {
-				h.hub.releaseBytes(len(page))
-				return false
-			}
-			h.hub.releaseBytes(len(page))
 			if count == 0 {
 				return true
 			}
 			after = lastSeq
-			if count < 256 && len(page) < pageBytes-eventBytes {
+			if count < 256 && pageLen < pageBytes-eventBytes {
 				return true
 			}
 		}
