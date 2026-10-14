@@ -110,6 +110,32 @@ func TestStartRecordsPolicyOnceAndRefusesUnknownFields(t *testing.T) {
 	}
 }
 
+func TestStartRejectsInvalidBackendModelAndEffort(t *testing.T) {
+	f := newFixture(t, Execution{EngineSHA256: strings.Repeat("a", 64), Runner: noopRunner{}})
+	id := create(t, f, "validation-create", "work")["id"].(string)
+	if code, _ := f.request(t, "POST", "/v1/tasks/"+id+"/ready", "validation-ready", "0", nil); code != 200 {
+		t.Fatal(code)
+	}
+	path := "/v1/tasks/" + id + "/start"
+	cases := []string{
+		`{"backend":"Codex","mode":"auto"}`,
+		`{"backend":"a b","mode":"auto"}`,
+		`{"backend":"` + strings.Repeat("a", 33) + `","mode":"auto"}`,
+		`{"backend":"codex","model":"` + strings.Repeat("m", 129) + `","mode":"auto"}`,
+		`{"backend":"codex","model":"m\n","mode":"auto"}`,
+		`{"backend":"codex","effort":"` + strings.Repeat("e", 129) + `","mode":"auto"}`,
+		`{"backend":"codex","effort":"é","mode":"auto"}`,
+	}
+	for _, body := range cases {
+		if code, response := f.request(t, "POST", path, body, "1", []byte(body)); code != 400 {
+			t.Fatalf("body %q = %d %s", body, code, response)
+		}
+	}
+	if code, response := f.request(t, "POST", path, "valid", "1", []byte(`{"backend":"a_0-","model":"`+strings.Repeat("m", 128)+`","effort":"","mode":"auto"}`)); code != 200 {
+		t.Fatalf("valid body = %d %s", code, response)
+	}
+}
+
 func TestStaleCoordinatorCannotCreateANewAttemptIntent(t *testing.T) {
 	f := newFixture(t, Execution{EngineSHA256: strings.Repeat("a", 64), Generation: 7, Runner: noopRunner{}})
 	id := create(t, f, "stale-create", "work")["id"].(string)

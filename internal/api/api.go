@@ -437,7 +437,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		Effort  string `json:"effort"`
 		Mode    string `json:"mode"`
 	}
-	if err := decode(body, &input); err != nil || input.Backend == "" || (input.Mode != "readonly" && input.Mode != "auto" && input.Mode != "yolo") {
+	if err := decode(body, &input); err != nil || !validBackend(input.Backend) || !printableASCII(input.Model) || !printableASCII(input.Effort) || (input.Mode != "readonly" && input.Mode != "auto" && input.Mode != "yolo") {
 		writeError(w, 400, "bad_request")
 		return
 	}
@@ -490,6 +490,35 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 	if ok && attemptID != "" && h.exec.Runner != nil {
 		h.exec.Runner.LaunchAttempt(attemptID)
 	}
+}
+
+func validBackend(value string) bool {
+	if len(value) == 0 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		c := value[i]
+		if c < 'a' || c > 'z' {
+			if c < '0' || c > '9' {
+				if c != '_' && c != '-' {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func printableASCII(value string) bool {
+	if len(value) > 128 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 type eventJSON struct {
