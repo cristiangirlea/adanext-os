@@ -88,7 +88,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		var running *ipc.AlreadyRunningError
 		if errors.As(err, &running) {
-			fmt.Fprintf(stderr, "adad already running as PID %d\n", running.PID)
+			fmt.Fprintln(stderr, "adad:", running)
 			return 0
 		}
 		fmt.Fprintln(stderr, "adad: acquire lock:", err)
