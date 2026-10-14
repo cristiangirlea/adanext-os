@@ -92,6 +92,10 @@ func (osFS) syncDir(path string) error                    { return syncDirectory
 // The coordinator must hold its singleton lock while calling Open, so cleanup
 // cannot remove a temporary file belonging to another active writer.
 func Open(dir string) (*Store, error) {
+	return openWithStaleTempRemover(dir, os.Remove)
+}
+
+func openWithStaleTempRemover(dir string, remove func(string) error) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("artifact directory is empty")
 	}
@@ -105,16 +109,14 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if err := removeStaleTemps(filepath.Join(absolute, "tmp")); err != nil {
-		return nil, err
-	}
+	removeStaleTemps(filepath.Join(absolute, "tmp"), remove)
 	return &Store{dir: absolute, fs: fs}, nil
 }
 
-func removeStaleTemps(dir string) error {
+func removeStaleTemps(dir string, remove func(string) error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return classify(err)
+		return
 	}
 	cutoff := time.Now().Add(-time.Hour)
 	for _, entry := range entries {
@@ -123,19 +125,13 @@ func removeStaleTemps(dir string) error {
 		}
 		path := filepath.Join(dir, entry.Name())
 		info, err := os.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
+		if err != nil {
 			continue
 		}
-		if err != nil {
-			return classify(err)
-		}
 		if info.Mode().IsRegular() && info.ModTime().Before(cutoff) {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return classify(err)
-			}
+			_ = remove(path)
 		}
 	}
-	return nil
 }
 
 func privateDirectory(fs filesystem, path string) error {
@@ -243,15 +239,17 @@ func (s *Store) Write(ctx context.Context, r io.Reader, limit int64) (ref Ref, e
 	}
 	dest := filepath.Join(fanout, ref.Hash)
 	if info, statErr := s.fs.lstat(dest); statErr == nil {
-		if !info.Mode().IsRegular() || info.Size() != ref.Size {
+		if !info.Mode().IsRegular() {
 			return Ref{}, fmt.Errorf("existing artifact %s: %w", ref.Hash, ErrCorrupt)
 		}
-		matches, err := s.blobMatches(dest, ref)
-		if err != nil {
-			return Ref{}, err
-		}
-		if matches {
-			return s.reuse(tmpPath, fanout, ref)
+		if info.Size() == ref.Size {
+			matches, err := s.blobMatches(dest, ref)
+			if err != nil {
+				return Ref{}, err
+			}
+			if matches {
+				return s.reuse(tmpPath, fanout, ref)
+			}
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return Ref{}, classify(statErr)

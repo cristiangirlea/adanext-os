@@ -24,6 +24,10 @@ func refuseSymlink(path string) error {
 }
 
 func makePrivateDirectory(path string) error {
+	return makePrivateDirectoryForUID(path, uint32(os.Geteuid()))
+}
+
+func makePrivateDirectoryForUID(path string, uid uint32) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -32,7 +36,7 @@ func makePrivateDirectory(path string) error {
 		return fmt.Errorf("artifact directory %s is not a directory", path)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || stat.Uid != uid {
 		return fmt.Errorf("artifact directory %s is not owned by the current user", path)
 	}
 	if info.Mode().Perm() != 0o700 {

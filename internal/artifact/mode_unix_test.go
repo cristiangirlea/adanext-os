@@ -107,6 +107,17 @@ func TestOpenTightensExistingOwnedDirectories(t *testing.T) {
 	}
 }
 
-func TestAnotherUsersDirectoryRequiresRootToConstruct(t *testing.T) {
-	t.Skip("creating a directory owned by another user requires root")
+func TestAnotherUsersDirectoryIsRefusedWithoutChmod(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	otherUID := uint32(os.Geteuid()) + 1
+	if err := makePrivateDirectoryForUID(dir, otherUID); err == nil {
+		t.Fatal("accepted another user's directory")
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("another user's directory was chmodded: %v %v", info, err)
+	}
 }
