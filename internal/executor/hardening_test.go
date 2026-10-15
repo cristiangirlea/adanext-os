@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -427,6 +428,46 @@ func TestStopEndsADescendantFeedingValidEventsFasterThanStoragePersistsThem(t *t
 		t.Fatalf("attempt = %+v: %v", a, err)
 	}
 	errorEventContains(t, s, "after the engine exited")
+}
+
+func TestStopAfterTheEngineExitsCutsOffTheBufferedEventBacklog(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "burst_before_exit")
+	e.cfg.CancelGrace = 200 * time.Millisecond
+	e.afterAppend = func() { time.Sleep(150 * time.Millisecond) }
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "running")
+	// The engine marks its exit once the whole burst is in the pipe; the
+	// reader's buffer then holds more events than StopBudget can persist.
+	deadline := time.Now().Add(20 * time.Second)
+	for !slices.Contains(markerLines(t, marker), "exiting") {
+		if time.Now().After(deadline) {
+			t.Fatal("engine did not exit behind its burst")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
+	defer cancel()
+	if err := e.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	a, err := s.AttemptByID(context.Background(), "attempt")
+	if err != nil || a.Ended == "" {
+		t.Fatalf("attempt = %+v: %v", a, err)
+	}
+	errorEventContains(t, s, "a cancel or stop arrived after the engine exited")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := 0
+	for _, event := range events {
+		if event.Kind == "text" {
+			persisted++
+		}
+	}
+	if persisted >= 111 {
+		t.Fatalf("all %d buffered events were persisted before the stop took effect", persisted)
+	}
 }
 
 func TestPartialLineAfterASuccessfulResultFailsTheAttempt(t *testing.T) {

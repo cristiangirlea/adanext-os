@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,27 @@ func TestWindowsSuspendedEngineCannotExitBeforeAssignment(t *testing.T) {
 	err = cmd.Wait()
 	if err == nil || cmd.ProcessState.ExitCode() != 23 {
 		t.Fatalf("exit = %v, state = %v", err, cmd.ProcessState)
+	}
+}
+
+func TestWindowsStartupRefusesAnEmptyThreadSnapshot(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+	cmd.Env = append(os.Environ(), "ADA_FAKE_ENGINE=exit_immediately")
+	s, err := newProcessSupervisor(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	s.threads = func(uint32) ([]uint32, error) { return nil, nil }
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	err = s.started(cmd)
+	// The engine stays suspended either way: end it before judging the error.
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	if err == nil || !strings.Contains(err.Error(), "none of 0 resumed") {
+		t.Fatalf("started = %v, want the empty snapshot refused", err)
 	}
 }
 

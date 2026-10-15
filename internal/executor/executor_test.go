@@ -260,6 +260,17 @@ func TestHelperFakeEngine(t *testing.T) {
 		fmt.Print(`{"v":1,"seq":6,"type":"result"`)
 		os.Exit(0)
 	}
+	if script == "burst_before_exit" {
+		// Well-formed events in one write, twice what a 4 KiB Windows pipe
+		// holds: the reader's buffer is full of them when the exit is seen.
+		var burst strings.Builder
+		for seq := 6; seq < 116; seq++ {
+			fmt.Fprintf(&burst, `{"v":1,"seq":%d,"type":"event","attempt_id":%q,"event":{"kind":"text"}}`+"\n", seq, input.AttemptID)
+		}
+		_, _ = io.WriteString(os.Stdout, burst.String())
+		mark("exiting")
+		os.Exit(0)
+	}
 	if script == "gap" {
 		line(7, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
 		os.Exit(0)

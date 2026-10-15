@@ -379,8 +379,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	// wait for either: a descendant feeding well-formed events faster than the
 	// store persists them never blocks a read, so once a cancel is in progress
 	// the next check closes stdout whatever arrives, and the kill timer no
-	// longer applies to an exited engine.
+	// longer applies to an exited engine. That close is also a cut-off for the
+	// lines the reader has already buffered: each would cost a store write,
+	// and enough of them would hold the stop past its budget.
 	var stdoutClosedBecause string
+	var stdoutCutOff bool
 	var checkAfterExit func()
 	checkAfterExit = func() {
 		timerMu.Lock()
@@ -398,6 +401,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		switch {
 		case canceling:
 			stdoutClosedBecause = "a cancel or stop arrived after the engine exited"
+			stdoutCutOff = true
 		case n > 1<<20:
 			stdoutClosedBecause = "a descendant wrote more than 1 MiB after the engine exited"
 		case blocked >= e.cfg.CancelGrace:
@@ -412,6 +416,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		timerMu.Lock()
 		defer timerMu.Unlock()
 		return stdoutClosedBecause
+	}
+	cutOff := func() bool {
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		return stdoutCutOff
 	}
 	go func() {
 		err := cmd.Wait()
@@ -648,6 +657,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	var fatalCause error
 	for {
 		m, line, err := next("", true)
+		if err == nil && cutOff() {
+			// A line still buffered after a cancel or Stop closed stdout
+			// behind the exited engine is cut off, not ingested.
+			err = os.ErrClosed
+		}
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 				startShutdown()
