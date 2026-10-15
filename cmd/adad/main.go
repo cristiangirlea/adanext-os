@@ -203,10 +203,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	server.RegisterOnShutdown(hub.Close)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
-	// A signal and the owner's stop request both end the serve loop the same
-	// way; the stop request has already recorded its reason on every attempt
-	// and asked the running ones to cancel, the signal path leaves that to
-	// the executor's orderly stop below.
+	// A signal and the owner's stop request take the same path: the stop request
+	// has already recorded its reason on every attempt and asked the running ones
+	// to cancel; either way the executor stops first and the HTTP server closes
+	// after it, so a vanished endpoint means work has stopped.
 	stopping := make(chan struct{})
 	go func() {
 		select {

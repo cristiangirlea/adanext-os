@@ -212,7 +212,7 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
 
 ### M2.4c candidate (2026-10-16, #75 with #69)
 
-Uncommitted working tree on `m2/window`, based on
+Commit `16c77bd` on `m2/window` (PR #76), based on
 `5e03a281ef5d747472bbaa15876c529ea54892cc`. No commit or push; M2 is not marked verified
 and the backlog is not ticked. The supervisor still owns the independent review, one commit,
 pull request and hosted CI checks. Local evidence:
@@ -275,7 +275,7 @@ an independent review, and the unresolved repeated Windows executor failures rem
 
 ### M2.4c review fix round (2026-10-16, #76)
 
-Uncommitted fixes over `16c77bd2e6e4970241dc532ad453dc461d48ddb0` on `m2/window`.
+Commit `58eaffa` over `16c77bd2e6e4970241dc532ad453dc461d48ddb0` on `m2/window` (PR #76).
 The supervisor owns the single commit, renewed independent review and hosted CI; the milestone
 and backlog remain unchanged. Executor source and tests are unchanged.
 
@@ -336,7 +336,7 @@ enumerating the checkout (`pattern ./...: open node_modules: no such file or dir
 the fresh stable-tree run above passed all gates. No check was skipped to obtain a pass.
 Not verified here: Linux Playwright, hosted Windows/Linux CI, packaged installation or a renewed
 independent review. The security read of these fixes has no open finding; it is not independent.
-No live model calls ran, and no commit, push, merge, tag or release was made.
+No live model calls ran, and no merge, tag or release was made.
 
 Windows executor comparison, both with `GOFLAGS=-p=4`, `go test -count=3 ./internal/executor/`:
 `origin/main` at `5e03a281ef5d747472bbaa15876c529ea54892cc` passed (180.092s) in

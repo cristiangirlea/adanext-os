@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
-import { coordinatorConfig, endpoint, findOrStart, parseSID, spawnCoordinator, waitForExit, type LifecycleIO } from "./adad";
+import { coordinatorConfig, endpoint, findOrStart, parseSID, spawnCoordinator, waitForExit, type LifecycleIO, QUIT_WAIT_MS } from "./adad";
 
 function io(answers: boolean[]): LifecycleIO {
   let clock = 0;
@@ -64,7 +64,7 @@ describe("coordinator lifecycle", () => {
     const stuck = io([]);
     stuck.probe = async () => true;
     await expect(waitForExit("/pipe", stuck)).rejects.toThrow("timed out waiting for adad to stop");
-    expect(stuck.now()).toBe(70_000);
+    expect(stuck.now()).toBe(QUIT_WAIT_MS);
   });
   it("uses the user state directory and passes through only configured engine flags", () => {
     const env = { LOCALAPPDATA: "C:\\Users\\owner\\AppData\\Local", ADANEXT_ADAD: "C:\\app\\adad.exe", ADANEXT_ENGINE: "C:\\app\\hrn.exe", ADANEXT_ENGINE_SHA256: "a".repeat(64) };

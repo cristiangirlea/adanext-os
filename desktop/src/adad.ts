@@ -329,7 +329,11 @@ export async function findOrStart(config: CoordinatorConfig, socketPath: string,
   throw new Error("timed out waiting for adad to start");
 }
 
-export async function waitForExit(socketPath: string, io: LifecycleIO = { ...lifecycleIO, probe: endpointPresent }, timeoutMs = 70_000): Promise<void> {
+// The coordinator's worst orderly stop: the executor's stop budget (5 grace periods of 10 s
+// plus 5 s), the hub's 10 s drain and the server's 5 s shutdown, with 15 s of margin.
+export const QUIT_WAIT_MS = 85_000;
+
+export async function waitForExit(socketPath: string, io: LifecycleIO = { ...lifecycleIO, probe: endpointPresent }, timeoutMs = QUIT_WAIT_MS): Promise<void> {
   const deadline = io.now() + timeoutMs;
   while (io.now() < deadline) {
     if (!await io.probe(socketPath, Math.min(500, deadline - io.now()))) return;
