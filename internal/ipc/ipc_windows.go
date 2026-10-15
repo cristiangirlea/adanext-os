@@ -21,6 +21,7 @@ func currentSID() (string, error) {
 
 var pipeCheckSID = currentSID
 var pipeReadOwnerSID = pipeOwnerSID
+var pipeSecurityInfo = windows.GetSecurityInfo
 
 func pipePath(cfg Config) (string, error) {
 	if err := cfg.validate(); err != nil {
@@ -92,7 +93,7 @@ func pipeOwnerSID(conn net.Conn) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("ipc: pipe connection has no Windows handle")
 	}
-	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	sd, err := pipeSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		return "", fmt.Errorf("ipc: get pipe owner: %w", err)
 	}

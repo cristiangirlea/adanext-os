@@ -402,7 +402,10 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 
 // Backup uses SQLite's live, consistent snapshot, syncs it, and publishes it
 // without replacing a destination. destPath must be an absolute filesystem path,
-// not a file: URI, and must not already exist.
+// not a file: URI, and must not already exist. An error wrapping
+// ErrPublishedWithWarning means the backup is complete at destPath although a
+// step after publishing it failed; a retry would report an existing
+// destination.
 func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	if strings.HasPrefix(strings.ToLower(destPath), "file:") || !filepath.IsAbs(destPath) {
 		return errors.New("backup destination must be an absolute filesystem path, not a file: URI")
@@ -412,7 +415,7 @@ func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("check backup destination: %w", err)
 	}
-	file, err := os.CreateTemp(filepath.Dir(destPath), ".adanext-backup-*.tmp")
+	file, err := os.CreateTemp(filepath.Dir(destPath), backupTempPattern)
 	if err != nil {
 		return fmt.Errorf("create backup temporary file: %w", err)
 	}
@@ -428,9 +431,7 @@ func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmpPath); err != nil {
 		return fmt.Errorf("vacuum backup: %w", err)
 	}
-	return finishBackup(tmpPath, destPath, func(path string) (backupFile, error) {
-		return os.OpenFile(path, os.O_RDWR, 0)
-	}, publishBackupNoReplace, syncBackupDirectory)
+	return finishBackup(tmpPath, destPath, osBackupFS())
 }
 
 type backupFile interface {
@@ -438,14 +439,38 @@ type backupFile interface {
 	Close() error
 }
 
-// finishBackup permits filesystem faults to be tested without filling a disk.
-func finishBackup(tmpPath, destPath string, open func(string) (backupFile, error), publish func(string, string) error, syncDir func(string) error) (err error) {
+// backupFS is the filesystem seam of finishBackup; tests inject faults through
+// it instead of filling a disk.
+type backupFS struct {
+	open    func(string) (backupFile, error)
+	publish func(tmpPath, destPath string) error
+	remove  func(string) error
+	syncDir func(string) error
+}
+
+func osBackupFS() backupFS {
+	return backupFS{
+		open:    func(path string) (backupFile, error) { return os.OpenFile(path, os.O_RDWR, 0) },
+		publish: publishBackupNoReplace,
+		remove:  os.Remove,
+		syncDir: syncBackupDirectory,
+	}
+}
+
+// finishBackup syncs the snapshot at tmpPath and publishes it at destPath
+// without replacing an existing file. Once published, a failure is reported
+// under ErrPublishedWithWarning: the backup is complete.
+func finishBackup(tmpPath, destPath string, fs backupFS) (err error) {
+	published := false
 	defer func() {
-		if removeErr := os.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		if published {
+			return
+		}
+		if removeErr := fs.remove(tmpPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			err = errors.Join(err, fmt.Errorf("remove backup temporary file: %w", removeErr))
 		}
 	}()
-	file, err := open(tmpPath)
+	file, err := fs.open(tmpPath)
 	if err != nil {
 		return fmt.Errorf("open backup for sync: %w", err)
 	}
@@ -457,17 +482,18 @@ func finishBackup(tmpPath, destPath string, open func(string) (backupFile, error
 	if closeErr != nil {
 		return closeErr
 	}
-	if err := publish(tmpPath, destPath); err != nil {
+	if err := fs.publish(tmpPath, destPath); err != nil {
 		if _, statErr := os.Lstat(destPath); statErr == nil {
 			return fmt.Errorf("backup destination exists: %w", os.ErrExist)
 		}
 		return fmt.Errorf("publish backup: %w", err)
 	}
-	if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove backup temporary file after publish: %w", err)
+	published = true
+	if err := fs.remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: remove backup temporary file after publish: %w", ErrPublishedWithWarning, err)
 	}
-	if err := syncDir(filepath.Dir(destPath)); err != nil {
-		return fmt.Errorf("sync backup directory: %w", err)
+	if err := fs.syncDir(filepath.Dir(destPath)); err != nil {
+		return fmt.Errorf("%w: sync backup directory: %w", ErrPublishedWithWarning, err)
 	}
 	return nil
 }
