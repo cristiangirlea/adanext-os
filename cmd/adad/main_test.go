@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cristiangirlea/ada-os/internal/artifact"
 	"github.com/cristiangirlea/ada-os/internal/ipc"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
@@ -706,5 +707,90 @@ func TestCoordinatorWithoutEngineFlagsRefusesStartWithoutIntent(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCoordinatorServesAReferencedArtifactToAMemberOnly(t *testing.T) {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	s, err := store.Open(ctx, filepath.Join(dir, "adanext.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	artifacts, err := artifact.Open(filepath.Join(dir, "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := []byte(`{"text":"` + strings.Repeat("y", 300<<10) + `"}`)
+	ref, err := artifacts.Write(ctx, bytes.NewReader(blob), int64(len(blob)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, user := range []string{"local", "other"} {
+		if err := s.CreateUser(ctx, user, user); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, project := range []struct{ id, owner string }{{"p", "local"}, {"q", "other"}} {
+		_, err = s.Do(ctx, project.owner, "project-"+project.id, "project", nil, func(tx *store.Tx) ([]byte, error) {
+			_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES(?,?,'/never-use','now')", project.id, project.id)
+			return []byte("ok"), err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.AddMember(ctx, project.id, project.owner, "owner"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateTask(ctx, project.owner, "task-"+project.id, project.id, "objective", "criteria"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateAttempt(ctx, store.Attempt{ID: "attempt-" + project.id, Task: "task-" + project.id, Actor: project.owner, Backend: "codex", Mode: "auto", Executor: "local", State: "ended_ok"}); err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.Do(ctx, project.owner, "reference-"+project.id, "reference", nil, func(tx *store.Tx) ([]byte, error) {
+			return []byte("ok"), tx.ReferenceArtifact(ctx, ref.Hash, ref.Size, "attempt:attempt-"+project.id+":event:1")
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	name := testEndpointName(t)
+	helper := startHelper(t, dir, name, os.Args[0], hex.EncodeToString(digest[:]))
+	defer func() {
+		helper.Process.Kill()
+		helper.Wait()
+	}()
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return ipc.Dial(ctx, ipc.Config{StateDir: dir, Name: name})
+	}}}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("http://ipc/v1/attempts/attempt-p/artifacts/" + ref.Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 || !bytes.Equal(body, blob) {
+		t.Fatalf("member: %d %.80s %v", resp.StatusCode, body, err)
+	}
+	resp, err = client.Get("http://ipc/v1/attempts/attempt-q/artifacts/" + ref.Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 404 || !bytes.Contains(body, []byte(`"error":"not_found"`)) {
+		t.Fatalf("non-member: %d %s", resp.StatusCode, body)
 	}
 }

@@ -138,7 +138,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation})
-		execution = api.Execution{EngineSHA256: *engineHash, Generation: generation, Runner: local}
+		execution = api.Execution{EngineSHA256: *engineHash, Generation: generation, Runner: local, Artifacts: artifacts, References: s}
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
 			defer cancel()
