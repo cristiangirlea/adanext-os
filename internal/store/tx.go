@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -68,6 +69,42 @@ func (tx *Tx) ReferenceArtifact(ctx context.Context, hash string, size int64, or
 		return fmt.Errorf("%w: artifact %s has size %d, requested %d", ErrArtifactConflict, hash, storedSize, size)
 	}
 	return nil
+}
+
+// ArtifactReference resolves hash to the size its record holds when a record of
+// attemptID references it, that is when the row's origin is the one the executor
+// writes, attempt:<id>:<record>. The table keeps the first origin of a hash, so
+// content two attempts share resolves only for the attempt that stored it first.
+// A hash the table would refuse is both invalid and not found.
+func (s *Store) ArtifactReference(ctx context.Context, attemptID, hash string) (int64, error) {
+	if !validArtifactHash(hash) {
+		return 0, fmt.Errorf("%w: %w: hash", ErrNotFound, ErrInvalidArtifact)
+	}
+	var size int64
+	var origin string
+	err := s.db.QueryRowContext(ctx, "SELECT size,origin FROM artifacts WHERE hash=?", hash).Scan(&size, &origin)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !strings.HasPrefix(origin, "attempt:"+attemptID+":")) {
+		return 0, fmt.Errorf("%w: artifact %s of attempt %s", ErrNotFound, hash, attemptID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return size, nil
+}
+
+// ArtifactReferenced reports whether any committed record references hash, so a
+// caller that wrote the blob and then failed to reference it knows whether the
+// content is still someone else's before removing it.
+func (s *Store) ArtifactReferenced(ctx context.Context, hash string) (bool, error) {
+	if !validArtifactHash(hash) {
+		return false, fmt.Errorf("%w: hash", ErrInvalidArtifact)
+	}
+	var one int
+	err := s.db.QueryRowContext(ctx, "SELECT 1 FROM artifacts WHERE hash=?", hash).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func validArtifactHash(hash string) bool {

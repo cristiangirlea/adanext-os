@@ -31,5 +31,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            ui/package-lock.json
+      # Typecheck, Vitest (workers capped) and a build of ui/ and desktop/ run inside check.sh,
+      # after the Go steps and the two lockfile installs.
       - name: everything scripts/check.sh runs
         run: bash scripts/check.sh

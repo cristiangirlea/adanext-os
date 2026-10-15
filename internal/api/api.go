@@ -762,6 +762,14 @@ func jsonEvent(e store.Event) []byte {
 	return b
 }
 
+// EventExceedsLimit reports whether the encoding of an event, as a JSON page
+// entry or as a stream frame, is over the size a page refuses to serve. The
+// executor stores the payload of such an event as an artifact instead
+// (ReferencedPayload); both sides use this one check so the two cannot drift.
+func EventExceedsLimit(e store.Event) bool {
+	return len(jsonEvent(e)) > eventBytes || len(streamEvent(e)) > eventBytes
+}
+
 func (h *handler) page(ctx context.Context, user, id string, after int64, stream bool) ([]store.Event, []byte, error) {
 	encode := jsonEvent
 	overhead := 1 // commas between JSON events
@@ -791,7 +799,7 @@ func (h *handler) page(ctx context.Context, user, id string, after int64, stream
 	}
 	for i, e := range events {
 		encoded[i] = encode(e)
-		if len(encoded[i]) > eventBytes {
+		if EventExceedsLimit(e) {
 			return nil, nil, errors.New("stored event exceeds encoded limit")
 		}
 		total += len(encoded[i])

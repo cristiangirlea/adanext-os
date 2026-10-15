@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cristiangirlea/ada-os/internal/api"
 	"github.com/cristiangirlea/ada-os/internal/artifact"
 	"github.com/cristiangirlea/ada-os/internal/engine"
 	"github.com/cristiangirlea/ada-os/internal/store"
@@ -25,6 +27,7 @@ import (
 
 type ArtifactWriter interface {
 	Write(context.Context, io.Reader, int64) (artifact.Ref, error)
+	Remove(hash string) error
 }
 type Notifier interface{ Notify(string) }
 
@@ -56,6 +59,23 @@ type Executor struct {
 	afterAppend    func()                          // Set only by tests to simulate slow event storage.
 	beforeClaim    func(attemptID string)          // Test seam before the launch claim, for the cancel race.
 	beforeCancel   func()                          // Test seam that pauses the cancel handling of a run.
+	beforeRemove   func(hash string)               // Test seam between discard's reference check and its removal.
+	// artifactMu serialises the lifecycle of every artifact a writer stores
+	// outside a transaction: from its Write, which may reuse content already
+	// on disk, through the commit that references it or the discard that
+	// removes it. Invariant: while a writer holds the lock, no other writer
+	// can reuse a blob it may still discard, so a committed reference never
+	// points at content a failed writer removed afterwards, and discard's
+	// reference check cannot be overtaken by a commit. The in-transaction form
+	// (appendBoundedEvent) writes under the same rule: a caller whose payload
+	// is fixed and small never reaches the artifact store and runs without the
+	// lock; a caller whose payload may exceed the event limit (failFinal, whose
+	// cause the engine or its exit status can enlarge) takes the lock before
+	// its transaction opens and releases it after the transaction returns,
+	// never inside it, since a writer holding the lock may be waiting on the
+	// database. Config.Concurrency defaults to one attempt, so the lock is
+	// rarely contended; it exists for correctness.
+	artifactMu sync.Mutex
 }
 
 func New(cfg Config) *Executor {
@@ -851,107 +871,179 @@ func (e *Executor) owned(id string, fn func(*store.Tx) error) error {
 }
 
 func (e *Executor) append(a store.Attempt, kind string, payload []byte, session string) error {
-	err := e.owned(a.ID, func(tx *store.Tx) error {
-		var seq int64
-		if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&seq); err != nil {
+	err := e.artifactLifecycle(func() error {
+		event, ref, err := e.boundEvent(store.Event{Attempt: a.ID, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Payload: payload})
+		if err != nil {
 			return err
 		}
-		if err := e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Payload: payload}); err != nil {
-			return err
-		}
-		if kind == "session" {
-			_, err := tx.ExecContext(context.Background(), "UPDATE attempts SET native_session=? WHERE id=?", session, a.ID)
-			return err
+		err = e.owned(a.ID, func(tx *store.Tx) error {
+			if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&event.Seq); err != nil {
+				return err
+			}
+			if err := e.appendBoundEvent(tx, event, ref); err != nil {
+				return err
+			}
+			if kind == "session" {
+				_, err := tx.ExecContext(context.Background(), "UPDATE attempts SET native_session=? WHERE id=?", session, a.ID)
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return e.discard(err, ref)
 		}
 		return nil
 	})
-	if err == nil && e.cfg.Hub != nil {
+	if err != nil {
+		return err
+	}
+	if e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)
 	}
-	if err == nil && e.afterAppend != nil {
+	if e.afterAppend != nil {
 		e.afterAppend()
 	}
-	return err
+	return nil
 }
 
-func (e *Executor) appendBoundedEvent(tx *store.Tx, event store.Event) error {
-	encodedPayload, err := json.Marshal(event.Payload)
-	if err != nil {
-		return err
+// artifactLifecycle runs fn under artifactMu: fn writes artifacts, runs the
+// transaction that references them and discards them when it fails.
+func (e *Executor) artifactLifecycle(fn func() error) error {
+	e.artifactMu.Lock()
+	defer e.artifactMu.Unlock()
+	return fn()
+}
+
+// boundEvent returns the event as it is stored: unchanged when its encoding fits
+// a page, else with its payload written as an artifact and replaced by the
+// referenced-payload marker. It runs before the transaction that appends the
+// event, where the sequence number is assigned, so the check uses the widest
+// one an event can carry: what fits with that fits with its own. The caller
+// passes the ref to appendBoundEvent, and to discard when the transaction fails.
+func (e *Executor) boundEvent(event store.Event) (store.Event, artifact.Ref, error) {
+	probe := event
+	probe.Seq = math.MaxInt64
+	if !api.EventExceedsLimit(probe) {
+		return event, artifact.Ref{}, nil
 	}
-	streamBytes := len(fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", event.Seq, event.Kind, encodedPayload))
-	jsonBytes, err := json.Marshal(struct {
-		Attempt string          `json:"attempt"`
-		Seq     int64           `json:"seq"`
-		Time    string          `json:"time"`
-		Kind    string          `json:"kind"`
-		Payload json.RawMessage `json:"payload"`
-	}{event.Attempt, event.Seq, event.Time, event.Kind, event.Payload})
-	if err != nil {
-		return err
+	if e.cfg.Artifacts == nil {
+		return event, artifact.Ref{}, errors.New("artifact store unavailable")
 	}
-	if streamBytes > 256<<10 || len(jsonBytes) > 256<<10 {
-		if e.cfg.Artifacts == nil {
-			return errors.New("artifact store unavailable")
-		}
-		raw := event.Payload
-		ref, err := e.cfg.Artifacts.Write(context.Background(), bytes.NewReader(raw), int64(len(raw)))
-		if err != nil {
-			return fmt.Errorf("event artifact: %w", err)
-		}
+	ref, err := e.cfg.Artifacts.Write(context.Background(), bytes.NewReader(event.Payload), int64(len(event.Payload)))
+	if err != nil {
+		return event, artifact.Ref{}, fmt.Errorf("event artifact: %w", err)
+	}
+	event.Payload = api.ReferencedPayload(ref.Hash, ref.Size)
+	return event, ref, nil
+}
+
+// appendBoundEvent appends an event boundEvent prepared, recording the
+// reference to its artifact, if any, in the same transaction.
+func (e *Executor) appendBoundEvent(tx *store.Tx, event store.Event, ref artifact.Ref) error {
+	if ref.Hash != "" {
 		if err := tx.ReferenceArtifact(context.Background(), ref.Hash, ref.Size, fmt.Sprintf("attempt:%s:event:%d", event.Attempt, event.Seq)); err != nil {
-			return err
-		}
-		event.Payload, err = json.Marshal(map[string]any{"payload_artifact": ref.Hash, "payload_size": len(raw)})
-		if err != nil {
 			return err
 		}
 	}
 	return tx.AppendOwnedEvent(context.Background(), event)
 }
 
+// appendBoundedEvent is the in-transaction form for the recovery and failure
+// paths, where the artifact is a safety net: a transaction that fails after it
+// cannot remove what was written. A caller with a fixed, small payload runs
+// without artifactMu; a caller whose payload can exceed the event limit holds
+// it around the whole transaction (see the lock's invariant).
+func (e *Executor) appendBoundedEvent(tx *store.Tx, event store.Event) error {
+	event, ref, err := e.boundEvent(event)
+	if err != nil {
+		return err
+	}
+	return e.appendBoundEvent(tx, event, ref)
+}
+
+// discard removes the artifacts written for a transaction that then failed,
+// unless a committed record references the same content, and returns the
+// failure with anything the removal added.
+func (e *Executor) discard(cause error, refs ...artifact.Ref) error {
+	for _, ref := range refs {
+		if ref.Hash == "" {
+			continue
+		}
+		referenced, err := e.cfg.Store.ArtifactReferenced(context.Background(), ref.Hash)
+		if err != nil {
+			cause = errors.Join(cause, fmt.Errorf("artifact %s: %w", ref.Hash, err))
+			continue
+		}
+		if referenced {
+			continue
+		}
+		if e.beforeRemove != nil {
+			e.beforeRemove(ref.Hash)
+		}
+		if err := e.cfg.Artifacts.Remove(ref.Hash); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cause = errors.Join(cause, fmt.Errorf("remove artifact %s: %w", ref.Hash, err))
+		}
+	}
+	return cause
+}
+
 func (e *Executor) result(a store.Attempt, m message, line []byte) error {
-	var ref artifact.Ref
+	if err := e.artifactLifecycle(func() error { return e.storeResult(a, m, line) }); err != nil {
+		return err
+	}
+	if e.cfg.Hub != nil {
+		e.cfg.Hub.Notify(a.ID)
+	}
+	return nil
+}
+
+// storeResult writes the result's artifacts and records the result event in
+// one transaction; the caller holds artifactMu.
+func (e *Executor) storeResult(a store.Attempt, m message, line []byte) error {
+	var final artifact.Ref
 	if len(m.Result.Final) > 64<<10 {
 		if e.cfg.Artifacts == nil {
 			return errors.New("artifact store unavailable")
 		}
 		var err error
-		ref, err = e.cfg.Artifacts.Write(context.Background(), strings.NewReader(m.Result.Final), int64(len(m.Result.Final)))
+		final, err = e.cfg.Artifacts.Write(context.Background(), strings.NewReader(m.Result.Final), int64(len(m.Result.Final)))
 		if err != nil {
 			return fmt.Errorf("final artifact: %w", err)
 		}
 		var payload map[string]any
 		if err := json.Unmarshal(line, &payload); err != nil {
-			return err
+			return e.discard(err, final)
 		}
 		result, ok := payload["result"].(map[string]any)
 		if !ok {
-			return errors.New("result object is missing")
+			return e.discard(errors.New("result object is missing"), final)
 		}
 		delete(result, "final")
-		result["final_artifact"], result["final_size"] = ref.Hash, ref.Size
+		result["final_artifact"], result["final_size"] = final.Hash, final.Size
 		line, err = json.Marshal(payload)
 		if err != nil {
-			return err
+			return e.discard(err, final)
 		}
 	}
-	err := e.owned(a.ID, func(tx *store.Tx) error {
-		if ref.Hash != "" {
-			if err := tx.ReferenceArtifact(context.Background(), ref.Hash, ref.Size, "attempt:"+a.ID+":final"); err != nil {
+	event, ref, err := e.boundEvent(store.Event{Attempt: a.ID, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "result", Payload: line})
+	if err != nil {
+		return e.discard(err, final)
+	}
+	err = e.owned(a.ID, func(tx *store.Tx) error {
+		if final.Hash != "" {
+			if err := tx.ReferenceArtifact(context.Background(), final.Hash, final.Size, "attempt:"+a.ID+":final"); err != nil {
 				return err
 			}
 		}
-		var seq int64
-		if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&seq); err != nil {
+		if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&event.Seq); err != nil {
 			return err
 		}
-		return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "result", Payload: line})
+		return e.appendBoundEvent(tx, event, ref)
 	})
-	if err == nil && e.cfg.Hub != nil {
-		e.cfg.Hub.Notify(a.ID)
+	if err != nil {
+		return e.discard(err, final, ref)
 	}
-	return err
+	return nil
 }
 
 func (e *Executor) requestCancel(a store.Attempt) error {
@@ -1042,7 +1134,7 @@ func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed
 		return
 	}
 	payload, _ := json.Marshal(map[string]any{"error": cause.Error()})
-	_ = e.owned(a.ID, func(tx *store.Tx) error {
+	record := func(tx *store.Tx) error {
 		var state store.State
 		var rev int64
 		if err := tx.QueryRowContext(context.Background(), "SELECT state,revision FROM tasks WHERE id=?", a.Task).Scan(&state, &rev); err != nil {
@@ -1097,7 +1189,12 @@ func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed
 			return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "executor_error", Payload: []byte(`{"error":"engine was killed after the grace period"}`)})
 		}
 		return nil
-	})
+	}
+	// The cause is not bounded, so the transaction that references its payload
+	// is an artifact lifecycle: a concurrent discard cannot remove content it
+	// reuses. The lock is taken before the transaction opens and released
+	// before the notification.
+	_ = e.artifactLifecycle(func() error { return e.owned(a.ID, record) })
 	if e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)
 	}

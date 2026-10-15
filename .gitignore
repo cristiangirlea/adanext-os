@@ -16,3 +16,5 @@ desktop/playwright-report/
 # Personal AI notes and settings
 CLAUDE.local.md
 .claude/settings.local.json
+ui/node_modules/
+ui/dist/
