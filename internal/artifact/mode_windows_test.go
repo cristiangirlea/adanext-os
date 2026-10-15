@@ -257,6 +257,17 @@ func TestPrivateDirectoryDACLHoldsWhileTheCollectorRuns(t *testing.T) {
 			}
 		}
 	}()
+	// A skip or a fatal inside the loop must not leave the collector running
+	// through the rest of the package's tests.
+	stopCollector := func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+		<-collected
+	}
+	defer stopCollector()
 	const rounds = 200
 	for i := range rounds {
 		dir := filepath.Join(root, strconv.Itoa(i))
@@ -276,8 +287,7 @@ func TestPrivateDirectoryDACLHoldsWhileTheCollectorRuns(t *testing.T) {
 		}
 		_ = make([]byte, 64<<10)
 	}
-	close(stop)
-	<-collected
+	stopCollector()
 	for i := range rounds {
 		assertOwnerOnlyDirectoryDACL(t, filepath.Join(root, strconv.Itoa(i)), user)
 	}
