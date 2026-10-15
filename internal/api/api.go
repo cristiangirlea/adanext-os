@@ -1,4 +1,3 @@
-// Package api exposes the coordinator's versioned HTTP interface.
 package api
 
 import (
@@ -39,10 +38,25 @@ type AttemptRunner interface {
 	CancelTask(string)
 }
 
+// ArtifactOpener streams a stored artifact's bytes; *artifact.Store satisfies it.
+type ArtifactOpener interface {
+	Open(hash string) (io.ReadCloser, error)
+}
+
+// ArtifactReferences resolves an artifact to the size its record holds when a
+// record of the attempt references it (the artifacts table's origin), and
+// returns store.ErrNotFound otherwise: an artifact no record references is
+// readable by no one through /v1 (decisions log, 2026-10-14, #3).
+type ArtifactReferences interface {
+	ArtifactReference(ctx context.Context, attemptID, hash string) (int64, error)
+}
+
 type Execution struct {
 	EngineSHA256 string
 	Generation   int64
 	Runner       AttemptRunner
+	Artifacts    ArtifactOpener     // nil until the coordinator opens its artifact store
+	References   ArtifactReferences // nil until the store resolves references by attempt
 }
 
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
@@ -58,6 +72,7 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
+	mux.HandleFunc("GET /v1/attempts/{id}/artifacts/{hash}", h.artifact)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var allowed []string
 		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
@@ -604,6 +619,12 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A non-member or an unknown attempt is answered before any slot or budget
+	// is held; the reads below check membership again under the reservation.
+	if _, err := h.store.AttemptProject(r.Context(), user, id); err != nil {
+		storeError(w, err)
+		return
+	}
 	stream := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 	if stream {
 		release, ok := h.hub.reserveStream(user)
@@ -777,6 +798,82 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 			if !write([]byte(": ping\n\n")) {
 				return
 			}
+		}
+	}
+}
+
+// ReferencedPayload is the payload of an event whose own payload was stored as
+// an artifact because its encoded event would exceed eventBytes. The marker
+// payload_ref tells a client the payload is a reference and not the engine's
+// own object; the bytes are served by GET /v1/attempts/{id}/artifacts/{hash}.
+func ReferencedPayload(hash string, size int64) json.RawMessage {
+	payload, _ := json.Marshal(struct {
+		Ref  string `json:"payload_ref"`
+		Hash string `json:"payload_artifact"`
+		Size int64  `json:"payload_size"`
+	}{"artifact", hash, size})
+	return payload
+}
+
+// artifact serves the bytes of an artifact a record of the attempt references
+// to a current member of the attempt's project, checked on this read.
+func (h *handler) artifact(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.actor(w, r)
+	if !ok {
+		return
+	}
+	id, hash := r.PathValue("id"), r.PathValue("hash")
+	if _, err := h.store.AttemptProject(r.Context(), user, id); err != nil {
+		storeError(w, err)
+		return
+	}
+	if h.exec.Artifacts == nil || h.exec.References == nil {
+		writeError(w, 503, "engine_unavailable")
+		return
+	}
+	size, err := h.exec.References.ArtifactReference(r.Context(), id, hash)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	blob, err := h.exec.Artifacts.Open(hash)
+	if err != nil {
+		writeInternalError(w, fmt.Errorf("artifact %s: %w", hash, err))
+		return
+	}
+	defer blob.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("ETag", "\""+hash+"\"")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(200)
+	rc := http.NewResponseController(w)
+	deadline := h.hub.WriteDeadline
+	if deadline <= 0 {
+		deadline = 10 * time.Second
+	}
+	buf := make([]byte, 32<<10)
+	for {
+		n, readErr := blob.Read(buf)
+		if n != 0 {
+			_ = rc.SetWriteDeadline(time.Now().Add(deadline))
+			if _, err := w.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+		if readErr == io.EOF {
+			return
+		}
+		if readErr != nil {
+			// The bytes sent fall short of Content-Length, so the client sees
+			// a truncated body rather than a corrupt artifact passed off as whole.
+			requestID := "unknown"
+			if rw, ok := w.(*requestWriter); ok {
+				requestID = rw.id
+			}
+			fmt.Fprintf(os.Stderr, "adad: request %s: artifact %s: %v\n", requestID, hash, readErr)
+			return
 		}
 	}
 }

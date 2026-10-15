@@ -15,7 +15,7 @@ type Hub struct {
 	streamUsers       map[string]int
 	streamTotal       int
 	budgetUsed        int
-	budgetWake        chan struct{}
+	budgetQueue       []*budgetWaiter // readers waiting for budget, in arrival order
 	BudgetBytes       int
 	WriteDeadline     time.Duration
 	PollInterval      time.Duration
@@ -41,35 +41,74 @@ func (h *Hub) reserveStream(user string) (func(), bool) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.streamUsers[user]--
+		if h.streamUsers[user] == 0 {
+			delete(h.streamUsers, user)
+		}
 		h.streamTotal--
 	}, true
 }
 
+type budgetWaiter struct {
+	n       int
+	granted chan struct{} // closed once the bytes are the waiter's
+}
+
+func (h *Hub) capacity() int {
+	if h.BudgetBytes <= 0 {
+		return 32 << 20
+	}
+	return h.BudgetBytes
+}
+
+// reserveBytes takes n bytes of the shared budget, queueing behind earlier
+// waiters: a release serves the queue head first, so a later request cannot
+// overtake an earlier one even when it is smaller. It returns false, holding
+// nothing, when ctx ends or the hub closes first.
 func (h *Hub) reserveBytes(ctx context.Context, n int) bool {
-	for {
-		h.mu.Lock()
-		if h.budgetWake == nil {
-			h.budgetWake = make(chan struct{})
-		}
-		capacity := h.BudgetBytes
-		if capacity <= 0 {
-			capacity = 32 << 20
-		}
-		if h.budgetUsed+n <= capacity {
-			h.budgetUsed += n
-			h.mu.Unlock()
-			return true
-		}
-		wake := h.budgetWake
-		done := h.done
+	h.mu.Lock()
+	if len(h.budgetQueue) == 0 && h.budgetUsed+n <= h.capacity() {
+		h.budgetUsed += n
 		h.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return false
-		case <-done:
-			return false
-		case <-wake:
+		return true
+	}
+	w := &budgetWaiter{n: n, granted: make(chan struct{})}
+	h.budgetQueue = append(h.budgetQueue, w)
+	done := h.done
+	h.mu.Unlock()
+	select {
+	case <-w.granted:
+		return true
+	case <-ctx.Done():
+	case <-done:
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	select {
+	case <-w.granted:
+		h.budgetUsed -= n // granted while leaving: hand the bytes on
+	default:
+		for i, queued := range h.budgetQueue {
+			if queued == w {
+				h.budgetQueue = append(h.budgetQueue[:i], h.budgetQueue[i+1:]...)
+				break
+			}
 		}
+	}
+	h.grantLocked()
+	return false
+}
+
+// grantLocked serves waiters from the head of the queue while they fit.
+func (h *Hub) grantLocked() {
+	for len(h.budgetQueue) != 0 {
+		w := h.budgetQueue[0]
+		if h.budgetUsed+w.n > h.capacity() {
+			return
+		}
+		h.budgetUsed += w.n
+		close(w.granted)
+		h.budgetQueue[0] = nil
+		h.budgetQueue = h.budgetQueue[1:]
 	}
 }
 
@@ -79,10 +118,7 @@ func (h *Hub) releaseBytes(n int) {
 	}
 	h.mu.Lock()
 	h.budgetUsed -= n
-	if h.budgetWake != nil {
-		close(h.budgetWake)
-		h.budgetWake = make(chan struct{})
-	}
+	h.grantLocked()
 	h.mu.Unlock()
 }
 
