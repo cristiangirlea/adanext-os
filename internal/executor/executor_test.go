@@ -41,6 +41,63 @@ func TestHelperFakeEngine(t *testing.T) {
 		time.Sleep(2 * time.Second)
 		os.Exit(0)
 	}
+	if script == "grandchild_stream" {
+		identity, _ := processIdentity(os.Getpid())
+		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
+		f.Close()
+		// Exceed the 1 MiB budget promptly even with coarse Windows sleep ticks.
+		chunk := strings.Repeat("x", 256<<10)
+		for {
+			fmt.Print(chunk)
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if script == "grandchild_slow_stream" {
+		identity, _ := processIdentity(os.Getpid())
+		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
+		f.Close()
+		// A line at a time, each well inside a grace period, so neither the byte
+		// budget nor a single blocked read ends the attempt.
+		interval, _ := time.ParseDuration(os.Getenv("ADA_FAKE_INTERVAL"))
+		for {
+			time.Sleep(interval)
+			fmt.Println("x")
+		}
+	}
+	if script == "grandchild_valid_stream" {
+		identity, _ := processIdentity(os.Getpid())
+		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
+		f.Close()
+		// Well-formed, correctly sequenced events after the engine's own three,
+		// faster than a slowed store persists them: reads never block and the
+		// byte budget is far away.
+		interval, _ := time.ParseDuration(os.Getenv("ADA_FAKE_INTERVAL"))
+		for seq := 6; ; seq++ {
+			time.Sleep(interval)
+			b, _ := json.Marshal(map[string]any{"v": 1, "seq": seq, "type": "event", "attempt_id": os.Getenv("ADA_FAKE_ATTEMPT"), "run_id": "fake-run", "event": map[string]any{"kind": "text", "text": "late"}})
+			fmt.Println(string(b))
+		}
+	}
+	if script == "backend_group" {
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		script = "grandchild_hold"
+	}
+	if script == "grandchild_hold" {
+		identity, _ := processIdentity(os.Getpid())
+		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
+		f.Close()
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	marker := os.Getenv("ADA_FAKE_MARKER")
 	mark := func(value string) {
 		if marker != "" {
@@ -50,6 +107,14 @@ func TestHelperFakeEngine(t *testing.T) {
 		}
 	}
 	mark(script)
+	if script == "exit_immediately" {
+		os.Exit(23)
+	}
+	if script == "no_hello" {
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	var names []string
 	for _, entry := range os.Environ() {
 		names = append(names, strings.SplitN(entry, "=", 2)[0])
@@ -80,6 +145,14 @@ func TestHelperFakeEngine(t *testing.T) {
 		backend["options"] = []string{"mode", "model"}
 	}
 	line(1, "hello", hello)
+	if script == "hello_no_read" || script == "hello_partial_read" {
+		if script == "hello_partial_read" {
+			_, _ = io.ReadFull(os.Stdin, make([]byte, 4<<10))
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	var input struct {
 		Type      string `json:"type"`
 		AttemptID string `json:"attempt_id"`
@@ -110,13 +183,40 @@ func TestHelperFakeEngine(t *testing.T) {
 		line(2, "rejected", map[string]any{"attempt_id": input.AttemptID, "error": map[string]any{"code": "unsupported"}})
 		os.Exit(2)
 	}
-	if script == "slow_accept" {
+	if script == "slow_accept" || script == "no_start_answer" {
 		for {
 			time.Sleep(time.Hour)
 		}
 	}
 	base := map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run"}
 	line(2, "accepted", base)
+	if script == "unknown_event_kind" {
+		line(3, "event", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "event": map[string]any{"kind": "mystery"}})
+		return
+	}
+	if strings.HasPrefix(script, "fatal_ok") {
+		line(3, "error", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "fatal": true, "error": map[string]any{"code": "storage", "message": "full"}})
+		line(4, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
+		if script == "fatal_ok_bad_tail_block" {
+			fmt.Println("bad json")
+		}
+		if script != "fatal_ok" {
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		os.Exit(0)
+	}
+	if script == "nonfatal_error" {
+		line(3, "error", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "fatal": false, "error": map[string]any{"code": "bad_request", "message": "ignored cancel"}})
+		line(4, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
+		os.Exit(0)
+	}
+	if script == "engine_error_event" {
+		line(3, "event", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "event": map[string]any{"kind": "error", "text": "backend warning"}})
+		line(4, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
+		os.Exit(0)
+	}
 	if script == "bad_event_id" || script == "unknown_type" || script == "missing_kind" || script == "violation_eof" {
 		kind := "event"
 		id := input.AttemptID
@@ -160,6 +260,17 @@ func TestHelperFakeEngine(t *testing.T) {
 		fmt.Print(`{"v":1,"seq":6,"type":"result"`)
 		os.Exit(0)
 	}
+	if script == "burst_before_exit" {
+		// Well-formed events in one write, twice what a 4 KiB Windows pipe
+		// holds: the reader's buffer is full of them when the exit is seen.
+		var burst strings.Builder
+		for seq := 6; seq < 116; seq++ {
+			fmt.Fprintf(&burst, `{"v":1,"seq":%d,"type":"event","attempt_id":%q,"event":{"kind":"text"}}`+"\n", seq, input.AttemptID)
+		}
+		_, _ = io.WriteString(os.Stdout, burst.String())
+		mark("exiting")
+		os.Exit(0)
+	}
 	if script == "gap" {
 		line(7, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
 		os.Exit(0)
@@ -182,6 +293,57 @@ func TestHelperFakeEngine(t *testing.T) {
 		child.Stdout = os.Stdout
 		if err := child.Start(); err != nil {
 			os.Exit(3)
+		}
+	}
+	if script == "stream_after_exit" || script == "slow_stream_after_exit" || script == "valid_stream_after_exit" || script == "grandchild_after_result" || script == "nested_tree" {
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		childScript := "grandchild_hold"
+		if script == "stream_after_exit" {
+			childScript = "grandchild_stream"
+		}
+		if script == "slow_stream_after_exit" {
+			childScript = "grandchild_slow_stream"
+		}
+		if script == "valid_stream_after_exit" {
+			childScript = "grandchild_valid_stream"
+		}
+		if script == "nested_tree" {
+			childScript = "backend_group"
+		}
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE="+childScript, "ADA_FAKE_ATTEMPT="+input.AttemptID)
+		child.Stdout = os.Stdout
+		var nested *processSupervisor
+		if script == "nested_tree" {
+			var err error
+			// Mirror Harness: a separate backend process group on Unix, and a
+			// nested kill-on-close Job Object (without breakaway) on Windows.
+			nested, err = newProcessSupervisor(child)
+			if err != nil {
+				os.Exit(3)
+			}
+			defer nested.close()
+		}
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		if nested != nil {
+			if err := nested.started(child); err != nil {
+				_ = child.Process.Kill()
+				os.Exit(3)
+			}
+		}
+		wantChildren := 1
+		if script == "nested_tree" {
+			wantChildren = 2
+		}
+		for i := 0; i < 2000; i++ {
+			if data, err := os.ReadFile(marker); err == nil && strings.Count(string(data), "child:") >= wantChildren {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if script == "stream_after_exit" || script == "slow_stream_after_exit" || script == "valid_stream_after_exit" {
+			os.Exit(0)
 		}
 	}
 	if script == "exit_with_child_stdout" || script == "child_stderr" {
@@ -218,6 +380,9 @@ func TestHelperFakeEngine(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 5<<20))
 		return
 	}
+	if script == "slow_storage" {
+		time.Sleep(50 * time.Millisecond)
+	}
 	final := "done"
 	if script == "big" || script == "big_block" {
 		final = strings.Repeat("x", 100*1024)
@@ -226,7 +391,30 @@ func TestHelperFakeEngine(t *testing.T) {
 	if script == "after_result" {
 		line(7, "event", map[string]any{"attempt_id": input.AttemptID, "event": map[string]any{"kind": "text"}})
 	}
+	if script == "ok_partial_tail_hold" {
+		// An unterminated line after the result, then exit while a descendant
+		// keeps stdout open: the partial bytes only surface when stdout is closed.
+		fmt.Print(`{"v":1,"seq":7,"type":"event"`)
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
+		child.Stdout = os.Stdout
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		for i := 0; i < 2000; i++ {
+			if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		os.Exit(0)
+	}
 	if script == "big_block" {
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	if script == "grandchild_after_result" || script == "nested_tree" {
 		for {
 			time.Sleep(time.Hour)
 		}
@@ -286,7 +474,7 @@ func testExecutor(t *testing.T, script string) (*Executor, *store.Store, string,
 		t.Fatal(err)
 	}
 	marker := filepath.Join(dir, "marker")
-	e := New(Config{EnginePath: os.Args[0], EngineSHA256: want, EngineArgs: []string{"-test.run=^TestHelperFakeEngine$"}, StateDir: dir, Artifacts: a, Store: s, Hub: api.NewHub(), Generation: generation, CancelGrace: 50 * time.Millisecond, Env: []string{"ADA_FAKE_ENGINE=" + script, "ADA_FAKE_MARKER=" + marker, "GORACE=atexit_sleep_ms=0"}})
+	e := New(Config{EnginePath: os.Args[0], EngineSHA256: want, EngineArgs: []string{"-test.run=^TestHelperFakeEngine$"}, StateDir: dir, Artifacts: a, Store: s, Hub: api.NewHub(), Generation: generation, CancelGrace: 200 * time.Millisecond, Env: []string{"ADA_FAKE_ENGINE=" + script, "ADA_FAKE_MARKER=" + marker, "GORACE=atexit_sleep_ms=0"}})
 	return e, s, dir, marker
 }
 
@@ -347,8 +535,8 @@ func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
 }
 
 func TestResultBeforeNaturalExitWithSlowStorageEndsOK(t *testing.T) {
-	e, s, _, _ := testExecutor(t, "delayed_exit")
-	e.cfg.CancelGrace = 50 * time.Millisecond
+	e, s, _, _ := testExecutor(t, "slow_storage")
+	e.cfg.CancelGrace = 100 * time.Millisecond
 	e.afterAppend = func() { time.Sleep(3 * e.cfg.CancelGrace) }
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
@@ -397,7 +585,20 @@ func TestBrokenProtocolStreamsFailWithAnErrorEvent(t *testing.T) {
 				t.Fatalf("events = %+v", events)
 			}
 			cause := map[string]string{"crash": "exit status 3", "truncated": "truncated", "gap": "seq", "duplicate": "seq", "fatal": "fatal"}[script]
-			errorEventContains(t, s, cause)
+			if script == "fatal" {
+				events, _ := s.Events(context.Background(), "u", "attempt", 0)
+				found := false
+				for _, event := range events {
+					if event.Kind == "engine_notice" && strings.Contains(string(event.Payload), `"fatal":true`) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("missing fatal engine notice: %+v", events)
+				}
+			} else {
+				errorEventContains(t, s, cause)
+			}
 		})
 	}
 }
@@ -541,7 +742,7 @@ func TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine(t *testing.T) {
 					t.Fatal(err)
 				}
 				for _, event := range events {
-					if event.Kind == "error" {
+					if event.Kind == "executor_error" {
 						t.Fatalf("clean cancellation recorded error: %+v", event)
 					}
 				}
@@ -619,7 +820,7 @@ func errorEventContains(t *testing.T, s *store.Store, cause string) {
 		t.Fatal(err)
 	}
 	for _, event := range events {
-		if event.Kind == "error" && strings.Contains(string(event.Payload), cause) {
+		if event.Kind == "executor_error" && strings.Contains(string(event.Payload), cause) {
 			return
 		}
 	}
@@ -699,7 +900,7 @@ func TestInvalidHelloFailsBeforeStart(t *testing.T) {
 }
 
 func TestProtocolViolationsRecordCause(t *testing.T) {
-	for script, cause := range map[string]string{"bad_event_id": "attempt_id mismatch", "after_result": "line after result", "unknown_type": "unexpected protocol type", "missing_kind": "event missing kind"} {
+	for script, cause := range map[string]string{"bad_event_id": "attempt_id mismatch", "after_result": "line after result", "unknown_type": "unexpected protocol type", "missing_kind": "event kind"} {
 		t.Run(script, func(t *testing.T) {
 			e, s, _, _ := testExecutor(t, script)
 			e.LaunchAttempt("attempt")
@@ -728,7 +929,7 @@ func TestFatalErrorAndResultAreBothStored(t *testing.T) {
 	}
 	var fatal, result bool
 	for _, event := range events {
-		if event.Kind == "error" && strings.Contains(string(event.Payload), `"fatal":true`) {
+		if event.Kind == "engine_notice" && strings.Contains(string(event.Payload), `"fatal":true`) {
 			fatal = true
 		}
 		if event.Kind == "result" {
@@ -778,7 +979,7 @@ func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
 	cleanupGrandchild(t, marker)
 	started := time.Now()
 	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "ended_failed")
+	waitAttempt(t, s, "ended_ok")
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("executor waited %s for descendant stdout", elapsed)
 	}
@@ -924,7 +1125,7 @@ func TestEOFRecordsOneMissingResultCause(t *testing.T) {
 	}
 	count := 0
 	for _, event := range events {
-		if event.Kind == "error" && strings.Contains(string(event.Payload), "engine exited without result") {
+		if event.Kind == "executor_error" && strings.Contains(string(event.Payload), "engine exited without result") {
 			count++
 		}
 	}

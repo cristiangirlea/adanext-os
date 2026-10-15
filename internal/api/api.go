@@ -452,7 +452,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		Effort  string `json:"effort"`
 		Mode    string `json:"mode"`
 	}
-	if err := decode(body, &input); err != nil || input.Backend == "" || (input.Mode != "readonly" && input.Mode != "auto" && input.Mode != "yolo") {
+	if err := decode(body, &input); err != nil || !validBackend(input.Backend) || !validModel(input.Model) || !printableASCII(input.Effort) || (input.Mode != "readonly" && input.Mode != "auto" && input.Mode != "yolo") {
 		writeError(w, 400, "bad_request")
 		return
 	}
@@ -505,6 +505,58 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 	if ok && attemptID != "" && h.exec.Runner != nil {
 		h.exec.Runner.LaunchAttempt(attemptID)
 	}
+}
+
+func validBackend(value string) bool {
+	if len(value) == 0 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		c := value[i]
+		if c < 'a' || c > 'z' {
+			if c < '0' || c > '9' {
+				if c != '_' && c != '-' {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// validModel accepts an empty model or one that is safe as an argument on the
+// way to the backend CLI: ^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$. Harness
+// passes the model into the CLI's argv, and on Windows that CLI is an npm
+// .cmd shim run through cmd.exe, whose quoting leaves `&`, `|`, `^`, `%VAR%`
+// and `"` live; the leading alphanumeric also rules out an option.
+func validModel(value string) bool {
+	if len(value) > 128 || (len(value) != 0 && !alphanumeric(value[0])) {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		switch c := value[i]; {
+		case alphanumeric(c), c == '.', c == '_', c == ':', c == '/', c == '@', c == '+', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func alphanumeric(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func printableASCII(value string) bool {
+	if len(value) > 128 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 type eventJSON struct {

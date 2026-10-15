@@ -19,5 +19,8 @@ func processIdentity(pid int) (string, error) {
 	if len(fields) < 20 {
 		return "", fmt.Errorf("short process stat")
 	}
+	if fields[0] == "Z" || fields[0] == "X" {
+		return "", fmt.Errorf("process has exited")
+	}
 	return fields[19], nil // field 22, starttime
 }

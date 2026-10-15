@@ -820,6 +820,18 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   same engine protocol, and a manifest checked on both sides turns a silent mismatch into a
   refusal before launch.
 
+- **2026-10-14, successful result with slow engine exit: a proposal awaiting the owner.** Issue
+  #39 item 3 leaves this to the owner, and no confirmation exists yet. What the branch does until
+  then: an `ok` result followed by a forced termination (a kill for a slow exit, or a cancel or
+  a Stop the engine does not answer by exiting within the grace period) moves the task
+  `running` → `interrupted` → `recovery_required`, with the stored result kept and a `recovery`
+  event saying the engine had to be killed after its result. A cancel or a Stop after the result
+  that the engine answers by exiting naturally before the kill goes through `finish`, which ends
+  the task `canceled` (the cancel request was recorded) with the result kept. Reason: an
+  unobserved or forced end must be reconciled before the stored result is trusted. Cost: a
+  `recovery_required` task has no way out until a reconcile flow exists, so the stored result
+  cannot be accepted yet. Owner action 12 below.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
@@ -853,3 +865,8 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
 11. When creating the Cloudflare token of item 7 (decisions log, 2026-10-14, #8): set an expiry
     (suggested one year) and say whether to restrict it to the home's public address, which
     breaks renewal whenever that address changes.
+12. Confirm or reject the proposal of 2026-10-14 in the decisions log: a successful result
+    followed by a forced termination (a slow exit, or a cancel or a Stop the engine does not
+    answer by exiting) goes to `recovery_required` with the result kept, until a reconcile flow
+    exists; a cancel or a Stop the engine answers by exiting naturally ends the task `canceled`
+    with the result kept.

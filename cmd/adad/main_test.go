@@ -490,16 +490,48 @@ func TestCrashAndRestartRecoversTheRunningAttemptWithoutRelaunch(t *testing.T) {
 	if pid == 0 {
 		t.Fatal("engine never started")
 	}
+	engineIdentity, err := testProcessIdentity(pid)
+	if err != nil || engineIdentity == "" {
+		t.Fatalf("identify engine %d: %q: %v", pid, engineIdentity, err)
+	}
 	if err := first.Process.Kill(); err != nil {
 		t.Fatalf("kill coordinator: %v", err)
 	}
 	_ = first.Wait()
-	engineProcess, err := os.FindProcess(pid)
+	current, err := testProcessIdentity(pid)
 	if err != nil {
-		t.Fatalf("find engine: %v", err)
+		t.Fatalf("check engine %d: %v", pid, err)
 	}
-	if err := engineProcess.Kill(); err != nil {
-		t.Fatalf("kill engine: %v", err)
+	// Windows owns the engine through a kill-on-close Job Object. Unix has no
+	// equivalent coordinator-death guarantee, so either exit or survival is valid there.
+	if runtime.GOOS == "windows" && current == engineIdentity {
+		t.Errorf("engine %d survived coordinator death", pid) // Continue to identity-checked cleanup below.
+	}
+	if current == engineIdentity {
+		engineProcess, err := os.FindProcess(pid)
+		if err == nil {
+			err = engineProcess.Kill()
+		}
+		if err != nil {
+			current, checkErr := testProcessIdentity(pid)
+			if checkErr != nil || current == engineIdentity {
+				t.Fatalf("kill engine %d: %v (identity %q, check: %v)", pid, err, current, checkErr)
+			}
+		}
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err = testProcessIdentity(pid)
+		if err != nil {
+			t.Fatalf("check engine %d after kill: %v", pid, err)
+		}
+		if current != engineIdentity {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if current == engineIdentity {
+		t.Fatalf("engine %d with creation time %s is still running", pid, engineIdentity)
 	}
 	second := startHelper(t, dir, name, os.Args[0], hex.EncodeToString(digest[:]))
 	defer func() { second.Process.Kill(); second.Wait() }()
@@ -519,6 +551,40 @@ func TestCrashAndRestartRecoversTheRunningAttemptWithoutRelaunch(t *testing.T) {
 	if err != nil || len(strings.Fields(string(content))) != 1 {
 		t.Fatalf("launches = %q: %v", content, err)
 	}
+	current, err = testProcessIdentity(pid)
+	if err != nil || current == engineIdentity {
+		t.Fatalf("engine after restart: identity %q, check: %v", current, err)
+	}
+}
+
+func testProcessIdentity(pid int) (string, error) {
+	if runtime.GOOS == "windows" {
+		command := fmt.Sprintf("try { $p = [System.Diagnostics.Process]::GetProcessById(%d); if (-not $p.HasExited) { $p.StartTime.ToUniversalTime().Ticks } } catch { if ($_.Exception.InnerException -is [System.ArgumentException] -or $_.Exception.InnerException -is [System.InvalidOperationException]) { exit 0 }; throw }; exit 0", pid)
+		output, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("query process %d: %w: %s", pid, err, output)
+		}
+		return strings.TrimSpace(string(output)), nil
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	end := strings.LastIndexByte(string(data), ')')
+	if end < 0 {
+		return "", fmt.Errorf("missing process stat name terminator")
+	}
+	fields := strings.Fields(string(data[end+1:]))
+	if len(fields) < 20 {
+		return "", fmt.Errorf("short process stat")
+	}
+	if fields[0] == "Z" || fields[0] == "X" {
+		return "", nil
+	}
+	return fields[19], nil // field 22, starttime
 }
 
 func TestPendingAttemptRecoversBeforeTheNewCoordinatorServes(t *testing.T) {
