@@ -160,23 +160,60 @@ func TestNextPendingAttemptFollowsCreationOrderAndSkipsBusyProjects(t *testing.T
 	}
 }
 
-func TestStopWorkWithdrawsQueuedAttemptsAndRecordsTheReasonOnRunningOnes(t *testing.T) {
+func TestTheQueueFollowsInsertionOrderWhateverTheFractionalSecondsOfStarted(t *testing.T) {
+	s := openTestStore(t)
+	seedQueue(t, s)
+	seedSecondUserAndTasks(t, s)
+	// RFC3339Nano drops trailing zeros, so as text ".12Z" sorts after ".123Z"
+	// and ".1234Z": the creation order a, b, c, d read by started would be a,
+	// d, c, b.
+	for id, started := range map[string]string{"b": "2026-10-15T10:00:00.12Z", "c": "2026-10-15T10:00:00.123Z", "d": "2026-10-15T10:00:00.1234Z"} {
+		execute(t, s, "UPDATE attempts SET started=? WHERE id=?", started, id)
+	}
+	var order []string
+	for {
+		a, ok, err := s.NextPendingAttempt(ctx, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+		order = append(order, a.ID)
+		execute(t, s, "UPDATE attempts SET state='launching' WHERE id=?", a.ID)
+	}
+	if strings.Join(order, ",") != "a,b,c,d" {
+		t.Fatalf("launch order = %v", order)
+	}
+	execute(t, s, "UPDATE attempts SET state='pending'")
+	for task, want := range map[string]int{"t": 1, "t2": 2, "t3": 3, "t4": 4} {
+		if got, err := s.QueuePosition(ctx, task); err != nil || got != want {
+			t.Fatalf("position of %s = %d, %v, want %d", task, got, err, want)
+		}
+	}
+}
+
+func TestStopWorkWithdrawsQueuedAttemptsAndRequestsCancellationOfRunningOnes(t *testing.T) {
 	s := openTestStore(t)
 	seedQueue(t, s)
 	seedSecondUserAndTasks(t, s)
 	execute(t, s, "UPDATE tasks SET state='running',revision=3 WHERE id='t'")
 	execute(t, s, "UPDATE attempts SET state='running' WHERE id='a'")
 	execute(t, s, "UPDATE attempts SET state='launching' WHERE id='b'")
-	var running, queued int
+	// t4's actor has already asked for a cancel: the stop adds its reason and
+	// leaves that request as it is.
+	execute(t, s, "UPDATE tasks SET state='cancel_requested',revision=4 WHERE id='t4'")
+	execute(t, s, "UPDATE attempts SET state='running' WHERE id='d'")
+	var result StopResult
 	err := s.write(ctx, "local", func(tx *Tx) error {
 		var err error
-		running, queued, err = tx.StopWork(ctx, 0, "coordinator stopped by the owner")
+		result, err = tx.StopWork(ctx, 0, "coordinator stopped by the owner")
 		return err
 	})
-	if err != nil || running != 2 || queued != 2 {
-		t.Fatalf("stop work = %d running, %d queued, %v", running, queued, err)
+	if err != nil || result.Running != 3 || result.Queued != 1 || strings.Join(result.Attempts, ",") != "a,b,c,d" {
+		t.Fatalf("stop work = %+v, %v", result, err)
 	}
-	for id, want := range map[string]string{"a": "running", "b": "launching", "c": "canceled", "d": "canceled"} {
+	for id, want := range map[string]string{"a": "running", "b": "launching", "c": "canceled", "d": "running"} {
 		a, err := s.AttemptByID(ctx, id)
 		if err != nil || a.State != want {
 			t.Fatalf("attempt %s = %+v: %v, want %s", id, a, err, want)
@@ -187,10 +224,16 @@ func TestStopWorkWithdrawsQueuedAttemptsAndRecordsTheReasonOnRunningOnes(t *test
 			t.Fatalf("events of %s as %s = %+v: %v", id, actor, events, err)
 		}
 	}
-	for task, want := range map[string]State{"t": Running, "t2": Preparing, "t3": Canceled, "t4": Canceled} {
+	// A running task is durably cancel_requested in the stop's own transaction,
+	// so a result the engine returns meanwhile cannot end it ok; a launching
+	// one is still preparing, and the executor honours the reason on accept.
+	for task, want := range map[string]struct {
+		state    State
+		revision int64
+	}{"t": {CancelRequested, 4}, "t2": {Preparing, 2}, "t3": {Canceled, 3}, "t4": {CancelRequested, 4}} {
 		got, err := s.Task(ctx, "u", task)
-		if err != nil || got.State != want {
-			t.Fatalf("task %s = %+v: %v, want %s", task, got, err, want)
+		if err != nil || got.State != want.state || got.Revision != want.revision {
+			t.Fatalf("task %s = %+v: %v, want %+v", task, got, err, want)
 		}
 	}
 }

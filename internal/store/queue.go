@@ -14,8 +14,10 @@ import (
 var ErrAttemptLaunched = errors.New("attempt has left the queue")
 
 // A pending attempt is queued; the queue is ordered by creation across all
-// users, with the row order breaking ties between equal timestamps.
-const queueOrder = "a.started, a.rowid"
+// users. The row id is that order: attempts are inserted under SQLite's single
+// writer and never deleted. The started text is not sortable: RFC3339Nano
+// drops trailing zeros, so "...00.12Z" would sort after "...00.123Z".
+const queueOrder = "a.rowid"
 
 // A QueuedAttempt is a pending attempt with the project its task belongs to,
 // which the launcher needs for the one-writer-per-workspace rule.
@@ -54,7 +56,7 @@ func (s *Store) NextPendingAttempt(ctx context.Context, generation int64, busy f
 // pending attempt (unknown, launched or ended).
 func (s *Store) QueuePosition(ctx context.Context, taskID string) (int, error) {
 	var position int
-	err := s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM attempts p WHERE p.state='pending' AND (p.started<a.started OR (p.started=a.started AND p.rowid<a.rowid)))+1
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM attempts p WHERE p.state='pending' AND p.rowid<a.rowid)+1
 		FROM attempts a WHERE a.task=? AND a.state='pending'`, taskID).Scan(&position)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -100,7 +102,7 @@ func cancelQueued(ctx context.Context, tx *sql.Tx, taskID string, expectedRevisi
 		return "", fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, state, Canceled)
 	}
 	var attemptID string
-	err = tx.QueryRowContext(ctx, "SELECT id FROM attempts WHERE task=? AND state='pending' ORDER BY started DESC, rowid DESC LIMIT 1", taskID).Scan(&attemptID)
+	err = tx.QueryRowContext(ctx, "SELECT id FROM attempts WHERE task=? AND state='pending' ORDER BY rowid DESC LIMIT 1", taskID).Scan(&attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("%w: task %s", ErrAttemptLaunched, taskID)
 	}
@@ -131,6 +133,29 @@ func withdrawAttempt(ctx context.Context, tx *sql.Tx, attemptID, reason string) 
 	return appendCancelEvent(ctx, tx, attemptID, reason)
 }
 
+// requestCancel moves a running task to cancel_requested at its current
+// revision and leaves any other state alone.
+func requestCancel(ctx context.Context, tx *sql.Tx, taskID string) error {
+	var state State
+	var revision int64
+	if err := tx.QueryRowContext(ctx, "SELECT state,revision FROM tasks WHERE id=?", taskID).Scan(&state, &revision); err != nil {
+		return err
+	}
+	if state != Running {
+		return nil
+	}
+	return transition(ctx, tx, taskID, Running, CancelRequested, revision)
+}
+
+// CancelRecorded reports whether a cancel event is on the attempt: the
+// owner's stop records one on a launching attempt, and the accept that
+// advances its task has to honour it.
+func (tx *Tx) CancelRecorded(ctx context.Context, attemptID string) (bool, error) {
+	var n int
+	err := tx.tx.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE attempt=? AND kind='cancel'", attemptID).Scan(&n)
+	return n != 0, err
+}
+
 func appendCancelEvent(ctx context.Context, tx *sql.Tx, attemptID, reason string) error {
 	payload, err := json.Marshal(map[string]string{"reason": reason})
 	if err != nil {
@@ -143,14 +168,27 @@ func appendCancelEvent(ctx context.Context, tx *sql.Tx, attemptID, reason string
 	return appendEvent(ctx, tx, Event{Attempt: attemptID, Seq: seq, Time: now(), Kind: "cancel", Payload: payload})
 }
 
+// A StopResult says what a stop touched: the attempts it recorded the reason
+// on, for their open streams to be woken, and how many of them were running
+// (launching included) or queued.
+type StopResult struct {
+	Attempts        []string
+	Running, Queued int
+}
+
 // StopWork is the owner's stop, a trusted coordinator operation: every queued
 // attempt of this generation is withdrawn with its task, and every launching
 // or running one gets a cancel event with the reason, for the executor to end
-// through the running cancel path. It returns how many of each it touched.
-func (tx *Tx) StopWork(ctx context.Context, generation int64, reason string) (running, queued int, err error) {
+// through the running cancel path. A running task moves to cancel_requested
+// here, in the stop's own transaction, so a result the engine returns before
+// the executor acts cannot end it ok; a cancel its actor already requested
+// stays as it is. A launching attempt's task is still preparing: the executor
+// honours the recorded cancel when acceptance advances it.
+func (tx *Tx) StopWork(ctx context.Context, generation int64, reason string) (StopResult, error) {
+	var result StopResult
 	rows, err := tx.tx.QueryContext(ctx, "SELECT a.id,a.task,a.state FROM attempts a WHERE a.state IN ('pending','launching','running') AND a.ownership_generation=? ORDER BY "+queueOrder, generation)
 	if err != nil {
-		return 0, 0, err
+		return result, err
 	}
 	type open struct{ id, task, state string }
 	var all []open
@@ -158,31 +196,35 @@ func (tx *Tx) StopWork(ctx context.Context, generation int64, reason string) (ru
 		var a open
 		if err := rows.Scan(&a.id, &a.task, &a.state); err != nil {
 			rows.Close()
-			return 0, 0, err
+			return result, err
 		}
 		all = append(all, a)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, 0, err
+		return result, err
 	}
 	rows.Close()
 	for _, a := range all {
+		result.Attempts = append(result.Attempts, a.id)
 		if a.state != "pending" {
 			if err := appendCancelEvent(ctx, tx.tx, a.id, reason); err != nil {
-				return 0, 0, err
+				return result, err
 			}
-			running++
+			if err := requestCancel(ctx, tx.tx, a.task); err != nil {
+				return result, err
+			}
+			result.Running++
 			continue
 		}
 		var revision int64
 		if err := tx.tx.QueryRowContext(ctx, "SELECT revision FROM tasks WHERE id=?", a.task).Scan(&revision); err != nil {
-			return 0, 0, err
+			return result, err
 		}
 		if _, err := cancelQueued(ctx, tx.tx, a.task, revision, reason); err != nil {
-			return 0, 0, err
+			return result, err
 		}
-		queued++
+		result.Queued++
 	}
-	return running, queued, nil
+	return result, nil
 }

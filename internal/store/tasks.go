@@ -96,7 +96,7 @@ func transition(ctx context.Context, tx *sql.Tx, taskID string, from, to State, 
 // open, or one that is launching or running, refuses the edge.
 func requireWithdrawnAttempt(ctx context.Context, tx *sql.Tx, taskID string) error {
 	var state string
-	err := tx.QueryRowContext(ctx, "SELECT state FROM attempts WHERE task=? ORDER BY started DESC, rowid DESC LIMIT 1", taskID).Scan(&state)
+	err := tx.QueryRowContext(ctx, "SELECT state FROM attempts WHERE task=? ORDER BY rowid DESC LIMIT 1", taskID).Scan(&state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: %s -> %s without an attempt", ErrInvalidTransition, Preparing, Canceled)
 	}

@@ -43,7 +43,7 @@ func (s *Store) AttemptPrompt(ctx context.Context, attemptID string) (string, er
 }
 
 func (s *Store) PendingAttempts(ctx context.Context, generation int64) ([]Attempt, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+attemptColumns+" FROM attempts WHERE state='pending' AND ownership_generation=? ORDER BY started, rowid", generation)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+attemptColumns+" FROM attempts WHERE state='pending' AND ownership_generation=? ORDER BY rowid", generation)
 	if err != nil {
 		return nil, err
 	}

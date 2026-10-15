@@ -198,6 +198,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	case <-stopping:
+		// Open streams first deliver what the stop committed, within the write
+		// deadline, before the shutdown closes the hub under them.
+		hub.Drain()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {

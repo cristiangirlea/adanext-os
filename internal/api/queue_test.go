@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,17 +16,28 @@ import (
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
 
-// recordingRunner notes which tasks the API asked the executor to cancel.
+// recordingRunner notes which attempts the API asked the executor to launch
+// and which tasks to cancel.
 type recordingRunner struct {
 	mu       sync.Mutex
+	launched []string
 	canceled []string
 }
 
-func (r *recordingRunner) LaunchAttempt(string) {}
+func (r *recordingRunner) LaunchAttempt(attempt string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.launched = append(r.launched, attempt)
+}
 func (r *recordingRunner) CancelTask(task string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.canceled = append(r.canceled, task)
+}
+func (r *recordingRunner) launches() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.launched...)
 }
 func (r *recordingRunner) cancels() []string {
 	r.mu.Lock()
@@ -289,6 +301,21 @@ func TestTheOwnersStopRecordsTheReasonOnRunningAndQueuedTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	queued, queuedAttempt := startQueued(t, f, "queued")
+	// The actor's stream is open before the stop and polls too rarely to
+	// matter: the stop itself wakes it with the reason.
+	f.hub.PollInterval = time.Hour
+	req, err := http.NewRequest("GET", "http://ipc/v1/attempts/"+queuedAttempt+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	streamCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	resp, err := f.client.Do(req.WithContext(streamCtx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
 	owner := asUser(f, "local", execution)
 	code, body := do(t, owner, "POST", "/v1/coordinator/stop", "owner-stop", "", nil)
 	if code != 202 || !bytes.Contains(body, []byte(`"running":1`)) || !bytes.Contains(body, []byte(`"queued":1`)) {
@@ -298,13 +325,14 @@ func TestTheOwnersStopRecordsTheReasonOnRunningAndQueuedTasks(t *testing.T) {
 	if code != 202 || !bytes.Equal(body, replay) {
 		t.Fatalf("replay = %d %s", code, replay)
 	}
-	if stopper.calls.get() == 0 {
-		t.Fatal("the coordinator was not told to stop")
+	if stopper.calls.get() != 1 {
+		t.Fatalf("the coordinator was told to stop %d times", stopper.calls.get())
 	}
 	const reason = `"reason":"coordinator stopped by the owner"`
-	// The running task waits for the executor's cancel path; its reason is on record.
+	// The running task is cancel_requested with its reason on record; the
+	// executor's cancel path ends it.
 	task, err := f.s.Task(ctx, "alice", running)
-	if err != nil || task.State != store.Running {
+	if err != nil || task.State != store.CancelRequested {
 		t.Fatalf("running task = %+v: %v", task, err)
 	}
 	events, err := f.s.Events(ctx, "alice", runningAttempt, 0)
@@ -323,19 +351,7 @@ func TestTheOwnersStopRecordsTheReasonOnRunningAndQueuedTasks(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].Kind != "cancel" || !bytes.Contains(events[0].Payload, []byte(reason)) {
 		t.Fatalf("queued attempt events = %+v: %v", events, err)
 	}
-	// The actor sees the reason as the last event of an open stream.
-	req, err := http.NewRequest("GET", "http://ipc/v1/attempts/"+queuedAttempt+"/events", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	streamCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	resp, err := f.client.Do(req.WithContext(streamCtx))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	// The actor sees the reason as the last event of the open stream.
 	buf := make([]byte, 4096)
 	var stream []byte
 	for !bytes.Contains(stream, []byte(reason)) {
@@ -358,4 +374,181 @@ func TestStopWithoutACoordinatorToStopIsUnavailable(t *testing.T) {
 	if code, body := do(t, asUser(f, "local", Execution{Owner: "local"}), "POST", "/v1/coordinator/stop", "stop", "", nil); code != 503 {
 		t.Fatalf("stop = %d %s", code, body)
 	}
+}
+
+func TestAReplayedStopAfterARestartDoesNotStopTheNewCoordinator(t *testing.T) {
+	stopper := &recordingStopper{}
+	execution := Execution{EngineSHA256: strings.Repeat("a", 64), Runner: noopRunner{}, Owner: "local", Stopper: stopper}
+	f := newFixture(t, execution)
+	ctx := context.Background()
+	if err := f.s.CreateUser(ctx, "local", "Local"); err != nil {
+		t.Fatal(err)
+	}
+	code, body := do(t, asUser(f, "local", execution), "POST", "/v1/coordinator/stop", "quit", "", nil)
+	if code != 202 || stopper.calls.get() != 1 {
+		t.Fatalf("stop = %d %s, %d calls", code, body, stopper.calls.get())
+	}
+	// A restart: a new generation, a new coordinator, fresh work queued.
+	generation, _, err := f.s.BumpAndRecover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := &recordingStopper{}
+	runner := &recordingRunner{}
+	restarted := Execution{EngineSHA256: strings.Repeat("a", 64), Runner: runner, Owner: "local", Stopper: next, Generation: generation}
+	id := create(t, f, "fresh-create", "work")["id"].(string)
+	if code, _ := f.request(t, "POST", "/v1/tasks/"+id+"/ready", "fresh-ready", "0", nil); code != 200 {
+		t.Fatal(code)
+	}
+	alice := asUser(f, "alice", restarted)
+	if code, body := do(t, alice, "POST", "/v1/tasks/"+id+"/start", "fresh-start", "1", []byte(policy)); code != 200 {
+		t.Fatalf("fresh start = %d %s", code, body)
+	}
+	// The old key replayed answers as it did, and stops nothing.
+	code, replay := do(t, asUser(f, "local", restarted), "POST", "/v1/coordinator/stop", "quit", "", nil)
+	if code != 202 || !bytes.Equal(body, replay) {
+		t.Fatalf("replay = %d %s", code, replay)
+	}
+	if next.calls.get() != 0 {
+		t.Fatal("a replayed stop reached the new coordinator")
+	}
+	task, err := f.s.Task(ctx, "alice", id)
+	if err != nil || task.State != store.Preparing {
+		t.Fatalf("fresh task = %+v: %v", task, err)
+	}
+	if position, err := f.s.QueuePosition(ctx, id); err != nil || position != 1 {
+		t.Fatalf("fresh task position = %d: %v", position, err)
+	}
+	// The new coordinator still admits work.
+	second := create(t, f, "second-create", "work")["id"].(string)
+	if code, _ := f.request(t, "POST", "/v1/tasks/"+second+"/ready", "second-ready", "0", nil); code != 200 {
+		t.Fatal(code)
+	}
+	if code, body := do(t, alice, "POST", "/v1/tasks/"+second+"/start", "second-start", "1", []byte(policy)); code != 200 {
+		t.Fatalf("start after the replay = %d %s", code, body)
+	}
+}
+
+func TestAStartArrivingBetweenTheStopsCommitAndTheExecutorHandoffIsRefused(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	if err := f.s.CreateUser(ctx, "local", "Local"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.AddMember(ctx, "a", "local", "member"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.CreateTask(ctx, "local", "ready-task", "a", "objective", "criteria"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.Transition(ctx, "local", "ready-task", store.Draft, store.Ready, 0); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	stopper := &recordingStopper{}
+	h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "local", nil }, exec: Execution{EngineSHA256: strings.Repeat("a", 64), Runner: runner, Owner: "local", Stopper: stopper}}
+	type reply struct {
+		code int
+		body []byte
+	}
+	call := func(serve func(http.ResponseWriter, *http.Request), path, key, match string, body []byte) reply {
+		req := httptest.NewRequest("POST", path, bytes.NewReader(body))
+		req.Header.Set("Idempotency-Key", key)
+		if match != "" {
+			req.Header.Set("If-Match", match)
+		}
+		req.SetPathValue("id", "ready-task")
+		w := httptest.NewRecorder()
+		serve(w, req)
+		return reply{w.Code, w.Body.Bytes()}
+	}
+	committed := make(chan struct{})
+	handoff := make(chan struct{})
+	h.beforeStopHandoff = func() {
+		close(committed)
+		<-handoff
+	}
+	stopped := make(chan reply, 1)
+	go func() { stopped <- call(h.stop, "/v1/coordinator/stop", "quit", "", nil) }()
+	<-committed
+	// The stop has committed but the executor does not know yet: a start now
+	// must wait, and then be refused.
+	started := make(chan reply, 1)
+	go func() { started <- call(h.start, "/v1/tasks/ready-task/start", "start", "1", []byte(policy)) }()
+	select {
+	case r := <-started:
+		t.Fatalf("start answered %d %s between the stop's commit and the executor handoff", r.code, r.body)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(handoff)
+	if r := <-stopped; r.code != 202 {
+		t.Fatalf("stop = %d %s", r.code, r.body)
+	}
+	if r := <-started; r.code != 503 || !bytes.Contains(r.body, []byte(`"error":"shutting_down"`)) {
+		t.Fatalf("start = %d %s", r.code, r.body)
+	}
+	if launched := runner.launches(); len(launched) != 0 {
+		t.Fatalf("launched %v during the stop", launched)
+	}
+	task, err := f.s.Task(ctx, "local", "ready-task")
+	if err != nil || task.State != store.Ready || task.Revision != 1 {
+		t.Fatalf("task = %+v: %v", task, err)
+	}
+	// Every later start is refused the same way.
+	if r := call(h.start, "/v1/tasks/ready-task/start", "start-later", "1", []byte(policy)); r.code != 503 || !bytes.Contains(r.body, []byte(`"error":"shutting_down"`)) {
+		t.Fatalf("later start = %d %s", r.code, r.body)
+	}
+	if stopper.calls.get() != 1 {
+		t.Fatalf("stopper calls = %d", stopper.calls.get())
+	}
+}
+
+func TestDrainLetsAnOpenStreamDeliverWhatIsCommittedAndEnd(t *testing.T) {
+	f := newFixture(t)
+	attemptForLimits(t, f)
+	f.hub.PollInterval = time.Hour
+	req, err := http.NewRequest("GET", "http://ipc/v1/attempts/limits-attempt/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := f.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatal(resp.StatusCode)
+	}
+	// Committed without a notification, as the stop's transaction is.
+	if err := f.s.AppendEvent(context.Background(), "alice", store.Event{Attempt: "limits-attempt", Seq: 1, Kind: "cancel", Payload: json.RawMessage(`{"reason":"test"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	read := make(chan []byte, 1)
+	go func() {
+		body, _ := io.ReadAll(resp.Body)
+		read <- body
+	}()
+	drained := make(chan struct{})
+	go func() {
+		f.hub.Drain()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain did not return once the stream had ended")
+	}
+	select {
+	case body := <-read:
+		if !bytes.HasSuffix(body, []byte("id: 1\nevent: cancel\ndata: {\"reason\":\"test\"}\n\n")) {
+			t.Fatalf("stream = %q", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stream did not end after the drain")
+	}
+	if got := f.hub.SubscriberCount(); got != 0 {
+		t.Fatalf("subscribers remain: %d", got)
+	}
+	f.hub.Close()
 }

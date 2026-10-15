@@ -10,7 +10,9 @@ import (
 type Hub struct {
 	mu                sync.Mutex
 	closeOnce         sync.Once
+	drainOnce         sync.Once
 	done              chan struct{}
+	draining          chan struct{} // closed by Drain: open streams send what is committed and end
 	subs              map[string]map[chan struct{}]struct{}
 	streamUsers       map[string]int
 	streamTotal       int
@@ -23,7 +25,17 @@ type Hub struct {
 }
 
 func NewHub() *Hub {
-	return &Hub{done: make(chan struct{}), subs: make(map[string]map[chan struct{}]struct{}), PollInterval: time.Second, HeartbeatInterval: 15 * time.Second, BudgetBytes: 32 << 20, WriteDeadline: 10 * time.Second}
+	return &Hub{done: make(chan struct{}), draining: make(chan struct{}), subs: make(map[string]map[chan struct{}]struct{}), PollInterval: time.Second, HeartbeatInterval: 15 * time.Second, BudgetBytes: 32 << 20, WriteDeadline: 10 * time.Second}
+}
+
+// channelsLocked gives a zero-value Hub its channels.
+func (h *Hub) channelsLocked() {
+	if h.done == nil {
+		h.done = make(chan struct{})
+	}
+	if h.draining == nil {
+		h.draining = make(chan struct{})
+	}
 }
 
 func (h *Hub) reserveStream(user string) (func(), bool) {
@@ -146,12 +158,30 @@ func (h *Hub) releaseBytes(n int) {
 	h.mu.Unlock()
 }
 
+// Drain is the bounded final drain before Close: every open stream sends what
+// the store holds and ends, and Drain waits up to the write deadline for them,
+// so events committed before it, a stop's reason among them, reach an open
+// stream as its last. Repeated calls are safe.
+func (h *Hub) Drain() {
+	h.mu.Lock()
+	h.channelsLocked()
+	draining := h.draining
+	h.mu.Unlock()
+	h.drainOnce.Do(func() { close(draining) })
+	deadline := h.WriteDeadline
+	if deadline <= 0 {
+		deadline = 10 * time.Second
+	}
+	until := time.Now().Add(deadline)
+	for h.SubscriberCount() != 0 && time.Now().Before(until) {
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // Close stops live event streams. Repeated calls are safe.
 func (h *Hub) Close() {
 	h.mu.Lock()
-	if h.done == nil {
-		h.done = make(chan struct{})
-	}
+	h.channelsLocked()
 	h.mu.Unlock()
 	h.closeOnce.Do(func() { close(h.done) })
 }
@@ -171,9 +201,7 @@ func (h *Hub) subscribe(attemptID string) (<-chan struct{}, func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	ch := make(chan struct{}, 1)
-	if h.done == nil {
-		h.done = make(chan struct{})
-	}
+	h.channelsLocked()
 	if h.subs == nil {
 		h.subs = make(map[string]map[chan struct{}]struct{})
 	}

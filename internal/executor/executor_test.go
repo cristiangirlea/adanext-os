@@ -188,6 +188,24 @@ func TestHelperFakeEngine(t *testing.T) {
 			time.Sleep(time.Hour)
 		}
 	}
+	if script == "gated_ok" {
+		// Each step waits for the test's gate file, so the test decides what
+		// the executor has done before the engine accepts, and before it
+		// returns ok.
+		waitFor := func(path string) {
+			for {
+				if _, err := os.Stat(path); err == nil {
+					return
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		waitFor(marker + ".accept")
+		line(2, "accepted", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run"})
+		waitFor(marker + ".finish")
+		line(3, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
+		os.Exit(0)
+	}
 	base := map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run"}
 	line(2, "accepted", base)
 	if script == "unknown_event_kind" {

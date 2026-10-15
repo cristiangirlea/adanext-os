@@ -54,6 +54,8 @@ type Executor struct {
 	wg             sync.WaitGroup
 	beforeAccepted func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
 	afterAppend    func()                          // Set only by tests to simulate slow event storage.
+	beforeClaim    func(attemptID string)          // Test seam before the launch claim, for the cancel race.
+	beforeCancel   func()                          // Test seam that pauses the cancel handling of a run.
 }
 
 func New(cfg Config) *Executor {
@@ -270,6 +272,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(enginePath), ".exe") {
 		e.fail(a, errors.New("engine path requires a .exe suffix on Windows"))
 		return
+	}
+	if e.beforeClaim != nil {
+		e.beforeClaim(a.ID)
 	}
 	if err := e.owned(a.ID, func(tx *store.Tx) error {
 		result, err := tx.ExecContext(ctx, "UPDATE attempts SET state='launching' WHERE id=? AND state='pending'", a.ID)
@@ -510,6 +515,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		defer close(cancelDone)
 		select {
 		case <-active.cancel:
+			if e.beforeCancel != nil {
+				e.beforeCancel()
+			}
 			select {
 			case <-accepted:
 				_ = e.requestCancel(a)
@@ -690,8 +698,17 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		if err := tx.TransitionOwned(ctx, a.Task, store.Preparing, store.Running, rev); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, "UPDATE attempts SET state='running',run_id=? WHERE id=?", answer.RunID, a.ID)
-		return err
+		if _, err := tx.ExecContext(ctx, "UPDATE attempts SET state='running',run_id=? WHERE id=?", answer.RunID, a.ID); err != nil {
+			return err
+		}
+		// A stop recorded while the attempt was launching is honoured in the
+		// same transaction, so a result the engine returns before the cancel
+		// below reaches it cannot end the task ok.
+		canceled, err := tx.CancelRecorded(ctx, a.ID)
+		if err != nil || !canceled {
+			return err
+		}
+		return tx.TransitionOwned(ctx, a.Task, store.Running, store.CancelRequested, rev+1)
 	}); err != nil {
 		abort(err)
 		return

@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/store"
@@ -24,6 +25,7 @@ type Authenticator func(*http.Request) (string, error)
 var (
 	errEngineUnavailable = errors.New("engine unavailable")
 	errQueueFull         = errors.New("queue full")
+	errShuttingDown      = errors.New("shutting down")
 )
 
 // maxQueuedPerUser is the queue limit of the decisions log (2026-10-14, #9):
@@ -41,6 +43,12 @@ type handler struct {
 	exec     Execution
 	readPage func(context.Context, string, string, int64, int, int, func(store.Event) int) ([]store.Event, error)
 	readLast func(context.Context, string, string) (int64, error)
+	// admission serialises start against the owner's stop: a start holds it
+	// shared from its transaction through the scheduler handoff, the stop
+	// exclusively from before its transaction through the executor handoff.
+	admission         sync.RWMutex
+	stopping          bool   // Set under admission by a stop that committed; starts are then refused.
+	beforeStopHandoff func() // Test seam between the stop's commit and the executor handoff.
 }
 
 // AttemptRunner is the narrow API-to-executor notification boundary.
@@ -187,6 +195,8 @@ func storeError(w http.ResponseWriter, err error) {
 		writeError(w, 503, "engine_unavailable")
 	case errors.Is(err, errQueueFull):
 		writeError(w, 409, "queue_full")
+	case errors.Is(err, errShuttingDown):
+		writeError(w, 503, "shutting_down")
 	default:
 		writeInternalError(w, err)
 	}
@@ -503,8 +513,13 @@ type stopJSON struct {
 // stop is "Quit Ada and stop work", for the coordinator's owner account alone:
 // a project owner is a member like any other here. In one idempotent
 // transaction every queued attempt is withdrawn and every running one gets
-// the reason on record; then the coordinator cancels the running attempts
-// and exits. The counts say how much work the stop ended.
+// the reason on record and its cancel requested; then the coordinator cancels
+// the running attempts and exits. The counts say how much work the stop
+// ended. Start admission is closed from before the transaction until the
+// executor has been told, so no start commits in the window between the two,
+// and none after. A replay, or a stop that commits nothing, tells the
+// coordinator nothing: after a restart the key reaches a coordinator the
+// cached counts were never about.
 func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.actor(w, r)
 	if !ok {
@@ -527,6 +542,12 @@ func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
+	h.admission.Lock()
+	defer h.admission.Unlock()
+	wasStopping := h.stopping
+	h.stopping = true
+	var result store.StopResult
+	stopped := false
 	ok = h.mutate(w, r, user, k, nil, "", func(tx *store.Tx) (int, any, error) {
 		if h.exec.Stopper == nil {
 			return 0, nil, errEngineUnavailable
@@ -538,15 +559,25 @@ func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 		if generation != h.exec.Generation {
 			return 0, nil, store.ErrStaleOwnership
 		}
-		running, queued, err := tx.StopWork(r.Context(), h.exec.Generation, stopReason)
+		var err error
+		result, err = tx.StopWork(r.Context(), h.exec.Generation, stopReason)
 		if err != nil {
 			return 0, nil, err
 		}
-		return 202, stopJSON{running, queued, stopReason}, nil
+		stopped = true
+		return 202, stopJSON{result.Running, result.Queued, stopReason}, nil
 	})
-	if ok && h.exec.Stopper != nil {
-		h.exec.Stopper.StopWork()
+	if !ok || !stopped {
+		h.stopping = wasStopping
+		return
 	}
+	for _, id := range result.Attempts {
+		h.hub.Notify(id)
+	}
+	if h.beforeStopHandoff != nil {
+		h.beforeStopHandoff()
+	}
+	h.exec.Stopper.StopWork()
 }
 
 func (h *handler) start(w http.ResponseWriter, r *http.Request) {
@@ -585,8 +616,16 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
+	// Held through the transaction and the scheduler handoff: a stop waits
+	// for both, and a start that finds the stop in or past its transaction
+	// is refused rather than recorded for an executor that will not run it.
+	h.admission.RLock()
+	defer h.admission.RUnlock()
 	var attemptID string
 	ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
+		if h.stopping {
+			return 0, nil, errShuttingDown
+		}
 		if h.exec.EngineSHA256 == "" || h.exec.Runner == nil {
 			return 0, nil, errEngineUnavailable
 		}
@@ -966,23 +1005,26 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for {
+		// A drain seen before the send ends the stream after it: that send
+		// reads everything committed before the drain began.
+		final := false
 		select {
 		case <-r.Context().Done():
 			return
 		case <-h.hub.done:
 			return
+		case <-h.hub.draining:
+			final = true
 		case <-wake:
-			if !send() {
-				return
-			}
 		case <-pollTicker.C:
-			if !send() {
-				return
-			}
 		case <-pingTicker.C:
 			if !write([]byte(": ping\n\n")) {
 				return
 			}
+			continue
+		}
+		if !send() || final {
+			return
 		}
 	}
 }

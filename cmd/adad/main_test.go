@@ -806,10 +806,34 @@ func TestOwnerStopEndpointCancelsRunningAndQueuedWorkAndExits(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if code, body := post("/v1/tasks/queued/start", "start-queued", "1", `{"backend":"codex","mode":"auto"}`); code != 200 {
+	code, body := post("/v1/tasks/queued/start", "start-queued", "1", `{"backend":"codex","mode":"auto"}`)
+	if code != 200 {
 		t.Fatalf("queued start = %d %s", code, body)
 	}
-	code, body := post("/v1/coordinator/stop", "quit", "", "")
+	var queued struct {
+		AttemptID string `json:"attempt_id"`
+	}
+	if err := json.Unmarshal(body, &queued); err != nil {
+		t.Fatal(err)
+	}
+	// The queued attempt's actor has its stream open before the stop: the
+	// reason is the last event it receives before the coordinator closes it.
+	streamReq, err := http.NewRequest("GET", "http://ipc/v1/attempts/"+queued.AttemptID+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamReq.Header.Set("Accept", "text/event-stream")
+	stream, err := client.Do(streamReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	streamed := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(stream.Body)
+		streamed <- data
+	}()
+	code, body = post("/v1/coordinator/stop", "quit", "", "")
 	if code != 202 || !bytes.Contains(body, []byte(`"running":1`)) || !bytes.Contains(body, []byte(`"queued":1`)) {
 		t.Fatalf("stop = %d %s", code, body)
 	}
@@ -822,6 +846,15 @@ func TestOwnerStopEndpointCancelsRunningAndQueuedWorkAndExits(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("coordinator did not exit after the owner's stop")
+	}
+	select {
+	case data := <-streamed:
+		frames := strings.Split(strings.TrimSuffix(string(data), "\n\n"), "\n\n")
+		if last := frames[len(frames)-1]; last != "id: 1\nevent: cancel\ndata: {\"reason\":\"coordinator stopped by the owner\"}" {
+			t.Fatalf("last frame of the stream = %q in %q", last, data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream did not end with the coordinator")
 	}
 	for _, task := range []string{"running", "queued"} {
 		got, err := s.Task(ctx, "local", task)
