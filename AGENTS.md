@@ -19,15 +19,15 @@ taking a slice, and don't reopen a recorded decision.
 | `internal/store/` | SQLite state, schema migrations, and task records. |
 | `internal/ipc/` | Private local listener and singleton lock. |
 | `engine/engine.json` | The Harness revision Ada runs. Change it only in a slice that says why. |
-| `desktop/` | The Electron, React and TypeScript shell. Versions are pinned; code arrives in M2 and M4. |
+| `ui/` | The React and TypeScript app both shells load. It reaches `adad` only through `AdaClient` (`ui/src/client/api.ts`); the adapters under `ui/src/client/adapters/` are the only modules that may touch the bridge or the network. |
+| `desktop/` | The Electron shell: main (the bridge to `adad` over its pipe or socket, the Node SSE client) and preload. Versions are pinned; the full layout arrives in M4. |
 | `scripts/check.sh` | Everything CI runs, in order. |
 | `scripts/test-hooks.sh` | Tests for the two Claude hooks, run by `check.sh`. |
 | `scripts/gen-settings.py` | Writes `.claude/settings.json`, giving every Bash rule its PowerShell twin. Edit the lists there, not the JSON. |
 | `scripts/build-engine.sh` | Builds `hrn` from a clean Harness checkout at the pinned revision into `.engine/`. |
 | `docs/` | Plan, status and backlog. |
 
-Planned, not yet present: `ui/` (the React app both shells load,
-from M2.4), and `cmd/ada-guest` (M5).
+Planned, not yet present: `cmd/ada-guest` (M5).
 
 ## Build and test
 
@@ -40,9 +40,9 @@ bash scripts/check.sh
 
 It runs `go vet`, `go build`, `go test -count=1`, `go test -race` where cgo and a C compiler exist,
 the repository rules (`.claude/hooks/repo-rules.sh`: gofmt, the Harness-internal import ban,
-Electron isolation), a syntax check of every script, the hook tests, and `npm ci --ignore-scripts`
-in `desktop/`. The owner's Windows PC has no cgo: there, `-race` is
-left to CI.
+Electron isolation), a syntax check of every script, the hook tests, `npm ci --ignore-scripts` in
+`desktop/` and `ui/`, and in each a typecheck, Vitest (`--maxWorkers=2`) and a build. The owner's
+Windows PC has no cgo: there, `-race` is left to CI.
 
 The repository is public (since 2026-10-13, MIT), so CI runs on GitHub's runners, free for public
 repositories: pull requests on `ubuntu-latest`, pushes to `main` on `ubuntu-latest` and

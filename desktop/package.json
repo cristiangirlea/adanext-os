@@ -2,10 +2,17 @@
   "name": "ada-desktop",
   "version": "0.0.0",
   "private": true,
-  "description": "AdaNext OS desktop shell. Versions are pinned in M0; the code arrives in M2 and M4.",
+  "description": "AdaNext OS desktop shell: Electron main and preload around the React app in ../ui.",
   "license": "UNLICENSED",
+  "main": "dist/main.cjs",
   "engines": {
     "node": "22.16.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --maxWorkers=2",
+    "build": "vite build",
+    "start": "electron ."
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
