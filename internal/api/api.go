@@ -21,7 +21,18 @@ import (
 
 type Authenticator func(*http.Request) (string, error)
 
-var errEngineUnavailable = errors.New("engine unavailable")
+var (
+	errEngineUnavailable = errors.New("engine unavailable")
+	errQueueFull         = errors.New("queue full")
+)
+
+// maxQueuedPerUser is the queue limit of the decisions log (2026-10-14, #9):
+// a user's fourth queued start is refused with queue_full.
+const maxQueuedPerUser = 3
+
+// stopReason is recorded on every running and queued attempt the owner's stop
+// ends, visible to its actor as the attempt's cancel event.
+const stopReason = "coordinator stopped by the owner"
 
 type handler struct {
 	store    *store.Store
@@ -51,12 +62,20 @@ type ArtifactReferences interface {
 	ArtifactReference(ctx context.Context, attemptID, hash string) (int64, error)
 }
 
+// Stopper is the coordinator's orderly stop, "Quit Ada and stop work". The
+// stop handler calls it once the owner's request has recorded its reason on
+// every running and queued attempt: the executor then cancels the running ones
+// through its cancel path, and the coordinator exits.
+type Stopper interface{ StopWork() }
+
 type Execution struct {
 	EngineSHA256 string
 	Generation   int64
 	Runner       AttemptRunner
 	Artifacts    ArtifactOpener     // nil until the coordinator opens its artifact store
 	References   ArtifactReferences // nil until the store resolves references by attempt
+	Owner        string             // The coordinator's owner account, the only one that may stop it.
+	Stopper      Stopper            // nil when there is no coordinator lifecycle to stop (tests).
 }
 
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
@@ -71,6 +90,7 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/tasks/{id}/ready", h.transition(store.Draft, store.Ready))
 	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
+	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
 	mux.HandleFunc("GET /v1/attempts/{id}/artifacts/{hash}", h.artifact)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +148,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "queue_full": "queue full", "forbidden": "forbidden"}[code]
 	if status == 500 {
 		writeInternalError(w, errors.New("unspecified internal error"))
 		return
@@ -165,6 +185,8 @@ func storeError(w http.ResponseWriter, err error) {
 		writeError(w, 503, "engine_unavailable")
 	case errors.Is(err, errEngineUnavailable):
 		writeError(w, 503, "engine_unavailable")
+	case errors.Is(err, errQueueFull):
+		writeError(w, 409, "queue_full")
 	default:
 		writeInternalError(w, err)
 	}
@@ -240,6 +262,9 @@ type taskJSON struct {
 	Revision  int64       `json:"revision"`
 	Created   string      `json:"created"`
 	Updated   string      `json:"updated"`
+	// QueuePosition is the task's 1-based place among the pending attempts of
+	// all users while it is queued; absent otherwise. Only GET reports it.
+	QueuePosition int `json:"queue_position,omitempty"`
 }
 
 type startedTaskJSON struct {
@@ -248,7 +273,7 @@ type startedTaskJSON struct {
 }
 
 func taskValue(t store.Task) taskJSON {
-	return taskJSON{t.ID, t.Project, t.CreatedBy, t.Objective, t.AcceptanceCriteria, t.State, t.Revision, t.Created, t.Updated}
+	return taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated}
 }
 
 type cachedResponse struct {
@@ -347,8 +372,19 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
+	value := taskValue(task)
+	if task.State == store.Preparing {
+		// Read after the task, so a position is never shown for a task that
+		// has already left preparing; one that launched meanwhile reads 0.
+		position, err := h.store.QueuePosition(r.Context(), task.ID)
+		if err != nil {
+			storeError(w, err)
+			return
+		}
+		value.QueuePosition = position
+	}
 	w.Header().Set("ETag", fmt.Sprintf("\"%d\"", task.Revision))
-	writeJSON(w, 200, taskValue(task))
+	writeJSON(w, 200, value)
 }
 
 func matchRevision(value string) (int64, error) {
@@ -362,69 +398,155 @@ func matchRevision(value string) (int64, error) {
 }
 
 // transition accepts a bare or quoted decimal If-Match revision; * is refused.
-func (h *handler) transition(from, to store.State, after ...func(string)) http.HandlerFunc {
+func (h *handler) transition(from, to store.State) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user, ok := h.actor(w, r)
-		if !ok {
-			return
-		}
-		k, ok := key(w, r)
-		if !ok {
-			return
-		}
-		match := r.Header.Get("If-Match")
-		revision, err := matchRevision(match)
-		if err != nil || match == "" || revision < 0 {
-			writeError(w, 400, "bad_request")
-			return
-		}
-		body, ok := readBody(w, r)
-		if !ok {
-			return
-		}
-		if len(body) != 0 {
-			writeError(w, 400, "bad_request")
-			return
-		}
-		id := r.PathValue("id")
-		project, err := h.store.TaskProject(r.Context(), user, id)
-		if err != nil {
-			storeError(w, err)
-			return
-		}
-		r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
-		ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
-			var current store.State
-			var currentRevision int64
-			if err := tx.QueryRowContext(r.Context(), "SELECT state,revision FROM tasks WHERE id=?", id).Scan(&current, &currentRevision); err != nil {
-				return 0, nil, err
-			}
-			if currentRevision != revision {
-				return 0, nil, store.ErrStaleRevision
-			}
+		h.taskMutation(w, r, func(ctx context.Context, tx *store.Tx, id string, current store.State, revision int64) error {
 			if current != from {
-				return 0, nil, store.ErrInvalidTransition
+				return store.ErrInvalidTransition
 			}
-			if err := tx.Transition(r.Context(), id, from, to, revision); err != nil {
-				return 0, nil, err
-			}
-			row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated FROM tasks WHERE id=?", id)
-			var task store.Task
-			err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
-			return 200, taskValue(task), err
+			return tx.Transition(ctx, id, from, to, revision)
 		})
-		if ok && len(after) != 0 && after[0] != nil {
-			after[0](id)
-		}
 	}
 }
 
-func (h *handler) cancel(w http.ResponseWriter, r *http.Request) {
-	h.transition(store.Running, store.CancelRequested, func(id string) {
-		if h.exec.Runner != nil {
-			h.exec.Runner.CancelTask(id)
+// taskMutation is the shared shape of an empty-bodied task mutation at an
+// If-Match revision: change runs in the idempotent transaction once the
+// revision matched, and the response is the task as it then is. It reports
+// whether change ran and committed, which a replay does not.
+func (h *handler) taskMutation(w http.ResponseWriter, r *http.Request, change func(context.Context, *store.Tx, string, store.State, int64) error) (string, bool) {
+	user, ok := h.actor(w, r)
+	if !ok {
+		return "", false
+	}
+	k, ok := key(w, r)
+	if !ok {
+		return "", false
+	}
+	match := r.Header.Get("If-Match")
+	revision, err := matchRevision(match)
+	if err != nil || match == "" || revision < 0 {
+		writeError(w, 400, "bad_request")
+		return "", false
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return "", false
+	}
+	if len(body) != 0 {
+		writeError(w, 400, "bad_request")
+		return "", false
+	}
+	id := r.PathValue("id")
+	project, err := h.store.TaskProject(r.Context(), user, id)
+	if err != nil {
+		storeError(w, err)
+		return "", false
+	}
+	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
+	changed := false
+	ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
+		var current store.State
+		var currentRevision int64
+		if err := tx.QueryRowContext(r.Context(), "SELECT state,revision FROM tasks WHERE id=?", id).Scan(&current, &currentRevision); err != nil {
+			return 0, nil, err
 		}
-	})(w, r)
+		if currentRevision != revision {
+			return 0, nil, store.ErrStaleRevision
+		}
+		if err := change(r.Context(), tx, id, current, revision); err != nil {
+			return 0, nil, err
+		}
+		changed = true
+		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated FROM tasks WHERE id=?", id)
+		var task store.Task
+		err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
+		return 200, taskValue(task), err
+	})
+	return id, ok && changed
+}
+
+// cancel ends a running task through the executor's cancel path, and
+// withdraws a queued one: its pending attempt and the task close as canceled
+// in one transaction, with no process started. A cancel that finds the attempt
+// already launching (the launch claim won the race on the attempt's row) is
+// handed to the executor and follows the running path once the engine
+// accepts, or ends failed or interrupted; the task is answered as it is.
+func (h *handler) cancel(w http.ResponseWriter, r *http.Request) {
+	notify := false
+	id, changed := h.taskMutation(w, r, func(ctx context.Context, tx *store.Tx, id string, current store.State, revision int64) error {
+		switch current {
+		case store.Running:
+			notify = true
+			return tx.Transition(ctx, id, store.Running, store.CancelRequested, revision)
+		case store.Preparing:
+			_, err := tx.CancelQueued(ctx, id, revision, "withdrawn by "+tx.UserID())
+			if errors.Is(err, store.ErrAttemptLaunched) {
+				notify = true
+				return nil
+			}
+			return err
+		default:
+			return store.ErrInvalidTransition
+		}
+	})
+	if changed && notify && h.exec.Runner != nil {
+		h.exec.Runner.CancelTask(id)
+	}
+}
+
+type stopJSON struct {
+	Running int    `json:"running"`
+	Queued  int    `json:"queued"`
+	Reason  string `json:"reason"`
+}
+
+// stop is "Quit Ada and stop work", for the coordinator's owner account alone:
+// a project owner is a member like any other here. In one idempotent
+// transaction every queued attempt is withdrawn and every running one gets
+// the reason on record; then the coordinator cancels the running attempts
+// and exits. The counts say how much work the stop ended.
+func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.actor(w, r)
+	if !ok {
+		return
+	}
+	if h.exec.Owner == "" || user != h.exec.Owner {
+		writeError(w, 403, "forbidden")
+		return
+	}
+	k, ok := key(w, r)
+	if !ok {
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	if len(body) != 0 {
+		writeError(w, 400, "bad_request")
+		return
+	}
+	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
+	ok = h.mutate(w, r, user, k, nil, "", func(tx *store.Tx) (int, any, error) {
+		if h.exec.Stopper == nil {
+			return 0, nil, errEngineUnavailable
+		}
+		var generation int64
+		if err := tx.QueryRowContext(r.Context(), "SELECT generation FROM coordinator WHERE id=1").Scan(&generation); err != nil {
+			return 0, nil, err
+		}
+		if generation != h.exec.Generation {
+			return 0, nil, store.ErrStaleOwnership
+		}
+		running, queued, err := tx.StopWork(r.Context(), h.exec.Generation, stopReason)
+		if err != nil {
+			return 0, nil, err
+		}
+		return 202, stopJSON{running, queued, stopReason}, nil
+	})
+	if ok && h.exec.Stopper != nil {
+		h.exec.Stopper.StopWork()
+	}
 }
 
 func (h *handler) start(w http.ResponseWriter, r *http.Request) {
@@ -486,6 +608,17 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		if current != store.Ready {
 			return 0, nil, store.ErrInvalidTransition
 		}
+		// The start queues when another attempt is launching or running: the
+		// executor launches pending attempts one at a time in creation order.
+		// The snapshot is revalidated at launch, not here; there is no
+		// snapshot before M3, so that hook lives with the launch.
+		queued, err := tx.QueuedAttempts(r.Context(), user)
+		if err != nil {
+			return 0, nil, err
+		}
+		if queued >= maxQueuedPerUser {
+			return 0, nil, errQueueFull
+		}
 		if err := tx.Transition(r.Context(), id, store.Ready, store.Preparing, revision); err != nil {
 			return 0, nil, err
 		}
@@ -499,7 +632,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		}
 		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated FROM tasks WHERE id=?", id)
 		var task store.Task
-		err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
+		err = row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
 		return 200, startedTaskJSON{taskValue(task), attemptID}, err
 	})
 	if ok && attemptID != "" && h.exec.Runner != nil {

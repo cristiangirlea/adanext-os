@@ -218,6 +218,10 @@ func TestReadyStartReplayAndRefusedCancelPreserveRevision(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("ready %d %s", code, ready)
 	}
+	code, invalid := f.request(t, "POST", "/v1/tasks/"+id+"/cancel", "cancel", "1", nil)
+	if code != 409 || !bytes.Contains(invalid, []byte("invalid_transition")) {
+		t.Fatalf("cancel %d %s", code, invalid)
+	}
 	policy := []byte(`{"backend":"codex","mode":"auto"}`)
 	code, started := f.request(t, "POST", "/v1/tasks/"+id+"/start", "start", "1", policy)
 	if code != 200 {
@@ -231,9 +235,10 @@ func TestReadyStartReplayAndRefusedCancelPreserveRevision(t *testing.T) {
 	if code != 409 || !bytes.Contains(stale, []byte("stale_revision")) {
 		t.Fatalf("stale %d %s", code, stale)
 	}
-	code, invalid := f.request(t, "POST", "/v1/tasks/"+id+"/cancel", "cancel", "2", nil)
-	if code != 409 || !bytes.Contains(invalid, []byte("invalid_transition")) {
-		t.Fatalf("cancel %d %s", code, invalid)
+	// A queued start is withdrawn by its cancel (decisions log, 2026-10-14, #9).
+	code, withdrawn := f.request(t, "POST", "/v1/tasks/"+id+"/cancel", "withdraw", "2", nil)
+	if code != 200 || !bytes.Contains(withdrawn, []byte(`"state":"canceled"`)) || !bytes.Contains(withdrawn, []byte(`"revision":3`)) {
+		t.Fatalf("withdraw %d %s", code, withdrawn)
 	}
 }
 

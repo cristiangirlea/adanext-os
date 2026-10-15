@@ -35,15 +35,16 @@ type Config struct {
 	Store                              *store.Store
 	Hub                                Notifier
 	Generation                         int64
+	Concurrency                        int // Attempts launched at once across all users; 0 is the plan's default of 1.
 	CancelGrace                        time.Duration
 	PreparingDeadline                  time.Duration
 	Env                                []string // Extra controlled environment entries for helper-process tests.
 }
 
 type active struct {
-	task   string
-	cancel chan struct{}
-	once   sync.Once
+	task, project string
+	cancel        chan struct{}
+	once          sync.Once
 }
 type Executor struct {
 	cfg            Config
@@ -62,6 +63,9 @@ func New(cfg Config) *Executor {
 	if cfg.PreparingDeadline <= 0 {
 		cfg.PreparingDeadline = 2 * time.Minute
 	}
+	if cfg.Concurrency <= 0 {
+		cfg.Concurrency = 1
+	}
 	return &Executor{cfg: cfg, active: make(map[string]*active)}
 }
 
@@ -72,29 +76,61 @@ func (e *Executor) StopBudget() time.Duration {
 	return 5*e.cfg.CancelGrace + 5*time.Second
 }
 
-func (e *Executor) LaunchAttempt(id string) {
-	a, err := e.cfg.Store.AttemptByID(context.Background(), id)
-	if err != nil || a.State != "pending" || a.OwnershipGeneration != e.cfg.Generation {
-		return
-	}
-	e.mu.Lock()
-	if e.stopped {
+// LaunchAttempt tells the executor a pending attempt was recorded. Pending
+// attempts are the queue: they launch one at a time (Config.Concurrency) in
+// order of creation across all users, so the id is a nudge, not a choice.
+func (e *Executor) LaunchAttempt(string) { e.schedule() }
+
+// schedule fills the free launch slots from the queue in creation order,
+// skipping a project with an attempt already active (one writer per
+// workspace). The launch claim in run, pending to launching under the
+// ownership generation, still decides a race with a cancel or another
+// coordinator; a candidate whose claim fails is simply dropped here.
+func (e *Executor) schedule() {
+	for {
+		// The queue is read without the lock: a run holds a store write
+		// transaction while it reads e.stopped, so the lock never waits on
+		// the store. What the read assumed is checked again before a launch.
+		e.mu.Lock()
+		if e.stopped || len(e.active) >= e.cfg.Concurrency {
+			e.mu.Unlock()
+			return
+		}
+		busy := e.busyProjects()
 		e.mu.Unlock()
-		return
-	}
-	if _, exists := e.active[id]; exists {
+		next, ok, err := e.cfg.Store.NextPendingAttempt(context.Background(), e.cfg.Generation, func(project string) bool { return busy[project] })
+		if err != nil || !ok {
+			return
+		}
+		e.mu.Lock()
+		if _, exists := e.active[next.ID]; exists || e.stopped || len(e.active) >= e.cfg.Concurrency || e.busyProjects()[next.Project] {
+			// Taken by a concurrent schedule, stopped, or a slot or the
+			// project filled meanwhile; the run that ends reschedules.
+			e.mu.Unlock()
+			return
+		}
+		run := &active{task: next.Task, project: next.Project, cancel: make(chan struct{})}
+		e.active[next.ID] = run
+		e.wg.Add(1)
 		e.mu.Unlock()
-		return
+		go func(a store.Attempt) {
+			defer e.wg.Done()
+			e.run(a, run)
+			e.mu.Lock()
+			delete(e.active, a.ID)
+			e.mu.Unlock()
+			e.schedule()
+		}(next.Attempt)
 	}
-	run := &active{task: a.Task, cancel: make(chan struct{})}
-	e.active[id] = run
-	e.wg.Add(1)
-	e.mu.Unlock()
-	go func() {
-		defer e.wg.Done()
-		defer func() { e.mu.Lock(); delete(e.active, id); e.mu.Unlock() }()
-		e.run(a, run)
-	}()
+}
+
+// busyProjects is called with e.mu held.
+func (e *Executor) busyProjects() map[string]bool {
+	busy := make(map[string]bool, len(e.active))
+	for _, a := range e.active {
+		busy[a.project] = true
+	}
+	return busy
 }
 
 func (e *Executor) CancelTask(taskID string) {
@@ -107,13 +143,20 @@ func (e *Executor) CancelTask(taskID string) {
 	}
 }
 
-func (e *Executor) Stop(ctx context.Context) error {
+// StopWork launches nothing more and asks every active attempt to cancel;
+// Stop also waits for them. The owner's stop records its reason on every
+// running and queued attempt first (store.Tx.StopWork), then calls this.
+func (e *Executor) StopWork() {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.stopped = true
 	for _, a := range e.active {
 		a.once.Do(func() { close(a.cancel) })
 	}
-	e.mu.Unlock()
+}
+
+func (e *Executor) Stop(ctx context.Context) error {
+	e.StopWork()
 	done := make(chan struct{})
 	go func() { e.wg.Wait(); close(done) }()
 	select {
