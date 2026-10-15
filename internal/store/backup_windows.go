@@ -7,9 +7,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// moveFileEx is the MoveFileEx call publishBackupNoReplace makes; tests
+// replace it to check the flags the publish passes.
+var moveFileEx = windows.MoveFileEx
+
 // publishBackupNoReplace moves the backup into place without replacing an
-// existing file. MOVEFILE_WRITE_THROUGH makes the rename durable before the
-// call returns, so a power cut cannot lose the name.
+// existing file. MOVEFILE_WRITE_THROUGH asks Windows to flush the rename to
+// disk before the call returns; that holds on NTFS and ReFS, while a
+// filesystem or driver that ignores the flag gives the rename only its own
+// durability.
 func publishBackupNoReplace(tmpPath, destPath string) error {
 	from, err := windows.UTF16PtrFromString(extendedPath(tmpPath))
 	if err != nil {
@@ -19,7 +25,7 @@ func publishBackupNoReplace(tmpPath, destPath string) error {
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
+	return moveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
 }
 
 // extendedPath adds the \\?\ prefix that the os package adds to absolute paths

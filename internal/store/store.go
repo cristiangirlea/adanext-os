@@ -405,8 +405,7 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 // not a file: URI, and must not already exist. An error wrapping
 // ErrPublishedWithWarning means the backup is complete at destPath although a
 // step after publishing it failed; a retry would report an existing
-// destination. Before writing, Backup sweeps temporary backups in the
-// destination's directory that an earlier crash left behind.
+// destination.
 func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	if strings.HasPrefix(strings.ToLower(destPath), "file:") || !filepath.IsAbs(destPath) {
 		return errors.New("backup destination must be an absolute filesystem path, not a file: URI")
@@ -426,7 +425,6 @@ func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 			err = errors.Join(err, fmt.Errorf("remove backup temporary file: %w", removeErr))
 		}
 	}()
-	sweepStaleBackupTemps(filepath.Dir(destPath), tmpPath, time.Now())
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close backup temporary file: %w", err)
 	}

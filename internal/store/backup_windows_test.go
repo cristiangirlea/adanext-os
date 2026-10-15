@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestExtendedPathPrefixesOnlyLongPaths(t *testing.T) {
@@ -43,4 +45,28 @@ func TestBackupPublishesToAPathLongerThanMaxPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoBackupTemps(t, dir)
+}
+
+func TestWindowsPublishWritesThroughAndNeverReplaces(t *testing.T) {
+	var flags uint32
+	called := false
+	original := moveFileEx
+	moveFileEx = func(from, to *uint16, f uint32) error {
+		called = true
+		flags = f
+		return nil
+	}
+	defer func() { moveFileEx = original }()
+	if err := publishBackupNoReplace(`C:\backups\.adanext-backup-1.tmp`, `C:\backups\backup.sqlite`); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("MoveFileEx was not called")
+	}
+	if flags&windows.MOVEFILE_WRITE_THROUGH == 0 {
+		t.Errorf("publish flags %#x lack MOVEFILE_WRITE_THROUGH", flags)
+	}
+	if flags&windows.MOVEFILE_REPLACE_EXISTING != 0 {
+		t.Errorf("publish flags %#x allow replacing the destination", flags)
+	}
 }

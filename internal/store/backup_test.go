@@ -8,7 +8,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func assertNoBackupTemps(t *testing.T, dir string) {
@@ -291,40 +290,5 @@ func TestAFailureAfterPublishingReportsACompleteBackup(t *testing.T) {
 				t.Fatalf("backup tasks: %d, %v", tasks, err)
 			}
 		})
-	}
-}
-
-func TestBackupSweepsStaleTemporaryFilesAndKeepsFreshOnes(t *testing.T) {
-	s := openTestStore(t)
-	seed(t, s)
-	dir := t.TempDir()
-	stale := filepath.Join(dir, ".adanext-backup-stale.tmp")
-	fresh := filepath.Join(dir, ".adanext-backup-fresh.tmp")
-	staleDir := filepath.Join(dir, ".adanext-backup-dir.tmp")
-	for _, path := range []string{stale, fresh} {
-		if err := os.WriteFile(path, []byte("leftover"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Mkdir(staleDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-2 * time.Hour)
-	for _, path := range []string{stale, staleDir} {
-		if err := os.Chtimes(path, old, old); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := s.Backup(ctx, filepath.Join(dir, "backup.sqlite")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(stale); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("stale temporary backup was not swept: %v", err)
-	}
-	if _, err := os.Lstat(fresh); err != nil {
-		t.Errorf("fresh temporary backup was swept: %v", err)
-	}
-	if _, err := os.Lstat(staleDir); err != nil {
-		t.Errorf("directory with a temporary backup name was swept: %v", err)
 	}
 }

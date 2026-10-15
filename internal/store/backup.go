@@ -3,10 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"syscall"
-	"time"
 )
 
 var (
@@ -22,12 +19,8 @@ var (
 )
 
 // backupTempPattern names the temporary files a backup is written to before
-// it is published. It must stay a filepath.Match pattern.
+// it is published.
 const backupTempPattern = ".adanext-backup-*.tmp"
-
-// staleBackupTempAge is how old a temporary backup must be before a later
-// backup treats it as left behind by a crash.
-const staleBackupTempAge = time.Hour
 
 // publishNoReplace publishes tmpPath at destPath without replacing an existing
 // file: by hard link, falling back to a no-replace rename where the filesystem
@@ -59,27 +52,4 @@ func hardLinksUnsupported(err error) bool {
 // before Linux 3.15, ENOTSUP on macOS).
 func noReplaceRenameUnsupported(err error) bool {
 	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
-}
-
-// sweepStaleBackupTemps removes the temporary backups in dir that a crash left
-// behind, each a full copy of the database: regular files matching
-// backupTempPattern, older than staleBackupTempAge, and never keep, the one
-// being written. It is best effort: a leftover it cannot remove waits for the
-// next backup.
-func sweepStaleBackupTemps(dir, keep string, now time.Time) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if match, _ := filepath.Match(backupTempPattern, name); !match || name == filepath.Base(keep) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) < staleBackupTempAge {
-			continue
-		}
-		_ = os.Remove(filepath.Join(dir, name))
-	}
 }
