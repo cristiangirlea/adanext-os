@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
@@ -6,7 +7,7 @@ import net from "node:net";
 import { promisify } from "node:util";
 
 // The main process's HTTP client for adad over the per-user named pipe or Unix socket: Node's
-// http with socketPath. It forwards; authorization is adad's (decisions log, 2026-10-14, #5).
+// http with an authenticated connection. Authorization remains adad's (decisions log, 2026-10-14, #5).
 
 export class Refusal extends Error {
   constructor(
@@ -48,6 +49,68 @@ export interface Call {
 
 const requestTimeoutMs = 30_000;
 const responseLimit = 1 << 20;
+const endpointStates = new Map<string, string>();
+
+// Main-process configuration only; no renderer-supplied state paths or keys.
+export function bindEndpoint(socketPath: string, stateDir: string): string {
+  endpointStates.set(socketPath, stateDir);
+  return socketPath;
+}
+
+export class EndpointAuthenticationError extends Error {
+  readonly code = "endpoint_authentication_failed";
+  constructor() { super("endpoint authentication failed"); }
+}
+
+// No socket is returned to http until the proof has been checked. Returning the
+// connecting socket here would let Node flush buffered request headers early.
+export function endpointConnection(socketPath: string, timeoutMs = 5000): NonNullable<http.RequestOptions["createConnection"]> {
+  return (_options, callback) => {
+    const socket = net.createConnection(socketPath);
+    let connected = false;
+    let settled = false;
+    let proof = Buffer.alloc(0);
+    const nonce = randomBytes(32);
+    const timer = setTimeout(() => finish(new EndpointAuthenticationError()), Math.min(5000, timeoutMs));
+    const fail = (error: Error) => finish(connected ? new EndpointAuthenticationError() : error);
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.removeListener("error", fail);
+      socket.removeListener("data", receive);
+      socket.removeListener("end", ended);
+      if (error) { socket.destroy(); callback(error, socket); }
+      else { callback(null, socket); }
+    };
+    const ended = () => finish(new EndpointAuthenticationError());
+    let key: Buffer;
+    const receive = (chunk: Buffer) => {
+      proof = Buffer.concat([proof, chunk]);
+      if (proof.length > 65) { finish(new EndpointAuthenticationError()); return; }
+      if (!proof.includes(10)) return;
+      if (!/^[a-f0-9]{64}\n$/.test(proof.toString("utf8"))) { finish(new EndpointAuthenticationError()); return; }
+      const expected = createHmac("sha256", key).update("adanext-endpoint-v1").update(nonce).digest();
+      if (!timingSafeEqual(Buffer.from(proof.subarray(0, 64).toString(), "hex"), expected)) { finish(new EndpointAuthenticationError()); return; }
+      finish();
+    };
+    socket.on("error", fail);
+    socket.once("end", ended);
+    socket.once("connect", () => {
+      connected = true;
+      const dir = endpointStates.get(socketPath);
+      if (!dir) { finish(new EndpointAuthenticationError()); return; }
+      void readFile(path.join(dir, "adad.token")).then((value) => {
+        if (settled) return;
+        if (value.length !== 32) { finish(new EndpointAuthenticationError()); return; }
+        key = value;
+        socket.on("data", receive);
+        socket.write(`ADANEXT1 ${nonce.toString("hex")}\n`);
+      }, () => finish(new EndpointAuthenticationError()));
+    });
+    return undefined;
+  };
+}
 // GET /v1/tasks is not paginated: the listing may hold every task of the user, so it is read
 // with its own, larger limit.
 export const listingLimit = 64 << 20;
@@ -141,7 +204,7 @@ export function call(socketPath: string, request: Call): Promise<unknown> {
     }
     if (request.revision !== undefined) headers["If-Match"] = `"${request.revision}"`;
     if (request.idempotent) headers["Idempotency-Key"] = randomUUID();
-    const req = http.request({ socketPath, method: request.method, path: request.path, headers }, (res) => {
+    const req = http.request({ createConnection: endpointConnection(socketPath, request.timeoutMs), method: request.method, path: request.path, headers }, (res) => {
       const status = res.statusCode ?? 0;
       const ok = status >= 200 && status < 300;
       readJSON(res, request.limit ?? responseLimit).then(
@@ -205,9 +268,9 @@ export function endpoint(config: CoordinatorConfig, platform = process.platform,
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(config.name)) throw new Error("invalid coordinator endpoint name");
   if (platform === "win32") {
     if (!sid || !/^S-1-\d+(?:-\d+)+$/.test(sid)) throw new Error("a user SID is required");
-    return `\\\\.\\pipe\\adanext-${config.name}-${sid}`;
+    return bindEndpoint(`\\\\.\\pipe\\adanext-${config.name}-${sid}`, config.stateDir);
   }
-  return path.posix.join(config.stateDir, "run", `${config.name}.sock`);
+  return bindEndpoint(path.posix.join(config.stateDir, "run", `${config.name}.sock`), config.stateDir);
 }
 
 export const detachedOptions = { detached: true, stdio: "ignore", windowsHide: true } as const;
@@ -255,6 +318,7 @@ export interface LifecycleIO {
 const lifecycleIO: LifecycleIO = { probe: probeCoordinator, spawn: spawnCoordinator, now: Date.now, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
 
 export async function findOrStart(config: CoordinatorConfig, socketPath: string, io = lifecycleIO, timeoutMs = 15_000): Promise<void> {
+  bindEndpoint(socketPath, config.stateDir);
   const deadline = io.now() + timeoutMs;
   if (await io.probe(socketPath, Math.min(500, timeoutMs))) return;
   await io.spawn(config.binary, config.args);
@@ -265,7 +329,7 @@ export async function findOrStart(config: CoordinatorConfig, socketPath: string,
   throw new Error("timed out waiting for adad to start");
 }
 
-export async function waitForExit(socketPath: string, io: LifecycleIO = { ...lifecycleIO, probe: endpointPresent }, timeoutMs = 30_000): Promise<void> {
+export async function waitForExit(socketPath: string, io: LifecycleIO = { ...lifecycleIO, probe: endpointPresent }, timeoutMs = 70_000): Promise<void> {
   const deadline = io.now() + timeoutMs;
   while (io.now() < deadline) {
     if (!await io.probe(socketPath, Math.min(500, deadline - io.now()))) return;

@@ -22,6 +22,7 @@ suffix=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) suffix=".exe";; esac
 go build -o "$build/adad$suffix" ./cmd/adad
 go build -tags=fakeengine -o "$build/fakeengine$suffix" ./internal/executor/testdata/fakeengine
+go build -tags=fakeengine -o "$build/slowengine$suffix" ./desktop/e2e/slowengine
 go build -tags=fakeengine -o "$build/testseed$suffix" ./internal/store/testseed
 if [ -n "$suffix" ]; then
   export ADANEXT_E2E_BIN

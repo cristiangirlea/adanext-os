@@ -176,14 +176,25 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	stop := &coordinatorStop{requested: make(chan struct{})}
 	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Owner: ownerAccount, Stopper: stop}
 	var local *executor.Executor
+	var stopOnce sync.Once
+	var stopErr error
+	stopExecutor := func() error {
+		stopOnce.Do(func() {
+			if local == nil {
+				return
+			}
+			stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
+			defer cancel()
+			stopErr = local.Stop(stopCtx)
+		})
+		return stopErr
+	}
 	if *enginePath != "" && *engineHash != "" {
 		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: *concurrency})
 		stop.local = local
 		execution.EngineSHA256, execution.Runner = *engineHash, local
 		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
-			defer cancel()
-			if err := local.Stop(stopCtx); err != nil {
+			if err := stopExecutor(); err != nil {
 				fmt.Fprintln(stderr, "adad: stop executor:", err)
 			}
 		}()
@@ -211,6 +222,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	case <-stopping:
+		// Keep the endpoint alive until cancellation and process-tree shutdown
+		// finish. Its disappearance is the desktop's proof that work stopped.
+		if err := stopExecutor(); err != nil {
+			fmt.Fprintln(stderr, "adad: stop executor:", err)
+			return 1
+		}
 		// Open streams first deliver what the stop committed, within the write
 		// deadline, before the shutdown closes the hub under them.
 		hub.Drain()
@@ -225,13 +242,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	if local != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
-		defer cancel()
-		if err := local.Stop(stopCtx); err != nil {
-			fmt.Fprintln(stderr, "adad: stop executor:", err)
-			return 1
-		}
+	if err := stopExecutor(); err != nil {
+		fmt.Fprintln(stderr, "adad: stop executor:", err)
+		return 1
 	}
 	return 0
 }

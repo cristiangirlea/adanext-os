@@ -108,7 +108,15 @@ func (l *Lock) Listen() (net.Listener, error) {
 	if l.file == nil {
 		return nil, errors.New("ipc: coordinator lock is not held")
 	}
-	return listen(l.cfg)
+	key, err := newEndpointToken(l.cfg.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	listener, err := listen(l.cfg)
+	if err != nil {
+		return nil, err
+	}
+	return authenticateListener(listener, key), nil
 }
 
 // Release gives up the OS lock, leaving the record for stale recovery.

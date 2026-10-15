@@ -273,7 +273,89 @@ The self-review found no open security issue in the changed bridge, sender valid
 renderer isolation, detachment argument handling or test-only build boundary. It is not
 an independent review, and the unresolved repeated Windows executor failures remain open.
 
+### M2.4c review fix round (2026-10-16, #76)
+
+Uncommitted fixes over `16c77bd2e6e4970241dc532ad453dc461d48ddb0` on `m2/window`.
+The supervisor owns the single commit, renewed independent review and hosted CI; the milestone
+and backlog remain unchanged. Executor source and tests are unchanged.
+
+The endpoint now proves possession of a fresh 32-byte `<state>/adad.token` on every Go and
+Node HTTP/SSE connection, before HTTP bytes are sent. The token is atomically replaced under
+the singleton lock, 0600 on Unix and created with the pipe's protected owner-only SDDL on
+Windows (descriptor read back in a native test). The bounded `ADANEXT1` nonce/HMAC exchange
+retains Go's SID/UID checks and fails closed without spawning. Handshakes have an absolute
+five-second deadline and a cap of 64 pending connections; closing the listener closes them.
+
+Owner stop and signals now wait for the executor's `StopBudget` before draining streams and
+shutting HTTP down. Executor stop runs once, including error cleanup. Electron waits up to
+70 seconds (the default 55-second executor budget plus 15 seconds), showing native
+indeterminate progress and a waiting title. Its existing reason/counts remain visible.
+
+New coverage: Go wrong-token refusal, malformed/silent clients, HTTP after authentication,
+token rotation and token permissions; real Node wrong-key and malformed-proof peers,
+fresh nonces, no HTTP payload/no spawn, silent/trickling handshake and HTTP deadlines;
+same-project task/attempt reads, unrelated newer attempts and removal of membership.
+Playwright adds synchronized real cold starts and a test-only engine shim that delays
+cancellation four seconds, writes its PID/creation-time exit marker, and must be gone
+before Electron exits. The shim lives under `desktop/e2e/`, behind `fakeengine`; no executor
+file was changed.
+
+Final checks on the uncommitted fixes above, `GOFLAGS=-p=4` on Windows:
+
+| Command | Result |
+|---|---|
+| `& 'C:/Program Files/Git/bin/bash.exe' .hrn/check.sh` | Pass, exit 0: vet, module tidy/verify, build, all Go tests, rules/hooks, clean lockfile installs, both typechecks/builds, 24 UI tests, 43 desktop tests and **7 Playwright scenarios (40.9s)**. `.hrn/fix-round-check.log` and `.exit`. Windows race detection and two chmod-only hook tests skip as before. |
+| `& 'C:/Program Files/Git/bin/bash.exe' .hrn/linux-test.sh` | Pass, exit 0: requested non-root, read-only `golang:1.26` Docker invocation; `go vet ./...`, `go test -count=1 ./...`, `go test -race -count=1 ./...`, all seven packages. `.hrn/fix-round-linux.log` and `.exit`. |
+| `go test -count=3 ./internal/ipc ./cmd/adad ./internal/api` | Pass, exit 0; 60.863s / 13.232s / 33.195s respectively. `.hrn/fix-round-repeat.log` and `.exit`. |
+| `git diff --check` | Pass on the uncommitted changes, in addition to the wrapper's committed-range check. |
+
+Named new Go regressions, all passing: `TestDialRefusesAnEndpointWithTheWrongToken`,
+`TestListenerClosesMalformedAndSilentClientsBeforeHTTP`, `TestHTTPWorksAfterEndpointAuthentication`,
+`TestEndpointTokenIsPrivateAndReplacedOnRestart`,
+`TestTokenDescriptorGrantsOnlyTheOwnerWithoutInheritedACEs` (Windows), and
+`TestTaskAttemptsStayScopedToTheTaskAndCurrentMembership`.
+The existing `TestTaskReadsIncludeTheCurrentAttemptAndQueuePosition` also passes.
+New Vitest cases in `desktop/src/endpoint.test.ts` cover the real wrong-key server (including SSE),
+non-ASCII proof bytes and four absolute deadline cases (`silent`, `trickle`, `http-silent`,
+`http-trickle`), all passing. The new lifecycle case verifies the default 70-second bound.
+Wrong-key Node behavior failed before the transport change; the non-ASCII proof test first
+exposed an uncaught constant-time-comparison length error, then passed after strict UTF-8
+validation. The new Go boundary tests first failed to compile before the raw/authenticated dial
+split. The delayed engine fixture initially failed to start because it used environment variables
+not passed to the engine; its per-fixture sidecar now supplies its test-only configuration.
+An absent-process PowerShell assertion was corrected to exit successfully when the process is gone.
+
+Playwright, all passing: window close/reopen with continuing events; running/queued Quit and
+persisted reason; a second app/menu Quit without restart; **synchronized cold starts both connect
+to exactly one real coordinator**; **Quit keeps Electron and the endpoint alive until the delayed
+engine exits** (exit marker read at Electron's process exit, plus OS PID/creation-time comparison);
+queue-full/withdrawal; and coordinator restart during a 900-event replay without gaps/duplicates.
+
+The first Linux run was superseded after a generated root Vitest cache was moved while Go was
+enumerating the checkout (`pattern ./...: open node_modules: no such file or directory`);
+the fresh stable-tree run above passed all gates. No check was skipped to obtain a pass.
+Not verified here: Linux Playwright, hosted Windows/Linux CI, packaged installation or a renewed
+independent review. The security read of these fixes has no open finding; it is not independent.
+No live model calls ran, and no commit, push, merge, tag or release was made.
+
+Windows executor comparison, both with `GOFLAGS=-p=4`, `go test -count=3 ./internal/executor/`:
+`origin/main` at `5e03a281ef5d747472bbaa15876c529ea54892cc` passed (180.092s) in
+`.hrn/executor-baseline`, then that detached temporary worktree was removed. This branch at
+`16c77bd` plus the uncommitted fixes passed (175.797s). This observation does not establish
+that the intermittent failures recorded above have been fixed.
+
 ## Decisions log
+
+- **2026-10-16, #76 review fixes: endpoint proof and shutdown order.** A predictable per-user
+  pipe name plus Node transport is not server authentication: another account can squat on
+  the name. Require `ADANEXT1 <32-byte nonce in hex>\n`, answered with hex
+  HMAC-SHA256(token, `adanext-endpoint-v1` followed by the nonce bytes), on every local
+  connection before HTTP. The token never crosses the bridge or appears in logs. Rotate it
+  only under the coordinator lock; Windows uses an explicit owner-only DACL rather than
+  relying on inherited state-directory ACLs. Endpoint disappearance must follow executor stop,
+  for both owner requests and signals, so Electron's bounded Quit wait observes real work
+  termination rather than early listener closure. This amends shutdown ordering described in
+  M2.4a below without changing executor policy, the database or the engine pin.
 
 - **2026-10-16, M2.4c window lifetime (#75, folding in #69).** Task reads join the
   newest attempt (insertion order, including terminal attempts) and its global queue position

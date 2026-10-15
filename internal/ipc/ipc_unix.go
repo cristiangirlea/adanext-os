@@ -147,7 +147,7 @@ func validateSocketPath(path string) error {
 }
 
 // Dial checks the socket directory and server UID before returning a connection.
-func Dial(ctx context.Context, cfg Config) (net.Conn, error) {
+func dial(ctx context.Context, cfg Config) (net.Conn, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}

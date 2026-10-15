@@ -56,6 +56,16 @@ describe("coordinator lifecycle", () => {
     expect(() => endpoint({ ...config, name: "../other" }, "linux")).toThrow();
     expect(() => endpoint(config, "win32")).toThrow();
   });
+  it("allows the default executor stop budget plus fifteen seconds and bounds a stuck endpoint", async () => {
+    const draining = io([]);
+    draining.probe = async () => draining.now() < 65_000;
+    await waitForExit("/pipe", draining);
+    expect(draining.now()).toBe(65_000);
+    const stuck = io([]);
+    stuck.probe = async () => true;
+    await expect(waitForExit("/pipe", stuck)).rejects.toThrow("timed out waiting for adad to stop");
+    expect(stuck.now()).toBe(70_000);
+  });
   it("uses the user state directory and passes through only configured engine flags", () => {
     const env = { LOCALAPPDATA: "C:\\Users\\owner\\AppData\\Local", ADANEXT_ADAD: "C:\\app\\adad.exe", ADANEXT_ENGINE: "C:\\app\\hrn.exe", ADANEXT_ENGINE_SHA256: "a".repeat(64) };
     const c = coordinatorConfig(env, "C:\\app", "C:\\Users\\owner", "win32");

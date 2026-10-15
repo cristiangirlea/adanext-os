@@ -317,7 +317,7 @@ func TestCloseRemovesItsSocketWhileTheListenerIsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := listener.(*ownerListener)
+	owner := listener.(*authenticatedListener).Listener.(*ownerListener)
 	defer owner.Close()
 	owner.removePath = func(path string) error {
 		raw, err := owner.UnixListener.SyscallConn()
