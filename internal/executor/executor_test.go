@@ -53,6 +53,19 @@ func TestHelperFakeEngine(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
+	if script == "grandchild_slow_stream" {
+		identity, _ := processIdentity(os.Getpid())
+		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
+		f.Close()
+		// A line at a time, each well inside a grace period, so neither the byte
+		// budget nor a single blocked read ends the attempt.
+		interval, _ := time.ParseDuration(os.Getenv("ADA_FAKE_INTERVAL"))
+		for {
+			time.Sleep(interval)
+			fmt.Println("x")
+		}
+	}
 	if script == "backend_group" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
 		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
@@ -117,6 +130,11 @@ func TestHelperFakeEngine(t *testing.T) {
 		backend["options"] = []string{"mode", "model"}
 	}
 	line(1, "hello", hello)
+	if script == "hello_no_read" {
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	var input struct {
 		Type      string `json:"type"`
 		AttemptID string `json:"attempt_id"`
@@ -248,11 +266,14 @@ func TestHelperFakeEngine(t *testing.T) {
 			os.Exit(3)
 		}
 	}
-	if script == "stream_after_exit" || script == "grandchild_after_result" || script == "nested_tree" {
+	if script == "stream_after_exit" || script == "slow_stream_after_exit" || script == "grandchild_after_result" || script == "nested_tree" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
 		childScript := "grandchild_hold"
 		if script == "stream_after_exit" {
 			childScript = "grandchild_stream"
+		}
+		if script == "slow_stream_after_exit" {
+			childScript = "grandchild_slow_stream"
 		}
 		if script == "nested_tree" {
 			childScript = "backend_group"
@@ -289,7 +310,7 @@ func TestHelperFakeEngine(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		if script == "stream_after_exit" {
+		if script == "stream_after_exit" || script == "slow_stream_after_exit" {
 			os.Exit(0)
 		}
 	}

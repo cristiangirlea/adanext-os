@@ -437,7 +437,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		Effort  string `json:"effort"`
 		Mode    string `json:"mode"`
 	}
-	if err := decode(body, &input); err != nil || !validBackend(input.Backend) || !printableASCII(input.Model) || !printableASCII(input.Effort) || (input.Mode != "readonly" && input.Mode != "auto" && input.Mode != "yolo") {
+	if err := decode(body, &input); err != nil || !validBackend(input.Backend) || !validModel(input.Model) || !printableASCII(input.Effort) || (input.Mode != "readonly" && input.Mode != "auto" && input.Mode != "yolo") {
 		writeError(w, 400, "bad_request")
 		return
 	}
@@ -507,6 +507,29 @@ func validBackend(value string) bool {
 		}
 	}
 	return true
+}
+
+// validModel accepts an empty model or one that is safe as an argument on the
+// way to the backend CLI: ^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$. Harness
+// passes the model into the CLI's argv, and on Windows that CLI is an npm
+// .cmd shim run through cmd.exe, whose quoting leaves `&`, `|`, `^`, `%VAR%`
+// and `"` live; the leading alphanumeric also rules out an option.
+func validModel(value string) bool {
+	if len(value) > 128 || (len(value) != 0 && !alphanumeric(value[0])) {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		switch c := value[i]; {
+		case alphanumeric(c), c == '.', c == '_', c == ':', c == '/', c == '@', c == '+', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func alphanumeric(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
 func printableASCII(value string) bool {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,6 +134,31 @@ func TestStartRejectsInvalidBackendModelAndEffort(t *testing.T) {
 	}
 	if code, response := f.request(t, "POST", path, "valid", "1", []byte(`{"backend":"a_0-","model":"`+strings.Repeat("m", 128)+`","effort":"","mode":"auto"}`)); code != 200 {
 		t.Fatalf("valid body = %d %s", code, response)
+	}
+}
+
+func TestStartRefusesModelsThatAShellCouldInterpret(t *testing.T) {
+	f := newFixture(t, Execution{EngineSHA256: strings.Repeat("a", 64), Runner: noopRunner{}})
+	id := create(t, f, "shell-model-create", "work")["id"].(string)
+	if code, _ := f.request(t, "POST", "/v1/tasks/"+id+"/ready", "shell-model-ready", "0", nil); code != 200 {
+		t.Fatal(code)
+	}
+	path := "/v1/tasks/" + id + "/start"
+	for i, model := range []string{"x&calc", "%PATH%", `a\"b`, "a b", "-m"} {
+		body := []byte(`{"backend":"codex","model":"` + model + `","mode":"auto"}`)
+		if code, response := f.request(t, "POST", path, fmt.Sprintf("shell-model-%d", i), "1", body); code != 400 || !bytes.Contains(response, []byte("bad_request")) {
+			t.Fatalf("model %q = %d %s", model, code, response)
+		}
+	}
+	for i, model := range []string{"claude-opus-5-5", "gpt-6.1-sol"} {
+		id := create(t, f, fmt.Sprintf("plain-model-create-%d", i), "work")["id"].(string)
+		if code, _ := f.request(t, "POST", "/v1/tasks/"+id+"/ready", fmt.Sprintf("plain-model-ready-%d", i), "0", nil); code != 200 {
+			t.Fatal(code)
+		}
+		body := []byte(`{"backend":"codex","model":"` + model + `","mode":"auto"}`)
+		if code, response := f.request(t, "POST", "/v1/tasks/"+id+"/start", fmt.Sprintf("plain-model-start-%d", i), "1", body); code != 200 {
+			t.Fatalf("model %q = %d %s", model, code, response)
+		}
 	}
 }
 

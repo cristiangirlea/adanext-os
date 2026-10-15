@@ -46,14 +46,13 @@ type active struct {
 	once   sync.Once
 }
 type Executor struct {
-	cfg             Config
-	mu              sync.Mutex
-	active          map[string]*active
-	stopped         bool
-	wg              sync.WaitGroup
-	beforeAccepted  func(*time.Timer, *atomic.Bool)   // Test seam for the preparing deadline race.
-	afterAppend     func()                            // Set only by tests to simulate slow event storage.
-	beforeIdleCheck func(*atomic.Int64, *atomic.Bool) // Set only by tests to order a read against the idle check.
+	cfg            Config
+	mu             sync.Mutex
+	active         map[string]*active
+	stopped        bool
+	wg             sync.WaitGroup
+	beforeAccepted func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
+	afterAppend    func()                          // Set only by tests to simulate slow event storage.
 }
 
 func New(cfg Config) *Executor {
@@ -66,7 +65,9 @@ func New(cfg Config) *Executor {
 	return &Executor{cfg: cfg, active: make(map[string]*active)}
 }
 
-// StopBudget includes the shutdown timers, stderr WaitDelay, stdout idle check, and state persistence.
+// StopBudget covers an ignored cancel (stdin closed after one CancelGrace, the
+// engine killed after two), the stderr WaitDelay, two post-exit checks of a
+// descendant holding stdout, and state persistence.
 func (e *Executor) StopBudget() time.Duration {
 	return 5*e.cfg.CancelGrace + 5*time.Second
 }
@@ -150,6 +151,59 @@ type message struct {
 		Status string `json:"status"`
 		Final  string `json:"final"`
 	} `json:"result"`
+}
+
+// readState is what the post-exit check knows about the stdout reader. Once
+// the engine has exited, everything it wrote is already in the pipe, so a read
+// that blocks is waiting on a descendant that inherited stdout; time the reader
+// spends storing events between reads is not counted.
+type readState struct {
+	mu      sync.Mutex
+	start   time.Time     // The read in progress; zero between reads.
+	exit    time.Time     // When the engine's exit was observed; zero before.
+	bytes   int64         // Bytes read since exit.
+	blocked time.Duration // Time ended reads spent blocked since exit.
+}
+
+func (r *readState) begin() {
+	r.mu.Lock()
+	r.start = time.Now()
+	r.mu.Unlock()
+}
+
+func (r *readState) end(n int) {
+	r.mu.Lock()
+	if !r.exit.IsZero() {
+		r.bytes += int64(n)
+		r.blocked += r.inProgressSinceExit(time.Now())
+	}
+	r.start = time.Time{}
+	r.mu.Unlock()
+}
+
+func (r *readState) exited(now time.Time) {
+	r.mu.Lock()
+	r.exit = now
+	r.mu.Unlock()
+}
+
+// afterExit returns the bytes read and the time spent blocked in reads since
+// the engine exited, the read in progress included.
+func (r *readState) afterExit() (int64, time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bytes, r.blocked + r.inProgressSinceExit(time.Now())
+}
+
+func (r *readState) inProgressSinceExit(now time.Time) time.Duration {
+	if r.start.IsZero() || r.exit.IsZero() {
+		return 0
+	}
+	from := r.start
+	if r.exit.After(from) {
+		from = r.exit
+	}
+	return now.Sub(from)
 }
 
 func contains(items []string, value string) bool {
@@ -286,10 +340,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			_ = stdout.Close()
 		}
 	}
-	var readProgress, readBytes atomic.Int64
-	var reading atomic.Bool
+	var rs readState
 	var timerMu sync.Mutex
-	var closeTimer, killTimer, idleTimer, exitTimer *time.Timer
+	var closeTimer, killTimer, exitTimer *time.Timer
 	shutdownStarted := false
 	shutdownStopped := false
 	startShutdown := func() {
@@ -312,61 +365,41 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		if killTimer != nil {
 			killTimer.Stop()
 		}
-		if idleTimer != nil {
-			idleTimer.Stop()
-		}
 		if exitTimer != nil {
 			exitTimer.Stop()
 		}
 	}
-	var checkIdle func(int64)
-	checkIdle = func(last int64) {
+	// Once the engine has exited, only a descendant that inherited stdout can
+	// keep the reader busy. Close stdout when more than 1 MiB arrives after exit
+	// (a streaming descendant: the pipe plus the bufio buffer hold less of the
+	// engine's own output) or when reads have spent a whole CancelGrace blocked
+	// since exit, in one read or across many (a silent or a slowly writing
+	// descendant). Only blocked time counts, so slow storage still consumes
+	// everything the engine wrote before it exited.
+	var checkAfterExit func()
+	checkAfterExit = func() {
 		timerMu.Lock()
 		defer timerMu.Unlock()
 		if shutdownStopped {
 			return
 		}
-		if e.beforeIdleCheck != nil {
-			e.beforeIdleCheck(&readProgress, &reading)
-		}
-		inRead := reading.Load()
-		current := readProgress.Load()
-		// A read announces its start before setting reading, so an unchanged
-		// counter here means this same read was already active at the last check.
-		if inRead && current == last {
-			// The engine is gone and the reader is blocked on a descendant's pipe.
+		n, blocked := rs.afterExit()
+		if n > 1<<20 || blocked >= e.cfg.CancelGrace {
 			_ = stdout.Close()
 			return
 		}
-		idleTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkIdle(current) })
-	}
-	// Bound descendant output, while allowing slow storage to consume all bytes
-	// written before exit (the pipe plus bufio buffer hold less than 1 MiB).
-	var checkExitBudget func(int64)
-	checkExitBudget = func(atExit int64) {
-		timerMu.Lock()
-		defer timerMu.Unlock()
-		if shutdownStopped {
-			return
-		}
-		if readBytes.Load()-atExit > 1<<20 {
-			_ = stdout.Close()
-			return
-		}
-		exitTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkExitBudget(atExit) })
+		exitTimer = time.AfterFunc(e.cfg.CancelGrace, checkAfterExit)
 	}
 	go func() {
 		err := cmd.Wait()
-		atExit := readBytes.Load()
+		rs.exited(time.Now())
 		processMu.Lock()
 		exitErr, exited = err, true
 		processMu.Unlock()
 		startShutdown()
 		timerMu.Lock()
 		if !shutdownStopped {
-			last := readProgress.Load()
-			idleTimer = time.AfterFunc(e.cfg.CancelGrace, func() { checkIdle(last) })
-			exitTimer = time.AfterFunc(2*e.cfg.CancelGrace, func() { checkExitBudget(atExit) })
+			exitTimer = time.AfterFunc(e.cfg.CancelGrace, checkAfterExit)
 		}
 		timerMu.Unlock()
 		close(processDone)
@@ -421,14 +454,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	read := func() (message, []byte, error) {
 		var line []byte
 		for {
-			readProgress.Add(1)
-			reading.Store(true)
+			rs.begin()
 			part, err := reader.ReadSlice('\n')
-			readBytes.Add(int64(len(part)))
-			if len(part) != 0 {
-				readProgress.Add(1)
-			}
-			reading.Store(false)
+			rs.end(len(part))
 			if len(line)+len(part) > 4<<20 {
 				return message{}, nil, errors.New("line too long")
 			}
@@ -477,14 +505,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 				if !errors.Is(err, io.EOF) {
 					buf := make([]byte, 32*1024)
 					for {
-						readProgress.Add(1)
-						reading.Store(true)
+						rs.begin()
 						n, drainErr := reader.Read(buf)
-						readBytes.Add(int64(n))
-						if n != 0 {
-							readProgress.Add(1)
-						}
-						reading.Store(false)
+						rs.end(n)
 						if drainErr != nil {
 							break
 						}
@@ -505,8 +528,12 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		e.failFinal(a, cause, causeRecorded, killed)
 	}
 	var preparingExpired atomic.Bool
+	// Closing stdout fails the read of a missing hello or accepted; the
+	// shutdown timers unblock a start write the engine never reads (stdin is
+	// closed after one CancelGrace, the engine killed after two).
 	preparingTimer := time.AfterFunc(e.cfg.PreparingDeadline, func() {
 		preparingExpired.Store(true)
+		startShutdown()
 		_ = stdout.Close()
 	})
 	defer preparingTimer.Stop()
@@ -554,7 +581,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		task["effort"] = a.Effort
 	}
 	if err := write(map[string]any{"type": "start", "attempt_id": a.ID, "task": task}); err != nil {
-		abort(fmt.Errorf("start write: %w", err))
+		abort(preparingCause(fmt.Errorf("start write: %w", err)))
 		return
 	}
 	answer, _, err := next("", true)

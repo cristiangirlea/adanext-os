@@ -105,34 +105,82 @@ func TestStreamingDescendantCannotExtendTheExitDeadline(t *testing.T) {
 	}
 }
 
-func TestReadStartingBeforeIdleCheckKeepsStdoutOpenForThatCheck(t *testing.T) {
-	e, s, _, marker := testExecutor(t, "exit_with_child_stdout")
+func TestReadsBeforeTheEngineExitsDoNotCountAgainstADescendant(t *testing.T) {
+	var r readState
+	r.begin()
+	r.end(5)
+	r.begin()
+	time.Sleep(50 * time.Millisecond)
+	exit := time.Now()
+	r.exited(exit)
+	n, blocked := r.afterExit()
+	if n != 0 || blocked < 0 || blocked >= 50*time.Millisecond {
+		t.Fatalf("bytes=%d blocked=%s after an ended read and a read begun before exit", n, blocked)
+	}
+	r.end(7)
+	if n, blocked := r.afterExit(); n != 7 || blocked > time.Since(exit) {
+		t.Fatalf("bytes=%d blocked=%s for a read that straddled exit", n, blocked)
+	}
+}
+
+func TestReadsAfterTheEngineExitsAccumulateBlockedTimeAndBytes(t *testing.T) {
+	var r readState
+	r.exited(time.Now())
+	r.begin()
+	time.Sleep(30 * time.Millisecond)
+	r.end(3)
+	r.begin()
+	time.Sleep(30 * time.Millisecond)
+	n, blocked := r.afterExit()
+	if n != 3 || blocked < 60*time.Millisecond {
+		t.Fatalf("bytes=%d blocked=%s with one ended and one in-progress read", n, blocked)
+	}
+	r.end(4)
+	if n, blocked := r.afterExit(); n != 7 || blocked < 60*time.Millisecond {
+		t.Fatalf("bytes=%d blocked=%s after both reads ended", n, blocked)
+	}
+}
+
+func TestSlowlyWritingDescendantCannotHoldStopPastItsBudget(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "slow_stream_after_exit")
 	cleanupGrandchild(t, marker)
 	e.cfg.CancelGrace = 200 * time.Millisecond
-	first := make(chan struct{})
-	var checks atomic.Int32
-	e.beforeIdleCheck = func(progress *atomic.Int64, reading *atomic.Bool) {
-		if checks.Add(1) == 1 {
-			progress.Add(1)
-			reading.Store(true)
-			close(first)
-		}
-	}
+	e.cfg.Env = append(e.cfg.Env, "ADA_FAKE_INTERVAL=100ms")
 	e.LaunchAttempt("attempt")
-	select {
-	case <-first:
-	case <-time.After(2 * time.Second):
-		t.Fatal("idle check did not run")
+	waitAttempt(t, s, "running")
+	waitGrandchildMarker(t, marker)
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
+	defer cancel()
+	if err := e.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
 	a, err := s.AttemptByID(context.Background(), "attempt")
+	if err != nil || a.Ended == "" {
+		t.Fatalf("attempt = %+v: %v", a, err)
+	}
+}
+
+func TestPreparingDeadlineEndsAnEngineThatNeverReadsStdin(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "hello_no_read")
+	e.cfg.PreparingDeadline = 100 * time.Millisecond
+	ctx := context.Background()
+	// A prompt larger than any pipe buffer: the start line cannot be written
+	// unless the engine reads it.
+	_, err := s.Do(ctx, "u", "big-objective", "big-objective", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "UPDATE tasks SET objective=? WHERE id='task'", strings.Repeat("x", 128<<10))
+		return []byte("ok"), err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.State == "ended_failed" {
-		t.Fatal("stdout closed during the check after a read started")
-	}
+	started := time.Now()
+	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
+	if elapsed := time.Since(started); elapsed > e.cfg.PreparingDeadline+3*e.cfg.CancelGrace+time.Second {
+		t.Fatalf("attempt took %s", elapsed)
+	}
+	errorEventContains(t, s, "preparing deadline exceeded")
+	errorEventContains(t, s, "engine was killed after the grace period")
 }
 
 func TestForceKillStopsTheGrandchildWithTheEngine(t *testing.T) {
