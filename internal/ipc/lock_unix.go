@@ -48,7 +48,8 @@ type lockDir struct {
 
 func openLockDir(path string) (*lockDir, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+	// A symlink refused by O_NOFOLLOW is ELOOP on Linux and macOS, EMLINK on FreeBSD.
+	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EMLINK) || errors.Is(err, unix.ENOTDIR) {
 		return nil, stateDirError(path)
 	}
 	if err != nil {

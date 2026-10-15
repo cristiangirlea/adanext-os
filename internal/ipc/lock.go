@@ -40,11 +40,11 @@ func Acquire(cfg Config) (*Lock, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer dir.Close()
 	if afterStateDirChecked != nil {
 		afterStateDirChecked()
 	}
 	f, err := dir.openLock()
-	dir.Close()
 	if err != nil {
 		return nil, err
 	}
