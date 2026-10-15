@@ -64,10 +64,14 @@ type Executor struct {
 	// can reuse a blob it may still discard, so a committed reference never
 	// points at content a failed writer removed afterwards, and discard's
 	// reference check cannot be overtaken by a commit. The in-transaction form
-	// (appendBoundedEvent) runs without it: its payloads are fixed and small,
-	// and taking the lock inside a transaction could wait on a writer that
-	// holds the lock while it waits for the database. The v1 concurrency cap
-	// is one attempt, so the lock is uncontended; it exists for correctness.
+	// (appendBoundedEvent) writes under the same rule: a caller whose payload
+	// is fixed and small never reaches the artifact store and runs without the
+	// lock; a caller whose payload may exceed the event limit (failFinal, whose
+	// cause the engine or its exit status can enlarge) takes the lock before
+	// its transaction opens and releases it after the transaction returns,
+	// never inside it, since a writer holding the lock may be waiting on the
+	// database. The v1 concurrency cap is one attempt, so the lock is
+	// uncontended; it exists for correctness.
 	artifactMu sync.Mutex
 }
 
@@ -884,9 +888,11 @@ func (e *Executor) appendBoundEvent(tx *store.Tx, event store.Event, ref artifac
 	return tx.AppendOwnedEvent(context.Background(), event)
 }
 
-// appendBoundedEvent is the in-transaction form for the fixed, small payloads of
-// the launch and cancel paths, where the artifact is a safety net: a transaction
-// that fails after it cannot remove what was written.
+// appendBoundedEvent is the in-transaction form for the recovery and failure
+// paths, where the artifact is a safety net: a transaction that fails after it
+// cannot remove what was written. A caller with a fixed, small payload runs
+// without artifactMu; a caller whose payload can exceed the event limit holds
+// it around the whole transaction (see the lock's invariant).
 func (e *Executor) appendBoundedEvent(tx *store.Tx, event store.Event) error {
 	event, ref, err := e.boundEvent(event)
 	if err != nil {
@@ -1068,7 +1074,7 @@ func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed
 		return
 	}
 	payload, _ := json.Marshal(map[string]any{"error": cause.Error()})
-	_ = e.owned(a.ID, func(tx *store.Tx) error {
+	record := func(tx *store.Tx) error {
 		var state store.State
 		var rev int64
 		if err := tx.QueryRowContext(context.Background(), "SELECT state,revision FROM tasks WHERE id=?", a.Task).Scan(&state, &rev); err != nil {
@@ -1123,7 +1129,12 @@ func (e *Executor) failFinal(a store.Attempt, cause error, causeRecorded, killed
 			return e.appendBoundedEvent(tx, store.Event{Attempt: a.ID, Seq: seq, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: "executor_error", Payload: []byte(`{"error":"engine was killed after the grace period"}`)})
 		}
 		return nil
-	})
+	}
+	// The cause is not bounded, so the transaction that references its payload
+	// is an artifact lifecycle: a concurrent discard cannot remove content it
+	// reuses. The lock is taken before the transaction opens and released
+	// before the notification.
+	_ = e.artifactLifecycle(func() error { return e.owned(a.ID, record) })
 	if e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)
 	}

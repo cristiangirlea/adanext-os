@@ -224,6 +224,48 @@ func TestADiscardNeverRemovesContentAnotherWriterReusesMeanwhile(t *testing.T) {
 	}
 }
 
+func TestADiscardNeverRemovesContentAFailingAttemptRecordsMeanwhile(t *testing.T) {
+	e, s, dir, _ := testExecutor(t, "happy")
+	ctx := context.Background()
+	a, err := s.AttemptByID(ctx, "attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The failing attempt's cause is not bounded: an oversized line the engine
+	// sent, or an error enlarged by a later exit status, is recorded through
+	// failFinal's in-transaction append, which references its payload exactly
+	// as the first writer's content was written.
+	cause := errors.New(strings.Repeat("r", 256<<10))
+	shared := []byte(`{"error":"` + cause.Error() + `"}`)
+	done := make(chan struct{})
+	e.beforeRemove = func(string) {
+		go func() { e.failFinal(a, cause, false, false); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	if err := e.append(store.Attempt{ID: "missing"}, "event", shared, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("append to a missing attempt: %v", err)
+	}
+	<-done
+	sum := sha256.Sum256(shared)
+	hash := hex.EncodeToString(sum[:])
+	if referenced, err := s.ArtifactReferenced(ctx, hash); err != nil || !referenced {
+		t.Fatalf("referenced=%v: %v", referenced, err)
+	}
+	if content, err := os.ReadFile(blobPath(dir, shared)); err != nil || !bytes.Equal(content, shared) {
+		t.Fatalf("the blob the failing attempt references: %d bytes, %v", len(content), err)
+	}
+	events, err := s.Events(ctx, "u", "attempt", 0)
+	if err != nil || len(events) != 1 || events[0].Kind != "executor_error" || !bytes.Equal(events[0].Payload, api.ReferencedPayload(hash, int64(len(shared)))) {
+		t.Fatalf("events %d: %v", len(events), err)
+	}
+	if got, err := s.AttemptByID(ctx, a.ID); err != nil || got.State != "ended_failed" {
+		t.Fatalf("attempt state %q: %v", got.State, err)
+	}
+}
+
 func TestAFailureAfterTheReferenceIsRecordedRemovesTheRolledBackBlob(t *testing.T) {
 	e, s, dir, _ := testExecutor(t, "happy")
 	ctx := context.Background()
