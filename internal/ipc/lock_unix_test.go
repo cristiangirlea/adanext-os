@@ -5,6 +5,7 @@ package ipc
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -59,5 +60,49 @@ func TestAGroupReadableLockFileIsRefused(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("Acquire accepted a group-readable lock file")
+	}
+}
+
+func TestTheLockOpensInTheCheckedDirectoryWhenItsPathBecomesASymlink(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "state")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(base, "moved")
+	elsewhere := t.TempDir()
+	afterStateDirChecked = func() {
+		if err := os.Rename(dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(elsewhere, dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { afterStateDirChecked = nil })
+	lock, err := Acquire(Config{StateDir: dir, Name: "swap"})
+	if err != nil {
+		t.Fatalf("Acquire did not keep the checked directory: %v", err)
+	}
+	defer lock.Release()
+	if _, err := os.Lstat(filepath.Join(elsewhere, "adad.lock")); !os.IsNotExist(err) {
+		t.Fatalf("lock file followed the swapped path: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(moved, "adad.lock")); err != nil {
+		t.Fatalf("lock file is not in the checked directory: %v", err)
+	}
+}
+
+func TestAStateDirectorySymlinkIsRefusedOnUnix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(t.TempDir(), path); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := Acquire(Config{StateDir: path, Name: "link"})
+	if lock != nil {
+		lock.Release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "must be a real directory") {
+		t.Fatalf("Acquire error = %v, want the state directory check", err)
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -250,11 +249,38 @@ func TestWindowsRetryReportsTheHolderAfterTheRecordChanges(t *testing.T) {
 	if signal, err := output.ReadString('\n'); err != nil || signal != "fake\n" {
 		t.Fatalf("helper fake record: %q %v", signal, err)
 	}
+	entered := make(chan struct{}, 1)
+	retryStaleLockEntered = func() {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() { retryStaleLockEntered = nil })
 	type acquireResult struct {
 		lock *Lock
 		err  error
 	}
 	result := make(chan acquireResult, 1)
+	var got acquireResult
+	received := false
+	// A failed run must not leak the background Acquire's lock handle: it
+	// keeps the lock file open and makes the temp directory cleanup fail.
+	t.Cleanup(func() {
+		if !received {
+			select {
+			case got = <-result:
+			case <-time.After(5 * time.Second):
+				t.Error("background Acquire did not return")
+				return
+			}
+		}
+		if got.lock != nil {
+			if err := got.lock.Release(); err != nil {
+				t.Error(err)
+			}
+		}
+	})
 	start := time.Now()
 	go func() {
 		lock, err := Acquire(cfg)
@@ -262,25 +288,13 @@ func TestWindowsRetryReportsTheHolderAfterTheRecordChanges(t *testing.T) {
 	}()
 	// Observe the retry before restoring the record, so the returned PID
 	// must come from Acquire's final read rather than its initial read.
-	stack := make([]byte, 64<<10)
-	enteredRetry := time.NewTimer(time.Second)
-	defer enteredRetry.Stop()
-	for {
-		n := runtime.Stack(stack, true)
-		if strings.Contains(string(stack[:n]), "ipc.retryStaleLock(") {
-			break
-		}
-		select {
-		case got := <-result:
-			if got.lock != nil {
-				got.lock.Release()
-			}
-			t.Fatalf("Acquire returned before retrying: %v", got.err)
-		case <-enteredRetry.C:
-			t.Fatal("Acquire did not enter the stale-lock retry")
-		default:
-			runtime.Gosched()
-		}
+	select {
+	case <-entered:
+	case got = <-result:
+		received = true
+		t.Fatalf("Acquire returned before retrying: %v", got.err)
+	case <-time.After(time.Second):
+		t.Fatal("Acquire did not enter the stale-lock retry")
 	}
 	if _, err := io.WriteString(stdin, "restore\n"); err != nil {
 		t.Fatal(err)
@@ -288,18 +302,15 @@ func TestWindowsRetryReportsTheHolderAfterTheRecordChanges(t *testing.T) {
 	if signal, err := output.ReadString('\n'); err != nil || signal != "restored\n" {
 		t.Fatalf("helper restored record: %q %v", signal, err)
 	}
-	var got acquireResult
 	select {
 	case got = <-result:
+		received = true
 	case <-time.After(3 * time.Second):
 		t.Fatal("Acquire exceeded the 2s retry bound plus 1s margin")
 	}
 	elapsed := time.Since(start)
 	if err := stdin.Close(); err != nil {
 		t.Fatal(err)
-	}
-	if got.lock != nil {
-		got.lock.Release()
 	}
 	var running *AlreadyRunningError
 	if !errors.As(got.err, &running) || running.PID != cmd.Process.Pid {
@@ -334,6 +345,106 @@ func TestAStaleWindowsLockIsRetriedUntilItsKernelLockClears(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAStateDirectoryJunctionIsRefusedOnWindows(t *testing.T) {
+	target := t.TempDir()
+	path := filepath.Join(t.TempDir(), "junction")
+	if output, err := exec.Command("cmd", "/c", "mklink", "/J", path, target).CombinedOutput(); err != nil {
+		t.Fatalf("create junction: %v: %s", err, output)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeIrregular == 0 {
+		t.Fatalf("junction did not exercise ModeIrregular: %v %v", info, err)
+	}
+	lock, err := Acquire(Config{StateDir: path, Name: "junction"})
+	if lock != nil {
+		lock.Release()
+	}
+	if err == nil {
+		t.Fatal("Acquire accepted a state directory junction")
+	}
+	if _, err := os.Lstat(filepath.Join(target, "adad.lock")); !os.IsNotExist(err) {
+		t.Fatalf("lock file reached the junction target: %v", err)
+	}
+}
+
+func TestAnIrregularStateDirectoryIsRefusedOnWindows(t *testing.T) {
+	err := checkStateDirInfo("state", irregularDir{})
+	if err == nil || !strings.Contains(err.Error(), "real directory") {
+		t.Fatalf("irregular directory accepted: %v", err)
+	}
+	if err := checkStateDirInfo("state", irregularDir{mode: os.ModeDir}); err != nil {
+		t.Fatalf("plain directory refused: %v", err)
+	}
+}
+
+type irregularDir struct {
+	os.FileInfo
+	mode os.FileMode
+}
+
+func (d irregularDir) Mode() os.FileMode {
+	if d.mode != 0 {
+		return d.mode
+	}
+	return os.ModeDir | os.ModeIrregular
+}
+
+func (d irregularDir) IsDir() bool { return d.Mode().IsDir() }
+
+func TestALockSymlinkIsRefusedWithoutChangingItsTargetOnWindows(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "adad.lock")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	lock, err := Acquire(Config{StateDir: dir, Name: "symlink"})
+	if lock != nil {
+		lock.Release()
+	}
+	if err == nil {
+		t.Fatal("Acquire followed a lock symlink")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "keep" {
+		t.Fatalf("target changed: %q %v", got, err)
+	}
+}
+
+func TestPipeOwnerSIDRefusesAMissingDescriptorOrOwner(t *testing.T) {
+	empty, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		sd   *windows.SECURITY_DESCRIPTOR
+		want string
+	}{
+		{"no descriptor", nil, "pipe has no security descriptor"},
+		{"no owner", empty, "pipe has no owner"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read := pipeSecurityInfo
+			pipeSecurityInfo = func(windows.Handle, windows.SE_OBJECT_TYPE, windows.SECURITY_INFORMATION) (*windows.SECURITY_DESCRIPTOR, error) {
+				return tc.sd, nil
+			}
+			defer func() { pipeSecurityInfo = read }()
+			owner, err := pipeOwnerSID(handleConn{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("pipeOwnerSID = %q, %v; want %q", owner, err, tc.want)
+			}
+		})
+	}
+}
+
+// handleConn is a connection whose handle the fake security reader ignores.
+type handleConn struct{ net.Conn }
+
+func (handleConn) Fd() uintptr { return 0 }
 
 func TestAStateDirectorySymlinkIsRefusedOnWindows(t *testing.T) {
 	target := t.TempDir()

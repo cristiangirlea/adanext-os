@@ -7,14 +7,19 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 )
+
+const lockFileName = "adad.lock"
 
 type lockRecord struct {
 	PID     int    `json:"pid"`
 	Created string `json:"created"`
 }
+
+// afterStateDirChecked is a test hook that runs between the state directory
+// check and the lock open; it is nil outside tests.
+var afterStateDirChecked func()
 
 // Lock holds the coordinator's process lock until Release or process exit.
 type Lock struct {
@@ -31,11 +36,15 @@ func Acquire(cfg Config) (*Lock, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
 		return nil, err
 	}
-	if err := validateStateDir(cfg.StateDir); err != nil {
+	dir, err := openLockDir(cfg.StateDir)
+	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(cfg.StateDir, "adad.lock")
-	f, err := openLockFile(path)
+	if afterStateDirChecked != nil {
+		afterStateDirChecked()
+	}
+	f, err := dir.openLock()
+	dir.Close()
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -24,23 +25,61 @@ func validateStateDir(path string) error {
 	if err != nil {
 		return err
 	}
+	return checkStateDirInfo(path, info)
+}
+
+func checkStateDirInfo(path string, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 || stat.Uid != uint32(os.Getuid()) {
-		return fmt.Errorf("ipc: state directory %q must be a real directory owned by the user and not group- or other-writable", path)
+	if !ok || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || info.Mode().Perm()&0022 != 0 || stat.Uid != uint32(os.Getuid()) {
+		return stateDirError(path)
 	}
 	return nil
 }
 
-func openLockFile(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
-	if errors.Is(err, unix.EEXIST) {
-		fd, err = unix.Open(path, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+func stateDirError(path string) error {
+	return fmt.Errorf("ipc: state directory %q must be a real directory owned by the user and not group- or other-writable", path)
+}
+
+// lockDir is the checked state directory, held open so the lock file is
+// opened relative to the directory that was checked rather than by path.
+type lockDir struct {
+	dir *os.File
+}
+
+func openLockDir(path string) (*lockDir, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+		return nil, stateDirError(path)
 	}
 	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	dir := os.NewFile(uintptr(fd), path)
+	info, err := dir.Stat()
+	if err == nil {
+		err = checkStateDirInfo(path, info)
+	}
+	if err != nil {
+		dir.Close()
 		return nil, err
+	}
+	return &lockDir{dir: dir}, nil
+}
+
+func (d *lockDir) openLock() (*os.File, error) {
+	dirfd := int(d.dir.Fd())
+	fd, err := unix.Openat(dirfd, lockFileName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	if errors.Is(err, unix.EEXIST) {
+		fd, err = unix.Openat(dirfd, lockFileName, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	}
+	path := filepath.Join(d.dir.Name(), lockFileName)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	return os.NewFile(uintptr(fd), path), nil
 }
+
+func (d *lockDir) Close() error { return d.dir.Close() }
 
 func validateLockFile(f *os.File) error {
 	info, err := f.Stat()
