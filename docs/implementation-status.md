@@ -872,7 +872,8 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   `adad` stops launching, cancels the running attempts through M2.3b's cancel path, drains the
   hub (the stop wakes the affected attempts' streams, and every open stream sends what is
   committed and ends, within the write deadline, before the HTTP shutdown closes the hub) so an
-  open stream receives the reason as its last event, and ends its serve loop as a signal would,
+  open stream receives the committed reason before it closes (a running attempt may still append
+  its result after it), and ends its serve loop as a signal would,
   so an attempt that does not exit within the stop budget reaches recovery as before. The
   signal path is unchanged: no reason is recorded, and a queued attempt it leaves is marked for
   recovery at the next start, which now records `attempt_state` in its `recovery` event. Not in
