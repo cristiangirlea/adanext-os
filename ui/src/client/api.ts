@@ -70,7 +70,8 @@ export interface ErrorBody {
 }
 
 // adad's codes (internal/api writeError), plus the client's own for a coordinator it cannot
-// reach, a page without the bridge, and a call the bridge refused as malformed.
+// reach, a page without the bridge, a call the bridge refused as malformed, and an answer the
+// bridge could not read (too large, cut short, or not the JSON the call needs).
 export type ErrorCode =
   | "bad_request"
   | "too_large"
@@ -87,17 +88,21 @@ export type ErrorCode =
   | "queue_full"
   | "coordinator_unreachable"
   | "bridge_unavailable"
-  | "malformed_call";
+  | "malformed_call"
+  | "bad_response";
 
 export class AdaError extends Error {
   readonly code: ErrorCode | string;
   readonly status: number;
+  // The request id adad logs with an internal error, so the two can be matched.
+  readonly requestId: string | undefined;
 
-  constructor(code: ErrorCode | string, status: number, message: string) {
+  constructor(code: ErrorCode | string, status: number, message: string, requestId?: string) {
     super(message);
     this.name = "AdaError";
     this.code = code;
     this.status = status;
+    this.requestId = requestId;
   }
 }
 
@@ -114,7 +119,7 @@ export interface AdaClient {
 
 // The preload bridge's shape, the `ada` global the desktop's preload exposes: the same methods,
 // answering with plain data so a refusal crosses the context bridge intact.
-export type BridgeResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; status: number; message: string } };
+export type BridgeResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; status: number; message: string; request_id?: string } };
 
 export interface BridgeApi {
   createTask(input: NewTask): Promise<BridgeResult<Task>>;

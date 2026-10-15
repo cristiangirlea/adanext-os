@@ -1,5 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { AdaError } from "./client/api";
 import { FakeClient, makeTask } from "./test/fakeClient";
@@ -87,6 +87,88 @@ describe("App", () => {
     render(<App client={client} />);
     await flush();
     expect(screen.getByRole("alert").textContent).toContain("coordinator unreachable");
+  });
+
+  it("refreshes a started task from the coordinator as its attempt delivers events, so Cancel acts on the executor's revision", async () => {
+    const client = new FakeClient([makeTask({ id: "t1", state: "ready", revision: 1 })]);
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("objective t1"));
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await flush();
+    const cancel = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+    expect(cancel.disabled).toBe(true);
+    // The executor moves the task on its own; the UI only hears an engine event.
+    client.tasks = client.tasks.map((t) => ({ ...t, state: "running", revision: 3 }));
+    act(() => {
+      client.listeners.get("attempt-t1")!({ type: "event", event: { seq: 1, kind: "accepted", payload: {} } });
+    });
+    const row = screen.getAllByRole("row").find((r) => r.getAttribute("data-task") === "t1")!;
+    await waitFor(() => expect(within(row).getByText("running")).toBeTruthy());
+    expect(client.calls).toContain("getTask");
+    expect(screen.getByText(/revision 3/)).toBeTruthy();
+    expect(cancel.disabled).toBe(false);
+    fireEvent.click(cancel);
+    await flush();
+    expect(client.tasks[0]).toMatchObject({ state: "cancel_requested", revision: 4 });
+    expect(within(row).getByText("cancel_requested")).toBeTruthy();
+  });
+
+  it("polls an active task until it reaches a terminal state, which the table then shows", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeClient([makeTask({ id: "t1", state: "running", revision: 2 }), makeTask({ id: "t2", state: "draft" })]);
+      render(<App client={client} />);
+      await flush();
+      const polls = () => client.calls.filter((c) => c === "getTask").length;
+      expect(polls()).toBe(0);
+      client.tasks = client.tasks.map((t) => (t.id === "t1" ? { ...t, state: "failed", revision: 3 } : t));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      const row = screen.getAllByRole("row").find((r) => r.getAttribute("data-task") === "t1")!;
+      expect(within(row).getByText("failed")).toBeTruthy();
+      const seen = polls();
+      expect(seen).toBe(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
+      });
+      expect(polls()).toBe(seen);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes the selected task after a stale-revision refusal and when its stream reconnects", async () => {
+    const client = new FakeClient([makeTask({ id: "t1", state: "draft", revision: 0 })]);
+    client.refuse.ready = new AdaError("stale_revision", 409, "stale revision");
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("objective t1"));
+    client.tasks = [makeTask({ id: "t1", state: "ready", revision: 1 })];
+    fireEvent.click(screen.getByRole("button", { name: "Ready" }));
+    await waitFor(() => expect(screen.getByText(/revision 1/)).toBeTruthy());
+    expect(screen.getByRole("alert").textContent).toContain("stale_revision");
+    delete client.refuse.ready;
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await flush();
+    expect(screen.getByText(/revision 2/)).toBeTruthy();
+    client.tasks = client.tasks.map((t) => ({ ...t, state: "running", revision: 3 }));
+    act(() => {
+      client.listeners.get("attempt-t1")!({ type: "status", status: "connected" });
+    });
+    await waitFor(() => expect(screen.getByText(/revision 3/)).toBeTruthy());
+  });
+
+  it("shows the request id of an internal error so it can be matched to adad's log", async () => {
+    const client = new FakeClient([makeTask({ id: "t1", state: "draft" })]);
+    client.refuse.ready = new AdaError("internal", 500, "internal error", "req-42");
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("objective t1"));
+    fireEvent.click(screen.getByRole("button", { name: "Ready" }));
+    await flush();
+    expect(screen.getByRole("alert").textContent).toContain("req-42");
   });
 
   it("creates a task and lists it", async () => {

@@ -18,7 +18,7 @@ function bridge(): BridgeApi {
 
 function unwrap<T>(result: BridgeResult<T>): T {
   if (result.ok) return result.value;
-  throw new AdaError(result.error.code, result.error.status, result.error.message);
+  throw new AdaError(result.error.code, result.error.status, result.error.message, result.error.request_id);
 }
 
 export function createBridgeClient(): AdaClient {

@@ -17,18 +17,33 @@ interface FakeSender {
   sent: unknown[][];
   destroyed: boolean;
   destroy(): void;
+  // Fires did-start-navigation as Electron does for a reload, a fragment change or a subframe.
+  navigate(details: { isMainFrame: boolean; isSameDocument: boolean }): void;
+  gone(): void;
   event(frame?: { url: string; parent: unknown } | null): BridgeEvent;
 }
 
 function sender(id = 1): FakeSender {
-  const listeners: (() => void)[] = [];
+  const listeners = new Map<string, ((...args: unknown[]) => void)[]>();
+  const fire = (name: string, ...args: unknown[]): void => {
+    for (const fn of listeners.get(name) ?? []) fn(...args);
+  };
+  const add = (name: string, fn: (...args: unknown[]) => void): void => {
+    listeners.set(name, [...(listeners.get(name) ?? []), fn]);
+  };
   const self: FakeSender = {
     id,
     sent: [],
     destroyed: false,
     destroy() {
       self.destroyed = true;
-      for (const fn of listeners) fn();
+      fire("destroyed");
+    },
+    navigate(details) {
+      fire("did-start-navigation", details);
+    },
+    gone() {
+      fire("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
     },
     event(frame = { url: pageUrl, parent: null }) {
       return {
@@ -36,15 +51,29 @@ function sender(id = 1): FakeSender {
         sender: {
           id,
           send: (...args: unknown[]) => self.sent.push(args),
-          once: (_name: "destroyed", fn: () => void) => {
-            listeners.push(fn);
-          },
+          on: (name: string, fn: (...args: never[]) => void) => add(name, fn as (...args: unknown[]) => void),
+          once: (name: "destroyed", fn: () => void) => add(name, fn),
           isDestroyed: () => self.destroyed,
         },
       };
     },
   };
   return self;
+}
+
+// A fake adad whose every request is an event stream that stays open; `closed` records the
+// order in which the shell closed them.
+async function streaming(): Promise<{ fake: FakeAdad; bridge: Bridge; closed: number[]; count: () => number }> {
+  const closed: number[] = [];
+  let count = 0;
+  const { fake, bridge } = await bridgeTo((_req, res) => {
+    const n = ++count;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write("retry: 2000\n\n");
+    res.write('id: 1\nevent: accepted\ndata: {"ok":true}\n\n');
+    res.on("close", () => closed.push(n));
+  });
+  return { fake, bridge, closed, count: () => count };
 }
 
 async function bridgeTo(handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<{ fake: FakeAdad; bridge: Bridge }> {
@@ -188,6 +217,58 @@ describe("bridge", () => {
     expect(s.sent.length).toBe(before);
     const messages = s.sent.map((args) => args[2] as StreamMessage);
     expect(messages.every((m) => m.type === "status" || m.type === "event")).toBe(true);
+  });
+
+  it("closes a document's streams when its top frame is replaced, so the new document may reuse the id", async () => {
+    const { bridge, closed, count } = await streaming();
+    const s = sender(9);
+    expect(await bridge.handle(s.event(), "subscribe", ["s1", "a1"])).toEqual({ ok: true, value: null });
+    await until(() => s.sent.length >= 2, "the first messages");
+    // A subframe navigation or a same-document one (a fragment, pushState) keeps the stream.
+    s.navigate({ isMainFrame: false, isSameDocument: false });
+    s.navigate({ isMainFrame: true, isSameDocument: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(closed).toEqual([]);
+    // A reload replaces the document: its preload starts over and would hand out s1 again.
+    const before = s.sent.length;
+    s.navigate({ isMainFrame: true, isSameDocument: false });
+    await until(() => closed.includes(1), "the old document's stream to close");
+    expect(await bridge.handle(s.event(), "subscribe", ["s1", "a2"])).toEqual({ ok: true, value: null });
+    await until(() => count() === 2, "the new document's stream");
+    await until(() => s.sent.length > before, "the new document's messages");
+    // Nothing of the old stream reached the new document: every message after the reload is
+    // the new stream's own connected status and its first event.
+    expect(s.sent.slice(before)).toEqual([
+      ["ada:event", "s1", { type: "status", status: "connected" }],
+      ["ada:event", "s1", { type: "event", event: { seq: 1, kind: "accepted", payload: { ok: true } } }],
+    ]);
+    expect(await bridge.handle(s.event(), "unsubscribe", ["s1"])).toEqual({ ok: true, value: null });
+    await until(() => closed.includes(2), "the new stream to close on unsubscribe");
+  });
+
+  it("closes a document's streams when its renderer process is gone", async () => {
+    const { bridge, closed } = await streaming();
+    const s = sender(10);
+    expect(await bridge.handle(s.event(), "subscribe", ["s1", "a1"])).toEqual({ ok: true, value: null });
+    await until(() => s.sent.length >= 2, "the first messages");
+    s.gone();
+    await until(() => closed.includes(1), "the stream to close with its renderer");
+    expect(await bridge.handle(s.event(), "unsubscribe", ["s1"])).toEqual({ ok: false, error: { code: "malformed_call", status: 0, message: expect.any(String) } });
+  });
+
+  it("hands back an unreadable 2xx answer as bad_response, never as a value", async () => {
+    const { bridge } = await bridgeTo((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("[{");
+    });
+    expect(await bridge.handle(sender().event(), "listTasks", [])).toEqual({ ok: false, error: { code: "bad_response", status: 0, message: expect.any(String) } });
+  });
+
+  it("keeps the server's request_id on an internal refusal", async () => {
+    const { bridge } = await bridgeTo((req, res) => {
+      void readBody(req).then(() => json(res, 500, { error: "internal", message: "internal error", request_id: "req-3" }));
+    });
+    expect(await bridge.handle(sender().event(), "ready", ["t1", 1])).toEqual({ ok: false, error: { code: "internal", status: 500, message: "internal error", request_id: "req-3" } });
   });
 
   it("refuses a subscription id already in use by the same sender", async () => {

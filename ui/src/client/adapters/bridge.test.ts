@@ -40,6 +40,13 @@ describe("bridge adapter", () => {
     expect((error as AdaError).status).toBe(409);
   });
 
+  it("keeps the server's request id on an internal error", async () => {
+    install(fakeBridge({ getTask: async () => ({ ok: false, error: { code: "internal", status: 500, message: "internal error", request_id: "req-7" } }) }));
+    const error = await createBridgeClient().getTask("t1").catch((e: unknown) => e);
+    expect((error as AdaError).code).toBe("internal");
+    expect((error as AdaError).requestId).toBe("req-7");
+  });
+
   it("passes stream messages through and hands back the unsubscribe", () => {
     let unsubscribed = false;
     let sink: ((message: StreamMessage) => void) | undefined;

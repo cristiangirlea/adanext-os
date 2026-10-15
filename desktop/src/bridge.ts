@@ -1,5 +1,5 @@
 import type { BridgeResult, ExecutionPolicy, NewTask, StreamMessage } from "../../ui/src/client/api";
-import { call, isUnreachable, Refusal } from "./adad";
+import { BadResponse, call, isUnreachable, listingLimit, Refusal } from "./adad";
 import { openEventStream, type EventStream, type StreamOptions } from "./sse";
 
 // The typed bridge between the renderer and adad. Every call is checked to come from the Ada
@@ -13,9 +13,15 @@ export interface FrameLike {
   url: string;
   parent: unknown;
 }
+export interface NavigationLike {
+  isMainFrame: boolean;
+  isSameDocument: boolean;
+}
 export interface SenderLike {
   id: number;
   send(channel: string, ...args: unknown[]): void;
+  on(event: "did-start-navigation", listener: (details: NavigationLike) => void): unknown;
+  on(event: "render-process-gone", listener: () => void): unknown;
   once(event: "destroyed", listener: () => void): unknown;
   isDestroyed(): boolean;
 }
@@ -104,14 +110,28 @@ export function createBridge(options: BridgeOptions): Bridge {
 
   const key = (senderId: number, subId: string): string => `${senderId}:${subId}`;
 
-  const dropSender = (senderId: number): void => {
+  // A subscription belongs to the document that opened it. The streams of a sender close when
+  // its top-frame document is replaced (a reload recreates the preload, which starts its ids
+  // over), when its renderer process is gone, and when the WebContents is destroyed.
+  const dropStreams = (senderId: number): void => {
     for (const [k, entry] of streams) {
       if (entry.senderId === senderId) {
         entry.stream.close();
         streams.delete(k);
       }
     }
-    watched.delete(senderId);
+  };
+  const watch = (sender: SenderLike): void => {
+    if (watched.has(sender.id)) return;
+    watched.add(sender.id);
+    sender.on("did-start-navigation", (details) => {
+      if (details.isMainFrame && !details.isSameDocument) dropStreams(sender.id);
+    });
+    sender.on("render-process-gone", () => dropStreams(sender.id));
+    sender.once("destroyed", () => {
+      dropStreams(sender.id);
+      watched.delete(sender.id);
+    });
   };
 
   const forward = async (request: Parameters<typeof call>[1]): Promise<BridgeResult<unknown>> => {
@@ -119,7 +139,12 @@ export function createBridge(options: BridgeOptions): Bridge {
     try {
       return { ok: true, value: await call(options.socketPath, request) };
     } catch (error) {
-      if (error instanceof Refusal) return { ok: false, error: { code: error.code, status: error.status, message: error.message } };
+      if (error instanceof Refusal) {
+        const refusal: BridgeResult<never> = { ok: false, error: { code: error.code, status: error.status, message: error.message } };
+        if (error.requestId !== undefined) refusal.error.request_id = error.requestId;
+        return refusal;
+      }
+      if (error instanceof BadResponse) return refused(error.code, error.message);
       if (isUnreachable(error)) return refused("coordinator_unreachable", `adad is not reachable at ${options.socketPath}`);
       return refused("internal", error instanceof Error ? error.message : String(error));
     }
@@ -136,10 +161,7 @@ export function createBridge(options: BridgeOptions): Bridge {
     };
     const stream = openStream({ socketPath: options.socketPath, attemptId, onMessage: push });
     streams.set(k, { stream, senderId: sender.id });
-    if (!watched.has(sender.id)) {
-      watched.add(sender.id);
-      sender.once("destroyed", () => dropSender(sender.id));
-    }
+    watch(sender);
     return { ok: true, value: null };
   };
 
@@ -164,7 +186,7 @@ export function createBridge(options: BridgeOptions): Bridge {
           return forward({ method: "POST", path: "/v1/tasks", body: args[0], idempotent: true });
         case "listTasks":
           if (args.length !== 0) return bad();
-          return forward({ method: "GET", path: "/v1/tasks" });
+          return forward({ method: "GET", path: "/v1/tasks", limit: listingLimit });
         case "getTask":
           if (args.length !== 1 || !isId(args[0])) return bad();
           return forward({ method: "GET", path: `/v1/tasks/${args[0]}` });
@@ -177,7 +199,7 @@ export function createBridge(options: BridgeOptions): Bridge {
           return forward({ method: "POST", path: `/v1/tasks/${args[0]}/start`, revision: args[1], body: args[2], idempotent: true });
         case "stopCoordinator": {
           if (args.length !== 0) return bad();
-          const result = await forward({ method: "POST", path: "/v1/coordinator/stop", idempotent: true });
+          const result = await forward({ method: "POST", path: "/v1/coordinator/stop", idempotent: true, emptyOk: true });
           return result.ok ? { ok: true, value: null } : result;
         }
         case "subscribe":

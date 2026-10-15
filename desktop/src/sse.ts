@@ -124,7 +124,8 @@ export function openEventStream(options: StreamOptions): EventStream {
     };
     const req = http.request({ socketPath: options.socketPath, path, method: "GET", headers }, (res) => {
       if (res.statusCode !== 200) {
-        void readJSON(res, 64 * 1024).then((body) => {
+        // The refusal's code is wanted; a body that cannot be read leaves the status's own.
+        void readJSON(res, 64 * 1024).then((body) => body, () => undefined).then((body) => {
           settle(() => {
             options.onMessage({ type: "status", status: "reconnecting", code: errorCode(body, res.statusCode ?? 0) });
             reconnect();
