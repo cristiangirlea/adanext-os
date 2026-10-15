@@ -19,6 +19,9 @@ type Tx struct {
 	userID string
 }
 
+// UserID is the authenticated user the transaction runs for.
+func (tx *Tx) UserID() string { return tx.userID }
+
 // ExecContext runs trusted coordinator SQL, including inserts for records.
 // Raw SQL bypasses membership checks; never expose it to an untrusted caller.
 func (tx *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {

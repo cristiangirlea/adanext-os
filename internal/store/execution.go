@@ -43,7 +43,7 @@ func (s *Store) AttemptPrompt(ctx context.Context, attemptID string) (string, er
 }
 
 func (s *Store) PendingAttempts(ctx context.Context, generation int64) ([]Attempt, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+attemptColumns+" FROM attempts WHERE state='pending' AND ownership_generation=?", generation)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+attemptColumns+" FROM attempts WHERE state='pending' AND ownership_generation=? ORDER BY started, rowid", generation)
 	if err != nil {
 		return nil, err
 	}
@@ -115,18 +115,18 @@ func (s *Store) BumpAndRecover(ctx context.Context) (int64, []string, error) {
 	if err := tx.QueryRowContext(ctx, "SELECT generation FROM coordinator WHERE id=1").Scan(&generation); err != nil {
 		return 0, nil, err
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT id,task,ownership_generation FROM attempts WHERE state IN ('pending','launching','running') AND ownership_generation<?", generation)
+	rows, err := tx.QueryContext(ctx, "SELECT id,task,ownership_generation,state FROM attempts WHERE state IN ('pending','launching','running') AND ownership_generation<?", generation)
 	if err != nil {
 		return 0, nil, err
 	}
 	type abandoned struct {
-		id, task string
-		old      int64
+		id, task, state string
+		old             int64
 	}
 	var all []abandoned
 	for rows.Next() {
 		var a abandoned
-		if err := rows.Scan(&a.id, &a.task, &a.old); err != nil {
+		if err := rows.Scan(&a.id, &a.task, &a.old, &a.state); err != nil {
 			rows.Close()
 			return 0, nil, err
 		}
@@ -156,7 +156,9 @@ func (s *Store) BumpAndRecover(ctx context.Context) (int64, []string, error) {
 		if _, err := tx.ExecContext(ctx, "UPDATE attempts SET state='recovery_required',ended=? WHERE id=?", now(), a.id); err != nil {
 			return 0, nil, err
 		}
-		payload, _ := json.Marshal(map[string]any{"old_generation": a.old})
+		// A queued attempt (pending behind another) is marked like a running
+		// one and never relaunched; the state it was left in is recorded.
+		payload, _ := json.Marshal(map[string]any{"old_generation": a.old, "attempt_state": a.state})
 		var seq int64
 		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.id).Scan(&seq); err != nil {
 			return 0, nil, err
