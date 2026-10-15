@@ -118,3 +118,51 @@ func TestReferenceArtifactRollsBackWithStoreDo(t *testing.T) {
 		t.Fatalf("rows %d: %v", count, err)
 	}
 }
+
+func TestArtifactReferenceResolvesOnlyTheReferencingAttempt(t *testing.T) {
+	s := openTestStore(t)
+	hash := strings.Repeat("ab", 32)
+	if err := s.write(ctx, "u", func(tx *Tx) error {
+		return tx.ReferenceArtifact(ctx, hash, 12, "attempt:one:event:3")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	size, err := s.ArtifactReference(ctx, "one", hash)
+	if err != nil || size != 12 {
+		t.Fatalf("referenced: size %d, %v", size, err)
+	}
+	if _, err := s.ArtifactReference(ctx, "one", strings.Repeat("cd", 32)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown hash: %v", err)
+	}
+	if _, err := s.ArtifactReference(ctx, "two", hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("another attempt's reference: %v", err)
+	}
+	if _, err := s.ArtifactReference(ctx, "on", hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("attempt id prefix: %v", err)
+	}
+	for _, bad := range []string{strings.Repeat("AB", 32), strings.Repeat("g", 64), hash[:63], hash + "0", ""} {
+		_, err := s.ArtifactReference(ctx, "one", bad)
+		if !errors.Is(err, ErrNotFound) || !errors.Is(err, ErrInvalidArtifact) {
+			t.Fatalf("bad hash %q: %v", bad, err)
+		}
+	}
+}
+
+func TestArtifactReferencedReportsAnyCommittedReference(t *testing.T) {
+	s := openTestStore(t)
+	hash := strings.Repeat("ab", 32)
+	if ok, err := s.ArtifactReferenced(ctx, hash); err != nil || ok {
+		t.Fatalf("before: %v %v", ok, err)
+	}
+	if err := s.write(ctx, "u", func(tx *Tx) error {
+		return tx.ReferenceArtifact(ctx, hash, 12, "attempt:one:final")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ArtifactReferenced(ctx, hash); err != nil || !ok {
+		t.Fatalf("after: %v %v", ok, err)
+	}
+	if _, err := s.ArtifactReferenced(ctx, strings.Repeat("AB", 32)); !errors.Is(err, ErrInvalidArtifact) {
+		t.Fatalf("bad hash: %v", err)
+	}
+}
