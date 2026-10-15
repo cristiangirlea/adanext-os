@@ -105,7 +105,8 @@ records stay loadable, README and PLAN.md updated, tests first.
 - [x] **M2.2 `adad`, singleton and IPC.** Split in two slices (decisions log, 2026-10-13): M2.2a,
   `internal/ipc` and the single-coordinator lock (#25; done: #28, 2026-10-13, merge `7e117ba`),
   and M2.2b, `cmd/adad` and the `/v1` API
-  (#26; done: #31, 2026-10-13, merge `2b0bf39`; hardened by #38, #45 and #47 on 2026-10-14).
+  (#26; done: #31, 2026-10-13, merge `2b0bf39`). Both halves hardened by #38, #45 and #47 on
+  2026-10-14.
   `cmd/adad` listens, as `docs/plan.md` section 2 says,
   on a per-user Windows named pipe whose security descriptor grants only the current user, or an
   owner-only Unix socket (mode 0600 in a 0700 directory) on Linux. How the pipe is created
@@ -119,7 +120,7 @@ records stay loadable, README and PLAN.md updated, tests first.
   disconnecting mid-stream, reconnect from the last sequence, a malformed request, and the pipe's
   or socket's permissions.
 - [x] **M2.3 Local executor.** Done as M2.3a artifacts (#32: #35, 2026-10-13, merge `7cdad00`,
-  hardened by #49) and M2.3b executor (#33: #40, 2026-10-14, merge `ff8917c`; its follow-ups are
+  hardened by #49 on 2026-10-14) and M2.3b executor (#33: #40, 2026-10-14, merge `ff8917c`; its follow-ups are
   #39). `internal/executor` runs the pinned engine (`hrn exec --protocol v1`)
   per attempt, verified by hash, records the attempt intent before launch, ingests events in
   order, and holds an ownership generation. Artifacts are written outside the database by content
