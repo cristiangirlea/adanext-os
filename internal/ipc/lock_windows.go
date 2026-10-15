@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -30,19 +31,51 @@ func validateStateDir(path string) error {
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	return checkStateDirInfo(path, info)
+}
+
+// checkStateDirInfo refuses symlinks and every other reparse point, such as
+// a junction, which Lstat reports as irregular rather than as a symlink.
+func checkStateDirInfo(path string, info os.FileInfo) error {
+	if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 		return fmt.Errorf("ipc: state directory %q must be a real directory", path)
 	}
 	return nil
 }
 
-func openLockFile(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-	if errors.Is(err, os.ErrExist) {
-		return os.OpenFile(path, os.O_RDWR, 0)
-	}
-	return f, err
+// lockDir is the checked state directory; Windows has no openat, so the lock
+// is opened by path without following reparse points.
+type lockDir struct {
+	path string
 }
+
+func openLockDir(path string) (*lockDir, error) {
+	if err := validateStateDir(path); err != nil {
+		return nil, err
+	}
+	return &lockDir{path: path}, nil
+}
+
+func (d *lockDir) openLock() (*os.File, error) {
+	path := filepath.Join(d.path, lockFileName)
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	access := uint32(windows.GENERIC_READ | windows.GENERIC_WRITE)
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE)
+	attrs := uint32(windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	h, err := windows.CreateFile(name, access, share, nil, windows.CREATE_NEW, attrs, 0)
+	if errors.Is(err, windows.ERROR_FILE_EXISTS) {
+		h, err = windows.CreateFile(name, access, share, nil, windows.OPEN_EXISTING, attrs, 0)
+	}
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(h), path), nil
+}
+
+func (d *lockDir) Close() error { return nil }
 
 func validateLockFile(f *os.File) error {
 	info, err := f.Stat()
@@ -55,7 +88,14 @@ func validateLockFile(f *os.File) error {
 	return nil
 }
 
+// retryStaleLockEntered is a test hook signalled on entry to retryStaleLock;
+// it is nil outside tests.
+var retryStaleLockEntered func()
+
 func retryStaleLock(f *os.File, record lockRecord) (bool, error) {
+	if retryStaleLockEntered != nil {
+		retryStaleLockEntered()
+	}
 	if record.PID <= 0 {
 		return false, nil
 	}
