@@ -150,7 +150,7 @@ func TestStartRefusesModelsThatAShellCouldInterpret(t *testing.T) {
 			t.Fatalf("model %q = %d %s", model, code, response)
 		}
 	}
-	for i, model := range []string{"claude-opus-5-5", "gpt-6.1-sol"} {
+	for i, model := range []string{"claude-opus-5-5", "gpt-6.1-sol", "antigravity/claude-opus-5-5-high", "qwen3:32b", "claude-opus-5-5@20260601"} {
 		id := create(t, f, fmt.Sprintf("plain-model-create-%d", i), "work")["id"].(string)
 		if code, _ := f.request(t, "POST", "/v1/tasks/"+id+"/ready", fmt.Sprintf("plain-model-ready-%d", i), "0", nil); code != 200 {
 			t.Fatal(code)

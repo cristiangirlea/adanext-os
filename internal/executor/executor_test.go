@@ -66,6 +66,21 @@ func TestHelperFakeEngine(t *testing.T) {
 			fmt.Println("x")
 		}
 	}
+	if script == "grandchild_valid_stream" {
+		identity, _ := processIdentity(os.Getpid())
+		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
+		f.Close()
+		// Well-formed, correctly sequenced events after the engine's own three,
+		// faster than a slowed store persists them: reads never block and the
+		// byte budget is far away.
+		interval, _ := time.ParseDuration(os.Getenv("ADA_FAKE_INTERVAL"))
+		for seq := 6; ; seq++ {
+			time.Sleep(interval)
+			b, _ := json.Marshal(map[string]any{"v": 1, "seq": seq, "type": "event", "attempt_id": os.Getenv("ADA_FAKE_ATTEMPT"), "run_id": "fake-run", "event": map[string]any{"kind": "text", "text": "late"}})
+			fmt.Println(string(b))
+		}
+	}
 	if script == "backend_group" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
 		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
@@ -130,7 +145,10 @@ func TestHelperFakeEngine(t *testing.T) {
 		backend["options"] = []string{"mode", "model"}
 	}
 	line(1, "hello", hello)
-	if script == "hello_no_read" {
+	if script == "hello_no_read" || script == "hello_partial_read" {
+		if script == "hello_partial_read" {
+			_, _ = io.ReadFull(os.Stdin, make([]byte, 4<<10))
+		}
 		for {
 			time.Sleep(time.Hour)
 		}
@@ -266,7 +284,7 @@ func TestHelperFakeEngine(t *testing.T) {
 			os.Exit(3)
 		}
 	}
-	if script == "stream_after_exit" || script == "slow_stream_after_exit" || script == "grandchild_after_result" || script == "nested_tree" {
+	if script == "stream_after_exit" || script == "slow_stream_after_exit" || script == "valid_stream_after_exit" || script == "grandchild_after_result" || script == "nested_tree" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
 		childScript := "grandchild_hold"
 		if script == "stream_after_exit" {
@@ -275,10 +293,13 @@ func TestHelperFakeEngine(t *testing.T) {
 		if script == "slow_stream_after_exit" {
 			childScript = "grandchild_slow_stream"
 		}
+		if script == "valid_stream_after_exit" {
+			childScript = "grandchild_valid_stream"
+		}
 		if script == "nested_tree" {
 			childScript = "backend_group"
 		}
-		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE="+childScript)
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE="+childScript, "ADA_FAKE_ATTEMPT="+input.AttemptID)
 		child.Stdout = os.Stdout
 		var nested *processSupervisor
 		if script == "nested_tree" {
@@ -310,7 +331,7 @@ func TestHelperFakeEngine(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		if script == "stream_after_exit" || script == "slow_stream_after_exit" {
+		if script == "stream_after_exit" || script == "slow_stream_after_exit" || script == "valid_stream_after_exit" {
 			os.Exit(0)
 		}
 	}
@@ -358,6 +379,24 @@ func TestHelperFakeEngine(t *testing.T) {
 	line(6, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok", "final": final}})
 	if script == "after_result" {
 		line(7, "event", map[string]any{"attempt_id": input.AttemptID, "event": map[string]any{"kind": "text"}})
+	}
+	if script == "ok_partial_tail_hold" {
+		// An unterminated line after the result, then exit while a descendant
+		// keeps stdout open: the partial bytes only surface when stdout is closed.
+		fmt.Print(`{"v":1,"seq":7,"type":"event"`)
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
+		child.Stdout = os.Stdout
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		for i := 0; i < 2000; i++ {
+			if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		os.Exit(0)
 	}
 	if script == "big_block" {
 		for {

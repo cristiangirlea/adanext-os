@@ -375,7 +375,12 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	// engine's own output) or when reads have spent a whole CancelGrace blocked
 	// since exit, in one read or across many (a silent or a slowly writing
 	// descendant). Only blocked time counts, so slow storage still consumes
-	// everything the engine wrote before it exited.
+	// everything the engine wrote before it exited. A cancel or a Stop cannot
+	// wait for either: a descendant feeding well-formed events faster than the
+	// store persists them never blocks a read, so once a cancel is in progress
+	// the next check closes stdout whatever arrives, and the kill timer no
+	// longer applies to an exited engine.
+	var stdoutClosedBecause string
 	var checkAfterExit func()
 	checkAfterExit = func() {
 		timerMu.Lock()
@@ -384,11 +389,29 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			return
 		}
 		n, blocked := rs.afterExit()
-		if n > 1<<20 || blocked >= e.cfg.CancelGrace {
-			_ = stdout.Close()
+		canceling := false
+		select {
+		case <-active.cancel:
+			canceling = true
+		default:
+		}
+		switch {
+		case canceling:
+			stdoutClosedBecause = "a cancel or stop arrived after the engine exited"
+		case n > 1<<20:
+			stdoutClosedBecause = "a descendant wrote more than 1 MiB after the engine exited"
+		case blocked >= e.cfg.CancelGrace:
+			stdoutClosedBecause = "reads blocked for a whole grace period after the engine exited"
+		default:
+			exitTimer = time.AfterFunc(e.cfg.CancelGrace, checkAfterExit)
 			return
 		}
-		exitTimer = time.AfterFunc(e.cfg.CancelGrace, checkAfterExit)
+		_ = stdout.Close()
+	}
+	closedBecause := func() string {
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		return stdoutClosedBecause
 	}
 	go func() {
 		err := cmd.Wait()
@@ -464,8 +487,10 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			if errors.Is(err, bufio.ErrBufferFull) {
 				continue
 			}
-			if errors.Is(err, io.EOF) && len(line) != 0 {
-				return message{}, nil, errors.New("truncated protocol line")
+			if err != nil && len(line) != 0 {
+				// Bytes without a newline at EOF, or when stdout was closed
+				// under a descendant that held it, are a protocol violation.
+				return message{}, nil, fmt.Errorf("truncated protocol line: %v", err)
 			}
 			if err != nil {
 				return message{}, nil, err
@@ -628,6 +653,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 				startShutdown()
 				killed, waitErr := waitExit()
 				cause := fmt.Errorf("engine exited without result: %v", waitErr)
+				if reason := closedBecause(); reason != "" {
+					cause = fmt.Errorf("%w; stdout closed: %s", cause, reason)
+				}
 				if fatalCause != nil {
 					cause = fmt.Errorf("%w: %v", fatalCause, cause)
 				}

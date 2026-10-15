@@ -822,9 +822,12 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
 
 - **2026-10-14, successful result with slow engine exit: a proposal awaiting the owner.** Issue
   #39 item 3 leaves this to the owner, and no confirmation exists yet. What the branch does until
-  then: an `ok` result followed by a kill for a slow exit, or a cancel or a Stop after the
-  result, moves the task `running` → `interrupted` → `recovery_required`, with the stored result
-  kept and a `recovery` event saying the engine had to be killed after its result. Reason: an
+  then: an `ok` result followed by a forced termination (a kill for a slow exit, or a cancel or
+  a Stop the engine does not answer by exiting within the grace period) moves the task
+  `running` → `interrupted` → `recovery_required`, with the stored result kept and a `recovery`
+  event saying the engine had to be killed after its result. A cancel or a Stop after the result
+  that the engine answers by exiting naturally before the kill goes through `finish`, which ends
+  the task `canceled` (the cancel request was recorded) with the result kept. Reason: an
   unobserved or forced end must be reconciled before the stored result is trusted. Cost: a
   `recovery_required` task has no way out until a reconcile flow exists, so the stored result
   cannot be accepted yet. Owner action 12 below.
@@ -863,5 +866,7 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
     (suggested one year) and say whether to restrict it to the home's public address, which
     breaks renewal whenever that address changes.
 12. Confirm or reject the proposal of 2026-10-14 in the decisions log: a successful result
-    followed by a slow exit, a cancel or a Stop goes to `recovery_required` with the result kept,
-    until a reconcile flow exists.
+    followed by a forced termination (a slow exit, or a cancel or a Stop the engine does not
+    answer by exiting) goes to `recovery_required` with the result kept, until a reconcile flow
+    exists; a cancel or a Stop the engine answers by exiting naturally ends the task `canceled`
+    with the result kept.

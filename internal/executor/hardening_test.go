@@ -100,7 +100,9 @@ func TestStreamingDescendantCannotExtendTheExitDeadline(t *testing.T) {
 	started := time.Now()
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
-	if elapsed := time.Since(started); elapsed < e.cfg.CancelGrace || elapsed > 700*time.Millisecond {
+	// Two process starts precede the exit; a descendant that could extend the
+	// deadline would instead keep the attempt open for as long as it streams.
+	if elapsed := time.Since(started); elapsed < e.cfg.CancelGrace || elapsed > 3*e.cfg.CancelGrace+time.Second {
 		t.Fatalf("attempt took %s", elapsed)
 	}
 }
@@ -161,26 +163,30 @@ func TestSlowlyWritingDescendantCannotHoldStopPastItsBudget(t *testing.T) {
 }
 
 func TestPreparingDeadlineEndsAnEngineThatNeverReadsStdin(t *testing.T) {
-	e, s, _, _ := testExecutor(t, "hello_no_read")
-	e.cfg.PreparingDeadline = 100 * time.Millisecond
-	ctx := context.Background()
-	// A prompt larger than any pipe buffer: the start line cannot be written
-	// unless the engine reads it.
-	_, err := s.Do(ctx, "u", "big-objective", "big-objective", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "UPDATE tasks SET objective=? WHERE id='task'", strings.Repeat("x", 128<<10))
-		return []byte("ok"), err
-	})
-	if err != nil {
-		t.Fatal(err)
+	for _, script := range []string{"hello_no_read", "hello_partial_read"} {
+		t.Run(script, func(t *testing.T) {
+			e, s, _, _ := testExecutor(t, script)
+			e.cfg.PreparingDeadline = 100 * time.Millisecond
+			ctx := context.Background()
+			// A prompt larger than any pipe buffer: the start line cannot be
+			// written unless the engine reads all of it.
+			_, err := s.Do(ctx, "u", "big-objective", "big-objective", nil, func(tx *store.Tx) ([]byte, error) {
+				_, err := tx.ExecContext(ctx, "UPDATE tasks SET objective=? WHERE id='task'", strings.Repeat("x", 128<<10))
+				return []byte("ok"), err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now()
+			e.LaunchAttempt("attempt")
+			waitAttempt(t, s, "ended_failed")
+			if elapsed := time.Since(started); elapsed > e.cfg.PreparingDeadline+3*e.cfg.CancelGrace+time.Second {
+				t.Fatalf("attempt took %s", elapsed)
+			}
+			errorEventContains(t, s, "preparing deadline exceeded")
+			errorEventContains(t, s, "engine was killed after the grace period")
+		})
 	}
-	started := time.Now()
-	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "ended_failed")
-	if elapsed := time.Since(started); elapsed > e.cfg.PreparingDeadline+3*e.cfg.CancelGrace+time.Second {
-		t.Fatalf("attempt took %s", elapsed)
-	}
-	errorEventContains(t, s, "preparing deadline exceeded")
-	errorEventContains(t, s, "engine was killed after the grace period")
 }
 
 func TestForceKillStopsTheGrandchildWithTheEngine(t *testing.T) {
@@ -387,4 +393,51 @@ func TestResultRecoveryStorageFailureFinalizesAttempt(t *testing.T) {
 		t.Fatalf("task=%+v: %v", task, err)
 	}
 	errorEventContains(t, s, "recovery unavailable")
+}
+
+func TestStopEndsADescendantFeedingValidEventsFasterThanStoragePersistsThem(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "valid_stream_after_exit")
+	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = 200 * time.Millisecond
+	e.cfg.Env = append(e.cfg.Env, "ADA_FAKE_INTERVAL=100ms")
+	e.afterAppend = func() { time.Sleep(150 * time.Millisecond) }
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "running")
+	waitGrandchildMarker(t, marker)
+	// The engine exits right after the marker; wait until the descendant's
+	// events are being ingested so the stop arrives after the exit.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		events, _ := s.Events(context.Background(), "u", "attempt", 0)
+		if len(events) >= 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("descendant events not ingested: %+v", events)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
+	defer cancel()
+	if err := e.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	a, err := s.AttemptByID(context.Background(), "attempt")
+	if err != nil || a.Ended == "" {
+		t.Fatalf("attempt = %+v: %v", a, err)
+	}
+	errorEventContains(t, s, "after the engine exited")
+}
+
+func TestPartialLineAfterASuccessfulResultFailsTheAttempt(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "ok_partial_tail_hold")
+	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = 100 * time.Millisecond
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	task, err := s.Task(context.Background(), "u", "task")
+	if err != nil || task.State != store.Failed {
+		t.Fatalf("task = %+v: %v", task, err)
+	}
+	errorEventContains(t, s, "truncated protocol line")
 }
