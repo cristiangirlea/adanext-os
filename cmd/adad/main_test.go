@@ -710,18 +710,10 @@ func TestCoordinatorWithoutEngineFlagsRefusesStartWithoutIntent(t *testing.T) {
 	}
 }
 
-func TestCoordinatorServesAReferencedArtifactToAMemberOnly(t *testing.T) {
-	ctx := context.Background()
-	dir, err := os.MkdirTemp("", "ada")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	s, err := store.Open(ctx, filepath.Join(dir, "adanext.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+// seedReferencedArtifact stores one blob in dir's artifact store and references
+// it from an ended attempt of two projects, p owned by local and q by other.
+func seedReferencedArtifact(t *testing.T, ctx context.Context, s *store.Store, dir string) (artifact.Ref, []byte) {
+	t.Helper()
 	artifacts, err := artifact.Open(filepath.Join(dir, "artifacts"))
 	if err != nil {
 		t.Fatal(err)
@@ -760,6 +752,22 @@ func TestCoordinatorServesAReferencedArtifactToAMemberOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	return ref, blob
+}
+
+func TestCoordinatorServesAReferencedArtifactToAMemberOnly(t *testing.T) {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	s, err := store.Open(ctx, filepath.Join(dir, "adanext.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ref, blob := seedReferencedArtifact(t, ctx, s, dir)
 	data, err := os.ReadFile(os.Args[0])
 	if err != nil {
 		t.Fatal(err)
@@ -792,5 +800,39 @@ func TestCoordinatorServesAReferencedArtifactToAMemberOnly(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 404 || !bytes.Contains(body, []byte(`"error":"not_found"`)) {
 		t.Fatalf("non-member: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestCoordinatorWithoutEngineFlagsStillServesAReferencedArtifact(t *testing.T) {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	s, err := store.Open(ctx, filepath.Join(dir, "adanext.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ref, blob := seedReferencedArtifact(t, ctx, s, dir)
+	name := testEndpointName(t)
+	helper := startHelper(t, dir, name)
+	defer func() {
+		helper.Process.Kill()
+		helper.Wait()
+	}()
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return ipc.Dial(ctx, ipc.Config{StateDir: dir, Name: name})
+	}}}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("http://ipc/v1/attempts/attempt-p/artifacts/" + ref.Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 || !bytes.Equal(body, blob) {
+		t.Fatalf("member without an engine: %d %.80s %v", resp.StatusCode, body, err)
 	}
 }

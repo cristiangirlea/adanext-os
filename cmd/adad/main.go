@@ -129,16 +129,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	for _, id := range recovered {
 		hub.Notify(id)
 	}
-	var execution api.Execution
+	// Artifacts already on disk are served whether or not this coordinator
+	// runs an engine: a restart without one still answers reads of past results.
+	artifacts, err := artifact.Open(filepath.Join(*stateDir, "artifacts"))
+	if err != nil {
+		fmt.Fprintln(stderr, "adad: open artifacts:", err)
+		return 1
+	}
+	execution := api.Execution{Artifacts: artifacts, References: s}
 	var local *executor.Executor
 	if *enginePath != "" && *engineHash != "" {
-		artifacts, err := artifact.Open(filepath.Join(*stateDir, "artifacts"))
-		if err != nil {
-			fmt.Fprintln(stderr, "adad: open artifacts:", err)
-			return 1
-		}
 		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation})
-		execution = api.Execution{EngineSHA256: *engineHash, Generation: generation, Runner: local, Artifacts: artifacts, References: s}
+		execution.EngineSHA256, execution.Generation, execution.Runner = *engineHash, generation, local
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
 			defer cancel()

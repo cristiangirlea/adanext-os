@@ -56,6 +56,19 @@ type Executor struct {
 	wg             sync.WaitGroup
 	beforeAccepted func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
 	afterAppend    func()                          // Set only by tests to simulate slow event storage.
+	beforeRemove   func(hash string)               // Test seam between discard's reference check and its removal.
+	// artifactMu serialises the lifecycle of every artifact a writer stores
+	// outside a transaction: from its Write, which may reuse content already
+	// on disk, through the commit that references it or the discard that
+	// removes it. Invariant: while a writer holds the lock, no other writer
+	// can reuse a blob it may still discard, so a committed reference never
+	// points at content a failed writer removed afterwards, and discard's
+	// reference check cannot be overtaken by a commit. The in-transaction form
+	// (appendBoundedEvent) runs without it: its payloads are fixed and small,
+	// and taking the lock inside a transaction could wait on a writer that
+	// holds the lock while it waits for the database. The v1 concurrency cap
+	// is one attempt, so the lock is uncontended; it exists for correctness.
+	artifactMu sync.Mutex
 }
 
 func New(cfg Config) *Executor {
@@ -794,25 +807,31 @@ func (e *Executor) owned(id string, fn func(*store.Tx) error) error {
 }
 
 func (e *Executor) append(a store.Attempt, kind string, payload []byte, session string) error {
-	event, ref, err := e.boundEvent(store.Event{Attempt: a.ID, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Payload: payload})
-	if err != nil {
-		return err
-	}
-	err = e.owned(a.ID, func(tx *store.Tx) error {
-		if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&event.Seq); err != nil {
+	err := e.artifactLifecycle(func() error {
+		event, ref, err := e.boundEvent(store.Event{Attempt: a.ID, Time: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Payload: payload})
+		if err != nil {
 			return err
 		}
-		if err := e.appendBoundEvent(tx, event, ref); err != nil {
-			return err
-		}
-		if kind == "session" {
-			_, err := tx.ExecContext(context.Background(), "UPDATE attempts SET native_session=? WHERE id=?", session, a.ID)
-			return err
+		err = e.owned(a.ID, func(tx *store.Tx) error {
+			if err := tx.QueryRowContext(context.Background(), "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", a.ID).Scan(&event.Seq); err != nil {
+				return err
+			}
+			if err := e.appendBoundEvent(tx, event, ref); err != nil {
+				return err
+			}
+			if kind == "session" {
+				_, err := tx.ExecContext(context.Background(), "UPDATE attempts SET native_session=? WHERE id=?", session, a.ID)
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return e.discard(err, ref)
 		}
 		return nil
 	})
 	if err != nil {
-		return e.discard(err, ref)
+		return err
 	}
 	if e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)
@@ -821,6 +840,14 @@ func (e *Executor) append(a store.Attempt, kind string, payload []byte, session 
 		e.afterAppend()
 	}
 	return nil
+}
+
+// artifactLifecycle runs fn under artifactMu: fn writes artifacts, runs the
+// transaction that references them and discards them when it fails.
+func (e *Executor) artifactLifecycle(fn func() error) error {
+	e.artifactMu.Lock()
+	defer e.artifactMu.Unlock()
+	return fn()
 }
 
 // boundEvent returns the event as it is stored: unchanged when its encoding fits
@@ -884,6 +911,9 @@ func (e *Executor) discard(cause error, refs ...artifact.Ref) error {
 		if referenced {
 			continue
 		}
+		if e.beforeRemove != nil {
+			e.beforeRemove(ref.Hash)
+		}
 		if err := e.cfg.Artifacts.Remove(ref.Hash); err != nil && !errors.Is(err, os.ErrNotExist) {
 			cause = errors.Join(cause, fmt.Errorf("remove artifact %s: %w", ref.Hash, err))
 		}
@@ -892,6 +922,18 @@ func (e *Executor) discard(cause error, refs ...artifact.Ref) error {
 }
 
 func (e *Executor) result(a store.Attempt, m message, line []byte) error {
+	if err := e.artifactLifecycle(func() error { return e.storeResult(a, m, line) }); err != nil {
+		return err
+	}
+	if e.cfg.Hub != nil {
+		e.cfg.Hub.Notify(a.ID)
+	}
+	return nil
+}
+
+// storeResult writes the result's artifacts and records the result event in
+// one transaction; the caller holds artifactMu.
+func (e *Executor) storeResult(a store.Attempt, m message, line []byte) error {
 	var final artifact.Ref
 	if len(m.Result.Final) > 64<<10 {
 		if e.cfg.Artifacts == nil {
@@ -934,9 +976,6 @@ func (e *Executor) result(a store.Attempt, m message, line []byte) error {
 	})
 	if err != nil {
 		return e.discard(err, final, ref)
-	}
-	if e.cfg.Hub != nil {
-		e.cfg.Hub.Notify(a.ID)
 	}
 	return nil
 }

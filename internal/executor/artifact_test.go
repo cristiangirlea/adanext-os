@@ -13,9 +13,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/api"
 	"github.com/cristiangirlea/ada-os/internal/artifact"
@@ -151,5 +153,132 @@ func TestTheExecutorReferencesEveryEventTheAPIWouldRefuseToEncode(t *testing.T) 
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !bytes.Contains(body, inline.Payload) || !bytes.Contains(body, referenced.Payload) {
 		t.Fatalf("page: %d %.80s", resp.StatusCode, body)
+	}
+}
+
+// storedBlobs lists the published blobs under the executor's artifact store,
+// leaving out the temporary directory.
+func storedBlobs(t *testing.T, dir string) []string {
+	t.Helper()
+	var blobs []string
+	root := filepath.Join(dir, "artifacts")
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == "tmp" {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() {
+			blobs = append(blobs, filepath.Base(path))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(blobs)
+	return blobs
+}
+
+func TestADiscardNeverRemovesContentAnotherWriterReusesMeanwhile(t *testing.T) {
+	e, s, dir, _ := testExecutor(t, "happy")
+	ctx := context.Background()
+	a, err := s.AttemptByID(ctx, "attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := oversizePayload("r")
+	var otherErr error
+	done := make(chan struct{})
+	e.beforeRemove = func(string) {
+		// The other writer appends the same content to a live attempt while
+		// this one stands between its reference check and its removal. Under
+		// the lifecycle lock it cannot finish before the removal, so the wait
+		// runs out; without the lock it commits a reference to content the
+		// removal then deletes.
+		go func() { otherErr = e.append(a, "event", shared, ""); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	if err := e.append(store.Attempt{ID: "missing"}, "event", shared, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("append to a missing attempt: %v", err)
+	}
+	<-done
+	if otherErr != nil {
+		t.Fatalf("the other writer: %v", otherErr)
+	}
+	sum := sha256.Sum256(shared)
+	hash := hex.EncodeToString(sum[:])
+	if referenced, err := s.ArtifactReferenced(ctx, hash); err != nil || !referenced {
+		t.Fatalf("referenced=%v: %v", referenced, err)
+	}
+	if content, err := os.ReadFile(blobPath(dir, shared)); err != nil || !bytes.Equal(content, shared) {
+		t.Fatalf("the blob the other writer references: %d bytes, %v", len(content), err)
+	}
+	events, err := s.Events(ctx, "u", "attempt", 0)
+	if err != nil || len(events) != 1 || !bytes.Equal(events[0].Payload, api.ReferencedPayload(hash, int64(len(shared)))) {
+		t.Fatalf("events %d: %v", len(events), err)
+	}
+}
+
+func TestAFailureAfterTheReferenceIsRecordedRemovesTheRolledBackBlob(t *testing.T) {
+	e, s, dir, _ := testExecutor(t, "happy")
+	ctx := context.Background()
+	a, err := s.AttemptByID(ctx, "attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Do(ctx, "u", "fault", "fault", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "CREATE TRIGGER fault BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'injected event fault'); END")
+		return []byte("ok"), err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := oversizePayload("t")
+	if err := e.append(a, "event", payload, ""); err == nil || !strings.Contains(err.Error(), "injected event fault") {
+		t.Fatalf("append with the event insert failing: %v", err)
+	}
+	sum := sha256.Sum256(payload)
+	if referenced, err := s.ArtifactReferenced(ctx, hex.EncodeToString(sum[:])); err != nil || referenced {
+		t.Fatalf("the rolled-back reference remains: referenced=%v, %v", referenced, err)
+	}
+	if blobs := storedBlobs(t, dir); len(blobs) != 0 {
+		t.Fatalf("blobs remain: %v", blobs)
+	}
+}
+
+func TestAFailedResultRemovesItsFinalAndEventBlobsAndKeepsSharedContent(t *testing.T) {
+	e, s, dir, _ := testExecutor(t, "happy")
+	ctx := context.Background()
+	a, err := s.AttemptByID(ctx, "attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := oversizePayload("s")
+	if err := e.append(a, "event", shared, ""); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(shared)
+	want := []string{hex.EncodeToString(sum[:])}
+	if _, _, err := s.BumpAndRecover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Each line is over the event limit on its own, so a failed result leaves
+	// a final blob and an event blob to discard.
+	notes := strings.Repeat("n", 256<<10)
+	for _, final := range []string{strings.Repeat("f", 100<<10), string(shared)} {
+		var m message
+		m.Result.Status, m.Result.Final = "ok", final
+		line, _ := json.Marshal(map[string]any{"v": 1, "seq": 6, "type": "result", "result": map[string]any{"status": "ok", "final": final, "notes": notes}})
+		if err := e.result(a, m, line); !errors.Is(err, store.ErrStaleOwnership) {
+			t.Fatalf("result after the generation moved on: %v", err)
+		}
+		if blobs := storedBlobs(t, dir); !reflect.DeepEqual(blobs, want) {
+			t.Fatalf("blobs after a failed result with a %d-byte final: %v, want %v", len(final), blobs, want)
+		}
 	}
 }
