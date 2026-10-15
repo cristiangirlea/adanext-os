@@ -527,3 +527,43 @@ func TestFailedDirectorySyncIsRetriedWhenTheBlobIsReused(t *testing.T) {
 		t.Fatal("unexpected blob or temporary file count")
 	}
 }
+
+func TestOpenReportsStaleTemporaryFilesItCouldNotRemove(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	tmp := filepath.Join(dir, "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stuck := filepath.Join(tmp, "artifact-stuck")
+	removable := filepath.Join(tmp, "artifact-removable")
+	ago := time.Now().Add(-2 * time.Hour)
+	for _, path := range []string{stuck, removable} {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, ago, ago); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removeErr := errors.New("file held open")
+	s, err := openWithStaleTempRemover(dir, func(path string) error {
+		if path == stuck {
+			return removeErr
+		}
+		return os.Remove(path)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	skipped, first := s.StaleTemps()
+	if skipped != 1 || !errors.Is(first, removeErr) || !strings.Contains(first.Error(), stuck) {
+		t.Fatalf("skipped=%d first=%v", skipped, first)
+	}
+	clean, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped, first := clean.StaleTemps(); skipped != 0 || first != nil {
+		t.Fatalf("clean sweep reported skipped=%d first=%v", skipped, first)
+	}
+}
