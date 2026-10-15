@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -85,9 +86,9 @@ func TestBackupRemovesTemporaryFileAfterSyncFailureAndCanRetry(t *testing.T) {
 	dest := filepath.Join(dir, "backup.sqlite")
 	tmp := vacuumIntoBackupTemp(t, s, dir)
 	failure := errors.New("injected sync failure")
-	err := finishBackup(tmp, dest, func(string) (backupFile, error) {
-		return &failingBackupFile{syncErr: failure}, nil
-	}, publishBackupNoReplace, syncBackupDirectory)
+	fs := osBackupFS()
+	fs.open = func(string) (backupFile, error) { return &failingBackupFile{syncErr: failure}, nil }
+	err := finishBackup(tmp, dest, fs)
 	if !errors.Is(err, failure) {
 		t.Fatalf("sync failure: %v", err)
 	}
@@ -108,14 +109,14 @@ func TestBackupDoesNotReplaceDestinationCreatedBeforePublish(t *testing.T) {
 	dest := filepath.Join(dir, "backup.sqlite")
 	tmp := vacuumIntoBackupTemp(t, s, dir)
 	contents := []byte("someone else's file")
-	err := finishBackup(tmp, dest, func(path string) (backupFile, error) {
-		return os.OpenFile(path, os.O_RDWR, 0)
-	}, func(source, target string) error {
+	fs := osBackupFS()
+	fs.publish = func(source, target string) error {
 		if err := os.WriteFile(target, contents, 0o600); err != nil {
 			return err
 		}
 		return publishBackupNoReplace(source, target)
-	}, syncBackupDirectory)
+	}
+	err := finishBackup(tmp, dest, fs)
 	if !errors.Is(err, os.ErrExist) || !strings.Contains(err.Error(), "backup destination exists") {
 		t.Fatalf("publish over existing destination: %v", err)
 	}
@@ -150,21 +151,23 @@ func TestAnUnsyncedBackupIsRemovedAndItsCauseIsPreserved(t *testing.T) {
 			if stage == "close" {
 				file.closeErr = failure
 			}
-			publish := publishBackupNoReplace
+			fs := osBackupFS()
 			if stage == "publish" {
-				publish = func(string, string) error { return failure }
+				fs.publish = func(string, string) error { return failure }
 			}
-			err := finishBackup(tmp, dest, func(string) (backupFile, error) {
+			fs.open = func(string) (backupFile, error) {
 				if stage == "open" {
 					return nil, failure
 				}
 				return file, nil
-			}, publish, func(string) error {
+			}
+			fs.syncDir = func(string) error {
 				if stage == "directory sync" {
 					return failure
 				}
 				return nil
-			})
+			}
+			err := finishBackup(tmp, dest, fs)
 			if !errors.Is(err, failure) {
 				t.Fatalf("cause: %v", err)
 			}
@@ -190,6 +193,102 @@ func TestAnUnsyncedBackupIsRemovedAndItsCauseIsPreserved(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertNoBackupTemps(t, filepath.Dir(dest))
+		})
+	}
+}
+
+func TestPublishFallsBackToANoReplaceRenameWhereHardLinksAreMissing(t *testing.T) {
+	for _, linkErr := range []error{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.ENOSYS} {
+		t.Run(linkErr.Error(), func(t *testing.T) {
+			var renamed [][2]string
+			err := publishNoReplace(func(string, string) error { return linkErr }, func(from, to string) error {
+				renamed = append(renamed, [2]string{from, to})
+				return nil
+			}, "tmp", "dest")
+			if err != nil {
+				t.Fatalf("publish without hard links: %v", err)
+			}
+			if len(renamed) != 1 || renamed[0] != [2]string{"tmp", "dest"} {
+				t.Fatalf("renames: %v, want tmp to dest once", renamed)
+			}
+		})
+	}
+}
+
+func TestPublishDoesNotRenameAfterOtherLinkFailures(t *testing.T) {
+	for _, linkErr := range []error{syscall.EEXIST, syscall.EIO} {
+		t.Run(linkErr.Error(), func(t *testing.T) {
+			err := publishNoReplace(func(string, string) error { return linkErr }, func(string, string) error {
+				t.Fatal("renamed after a link failure that does not say hard links are missing")
+				return nil
+			}, "tmp", "dest")
+			if !errors.Is(err, linkErr) {
+				t.Fatalf("link failure: %v, want %v", err, linkErr)
+			}
+		})
+	}
+}
+
+func TestPublishRefusesPlainlyWhereNeitherHardLinksNorNoReplaceRenameExist(t *testing.T) {
+	link := func(string, string) error { return syscall.EPERM }
+	for _, tc := range []struct {
+		name      string
+		renameErr error
+	}{
+		{"old kernel", syscall.ENOSYS},
+		{"filesystem without the flag", syscall.EINVAL},
+		{"macOS filesystem without the flag", syscall.ENOTSUP},
+		{"no rename at all", ErrPublishUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := publishNoReplace(link, func(string, string) error { return tc.renameErr }, "tmp", "dest")
+			if !errors.Is(err, ErrPublishUnsupported) {
+				t.Fatalf("publish: %v, want ErrPublishUnsupported", err)
+			}
+			if !strings.Contains(err.Error(), syscall.EPERM.Error()) {
+				t.Fatalf("publish error hides the link failure: %v", err)
+			}
+		})
+	}
+	t.Run("rename fails for another reason", func(t *testing.T) {
+		err := publishNoReplace(link, func(string, string) error { return syscall.EEXIST }, "tmp", "dest")
+		if !errors.Is(err, syscall.EEXIST) || errors.Is(err, ErrPublishUnsupported) {
+			t.Fatalf("rename failure: %v, want EEXIST without ErrPublishUnsupported", err)
+		}
+	})
+}
+
+func TestAFailureAfterPublishingReportsACompleteBackup(t *testing.T) {
+	failure := errors.New("injected failure after publish")
+	for _, stage := range []string{"remove temporary", "directory sync"} {
+		t.Run(stage, func(t *testing.T) {
+			s := openTestStore(t)
+			seed(t, s)
+			dir := t.TempDir()
+			dest := filepath.Join(dir, "backup.sqlite")
+			tmp := vacuumIntoBackupTemp(t, s, dir)
+			fs := osBackupFS()
+			if stage == "remove temporary" {
+				fs.remove = func(string) error { return failure }
+			} else {
+				fs.syncDir = func(string) error { return failure }
+			}
+			err := finishBackup(tmp, dest, fs)
+			if !errors.Is(err, ErrPublishedWithWarning) {
+				t.Fatalf("failure after publish: %v, want ErrPublishedWithWarning", err)
+			}
+			if !errors.Is(err, failure) {
+				t.Fatalf("cause lost: %v", err)
+			}
+			restored, err := Open(ctx, dest)
+			if err != nil {
+				t.Fatalf("published backup is not a usable database: %v", err)
+			}
+			defer restored.Close()
+			var tasks int
+			if err := restored.db.QueryRow("SELECT count(*) FROM tasks").Scan(&tasks); err != nil || tasks != 1 {
+				t.Fatalf("backup tasks: %d, %v", tasks, err)
+			}
 		})
 	}
 }
