@@ -5,7 +5,7 @@ package store
 import "os"
 
 func publishBackupNoReplace(tmpPath, destPath string) error {
-	return os.Link(tmpPath, destPath)
+	return publishNoReplace(os.Link, renameNoReplace, tmpPath, destPath)
 }
 
 func syncBackupDirectory(path string) error {
