@@ -33,7 +33,10 @@ func makePrivateDirectory(path string) error {
 
 // makePrivateDirectoryForUID checks and tightens the directory through one
 // handle, so the directory that was checked is the one that is chmodded, and
-// then confirms the path still names that directory.
+// then confirms the path still names that directory. The handle is opened
+// read-only, so an owned directory without read permission (mode 0300 or
+// 0000) is refused with EACCES where a chmod by path once recovered it; the
+// owner repairs such a directory by hand.
 func makePrivateDirectoryForUID(path string, uid uint32) error {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
