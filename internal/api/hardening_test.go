@@ -488,7 +488,7 @@ func TestClosingHubDuringReservationReturnsShuttingDown(t *testing.T) {
 			w := httptest.NewRecorder()
 			done := make(chan struct{})
 			go func() { h.events(w, req); close(done) }()
-			time.Sleep(20 * time.Millisecond)
+			waitBudgetWaiters(t, f.hub, 1)
 			f.hub.Close()
 			select {
 			case <-done:
@@ -581,18 +581,16 @@ func TestIdleStreamPageHasNoLargeBuffer(t *testing.T) {
 
 func TestZeroByteReleaseDoesNotWakeBudgetWaiters(t *testing.T) {
 	h := NewHub()
+	h.BudgetBytes = 1
 	if !h.reserveBytes(context.Background(), 1) {
 		t.Fatal("reserve byte")
 	}
-	h.mu.Lock()
-	wake := h.budgetWake
-	h.mu.Unlock()
+	waiter := reserveInBackground(h, context.Background(), 1)
+	waitBudgetWaiters(t, h, 1)
 	h.releaseBytes(0)
-	select {
-	case <-wake:
-		t.Fatal("zero-byte release woke budget waiters")
-	default:
-	}
+	expectWaiting(t, "waiter", waiter)
+	h.releaseBytes(1)
+	expectGranted(t, "waiter", waiter)
 	h.releaseBytes(1)
 }
 
