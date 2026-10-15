@@ -121,3 +121,37 @@ func TestAnotherUsersDirectoryIsRefusedWithoutChmod(t *testing.T) {
 		t.Fatalf("another user's directory was chmodded: %v %v", info, err)
 	}
 }
+
+func TestADirectorySwappedForASymlinkBetweenCheckAndChmodIsRefused(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	target := filepath.Join(t.TempDir(), "target")
+	for _, path := range []string{dir, target} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	swapped := false
+	beforeDirectoryChmod = func(path string) {
+		if path != dir || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(dir, dir+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeDirectoryChmod = nil })
+	if _, err := Open(dir); err == nil {
+		t.Fatal("accepted a directory swapped for a symlink")
+	}
+	if !swapped {
+		t.Fatal("the swap hook did not run")
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("symlink target was chmodded: %v %v", info, err)
+	}
+}

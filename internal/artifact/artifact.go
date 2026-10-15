@@ -20,6 +20,10 @@ var (
 	ErrCorrupt     = errors.New("artifact is corrupt")
 	ErrDiskFull    = errors.New("artifact disk is full")
 	ErrInvalidHash = errors.New("invalid artifact hash")
+	// ErrBusy means another handle holds the blob open, so a replacement or a
+	// read was refused. It happens on Windows only, where an open file cannot be
+	// replaced; retry once the reader has closed.
+	ErrBusy = errors.New("artifact is in use")
 )
 
 type Ref struct {
@@ -28,8 +32,10 @@ type Ref struct {
 }
 
 type Store struct {
-	dir string
-	fs  filesystem
+	dir          string
+	fs           filesystem
+	staleSkipped int
+	staleErr     error
 }
 
 type file interface {
@@ -109,14 +115,21 @@ func openWithStaleTempRemover(dir string, remove func(string) error) (*Store, er
 			return nil, err
 		}
 	}
-	removeStaleTemps(filepath.Join(absolute, "tmp"), remove)
-	return &Store{dir: absolute, fs: fs}, nil
+	skipped, sweepErr := removeStaleTemps(filepath.Join(absolute, "tmp"), remove)
+	return &Store{dir: absolute, fs: fs, staleSkipped: skipped, staleErr: sweepErr}, nil
 }
 
-func removeStaleTemps(dir string, remove func(string) error) {
+// StaleTemps reports what Open's sweep of stale temporary files left behind:
+// how many it could not remove and the first error it met. A file that stays
+// skipped across restarts is stuck and needs a look.
+func (s *Store) StaleTemps() (skipped int, first error) {
+	return s.staleSkipped, s.staleErr
+}
+
+func removeStaleTemps(dir string, remove func(string) error) (skipped int, first error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return 0, fmt.Errorf("list temporary artifacts: %w", err)
 	}
 	cutoff := time.Now().Add(-time.Hour)
 	for _, entry := range entries {
@@ -126,12 +139,25 @@ func removeStaleTemps(dir string, remove func(string) error) {
 		path := filepath.Join(dir, entry.Name())
 		info, err := os.Lstat(path)
 		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				skipped++
+				if first == nil {
+					first = fmt.Errorf("inspect stale temporary artifact %s: %w", path, err)
+				}
+			}
 			continue
 		}
-		if info.Mode().IsRegular() && info.ModTime().Before(cutoff) {
-			_ = remove(path)
+		if !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			skipped++
+			if first == nil {
+				first = fmt.Errorf("remove stale temporary artifact %s: %w", path, err)
+			}
 		}
 	}
+	return skipped, first
 }
 
 func privateDirectory(fs filesystem, path string) error {
@@ -148,6 +174,9 @@ func privateDirectory(fs filesystem, path string) error {
 }
 
 // Write streams a blob to a private temporary file and publishes it by hash.
+// A mismatched blob at the destination is replaced. On Windows that fails with
+// ErrBusy while a reader holds the old blob open; the temporary file is removed
+// and the blob is left as it was, so the caller retries after the reader closes.
 func (s *Store) Write(ctx context.Context, r io.Reader, limit int64) (ref Ref, err error) {
 	if err := ctx.Err(); err != nil {
 		return Ref{}, err
@@ -261,7 +290,7 @@ func (s *Store) Write(ctx context.Context, r io.Reader, limit int64) (ref Ref, e
 				return s.reuse(tmpPath, fanout, ref)
 			}
 		}
-		return Ref{}, classify(err)
+		return Ref{}, classify(replaceError(err, dest))
 	}
 	if err := s.fs.syncDir(fanout); err != nil {
 		return Ref{}, classify(err)
@@ -300,8 +329,14 @@ func (s *Store) reuse(tmpPath, fanout string, ref Ref) (Ref, error) {
 }
 
 func classify(err error) error {
-	if err != nil && isDiskFull(err) {
+	if err == nil {
+		return nil
+	}
+	if isDiskFull(err) {
 		return fmt.Errorf("%w: %w", ErrDiskFull, err)
+	}
+	if isBusy(err) {
+		return fmt.Errorf("%w: %w", ErrBusy, err)
 	}
 	return err
 }
@@ -322,7 +357,7 @@ func (s *Store) Open(hashString string) (io.ReadCloser, error) {
 	}
 	f, err := s.fs.open(path)
 	if err != nil {
-		return nil, err
+		return nil, classify(err)
 	}
 	info, err = f.Stat()
 	if err != nil {
