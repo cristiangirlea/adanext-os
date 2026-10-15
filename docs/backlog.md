@@ -116,7 +116,11 @@ records stay loadable, README and PLAN.md updated, tests first.
   time) is recovered. HTTP/1.1 on that pipe or socket, versioned under `/v1`: create, start,
   cancel, get and list tasks, and subscribe to events from a sequence number as server-sent
   events (decisions log, 2026-10-13: the same server takes M4b's TLS listener). Every mutating
-  request carries an idempotency key and the expected task revision. Acceptance: duplicate start, concurrent clients, a client
+  request carries an idempotency key and the expected task revision. M2.4a adds the owner's
+  stop, `POST /v1/coordinator/stop` (empty body, idempotency key, no revision; `202` with the
+  counts of running and queued work it ended; `403` for any other account), `queue_position` on
+  a queued task's `GET`, `queue_full` (`409`) on a user's fourth queued start, and cancel as the
+  withdrawal of a queued task (decisions log, 2026-10-15). Acceptance: duplicate start, concurrent clients, a client
   disconnecting mid-stream, reconnect from the last sequence, a malformed request, and the pipe's
   or socket's permissions.
 - [x] **M2.3 Local executor.** Done as M2.3a artifacts (#32: #35, 2026-10-13, merge `7cdad00`,
