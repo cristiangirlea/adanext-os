@@ -567,3 +567,25 @@ func TestOpenReportsStaleTemporaryFilesItCouldNotRemove(t *testing.T) {
 		t.Fatalf("clean sweep reported skipped=%d first=%v", skipped, first)
 	}
 }
+
+func TestRemoveDeletesAPublishedBlobAndRefusesABadHash(t *testing.T) {
+	s := testStore(t)
+	ref, err := s.Write(context.Background(), strings.NewReader("remove me"), 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove(ref.Hash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Open(ref.Hash); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("open after remove: %v", err)
+	}
+	if err := s.Remove(ref.Hash); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("second remove: %v", err)
+	}
+	for _, bad := range []string{strings.ToUpper(ref.Hash), ref.Hash[:63], "../" + ref.Hash[3:], ""} {
+		if err := s.Remove(bad); !errors.Is(err, ErrInvalidHash) {
+			t.Fatalf("remove %q: %v", bad, err)
+		}
+	}
+}

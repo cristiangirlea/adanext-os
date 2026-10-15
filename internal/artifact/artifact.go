@@ -371,6 +371,16 @@ func (s *Store) Open(hashString string) (io.ReadCloser, error) {
 	return &verifiedReader{file: f, hash: sha256.New(), expectedHash: hashString, expectedSize: info.Size()}, nil
 }
 
+// Remove deletes a published blob. The caller decides that nothing references
+// it any more: a reference rolled back after the write, with no committed
+// record sharing the content. A blob that is already gone is os.ErrNotExist.
+func (s *Store) Remove(hashString string) error {
+	if !validHash(hashString) {
+		return ErrInvalidHash
+	}
+	return classify(s.fs.remove(filepath.Join(s.dir, hashString[:2], hashString)))
+}
+
 func validHash(value string) bool {
 	if len(value) != 64 {
 		return false
