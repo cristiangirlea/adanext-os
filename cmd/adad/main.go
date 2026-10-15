@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,6 +46,26 @@ func defaultStateDir() string {
 	return filepath.Join(home, ".local", "state", "adanext")
 }
 
+// The implicit local user is the coordinator's owner account: the only one
+// that may stop it (decisions log, 2026-10-14, #9).
+const ownerAccount = "local"
+
+// coordinatorStop is what POST /v1/coordinator/stop drives once the owner's
+// request has recorded its reason: no more launches, every running attempt
+// asked to cancel, and the serve loop told to shut down and exit.
+type coordinatorStop struct {
+	local     *executor.Executor
+	requested chan struct{}
+	once      sync.Once
+}
+
+func (c *coordinatorStop) StopWork() {
+	if c.local != nil {
+		c.local.StopWork()
+	}
+	c.once.Do(func() { close(c.requested) })
+}
+
 func isLowerHex(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && hex.EncodeToString(decoded) == value
@@ -58,7 +79,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	name := flags.String("name", "adad", "coordinator endpoint name")
 	enginePath := flags.String("engine", "", "pinned Harness engine path")
 	engineHash := flags.String("engine-sha256", "", "pinned Harness engine SHA-256")
+	concurrency := flags.Int("concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *concurrency < 1 {
+		fmt.Fprintln(stderr, "adad: -concurrency must be at least 1")
 		return 2
 	}
 	if *stateDir == "" {
@@ -102,8 +128,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer s.Close()
-	_, err = s.Do(ctx, "local", "initial-local-user", "initial-local-user-v1", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO users(id,name,created) VALUES('local','Local',?)", time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = s.Do(ctx, ownerAccount, "initial-local-user", "initial-local-user-v1", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO users(id,name,created) VALUES(?,'Local',?)", ownerAccount, time.Now().UTC().Format(time.RFC3339Nano))
 		return []byte("ok"), err
 	})
 	if err != nil {
@@ -129,7 +155,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	for _, id := range recovered {
 		hub.Notify(id)
 	}
-	var execution api.Execution
+	stop := &coordinatorStop{requested: make(chan struct{})}
+	execution := api.Execution{Generation: generation, Owner: ownerAccount, Stopper: stop}
 	var local *executor.Executor
 	if *enginePath != "" && *engineHash != "" {
 		artifacts, err := artifact.Open(filepath.Join(*stateDir, "artifacts"))
@@ -137,8 +164,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "adad: open artifacts:", err)
 			return 1
 		}
-		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation})
-		execution = api.Execution{EngineSHA256: *engineHash, Generation: generation, Runner: local}
+		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: *concurrency})
+		stop.local = local
+		execution.EngineSHA256, execution.Runner = *engineHash, local
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
 			defer cancel()
@@ -147,17 +175,29 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			}
 		}()
 	}
-	server := &http.Server{Handler: api.New(s, hub, func(*http.Request) (string, error) { return "local", nil }, execution), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
+	server := &http.Server{Handler: api.New(s, hub, func(*http.Request) (string, error) { return ownerAccount, nil }, execution), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
 	server.RegisterOnShutdown(hub.Close)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
+	// A signal and the owner's stop request both end the serve loop the same
+	// way; the stop request has already recorded its reason on every attempt
+	// and asked the running ones to cancel, the signal path leaves that to
+	// the executor's orderly stop below.
+	stopping := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-stop.requested:
+		}
+		close(stopping)
+	}()
 	select {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintln(stderr, "adad: serve:", err)
 			return 1
 		}
-	case <-ctx.Done():
+	case <-stopping:
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {

@@ -50,6 +50,15 @@ func init() {
 		marker.Close()
 	}
 	line(2, "accepted", map[string]any{"attempt_id": start.AttemptID, "run_id": "block-run"})
+	// A cancel on stdin ends the run as canceled; anything else, stdin's end
+	// included, leaves the engine blocked for the crash tests.
+	var next struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(os.Stdin).Decode(&next); err == nil && next.Type == "cancel" {
+		line(3, "result", map[string]any{"attempt_id": start.AttemptID, "run_id": "block-run", "result": map[string]any{"status": "canceled"}})
+		os.Exit(0)
+	}
 	for {
 		time.Sleep(time.Hour)
 	}
@@ -706,5 +715,144 @@ func TestCoordinatorWithoutEngineFlagsRefusesStartWithoutIntent(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOwnerStopEndpointCancelsRunningAndQueuedWorkAndExits(t *testing.T) {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	s, err := store.Open(ctx, filepath.Join(dir, "adanext.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.CreateUser(ctx, "local", "Local"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Do(ctx, "local", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','p','/never-use','now')")
+		return []byte("ok"), err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddMember(ctx, "p", "local", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []string{"running", "queued"} {
+		if err := s.CreateTask(ctx, "local", task, "p", "objective", "criteria"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Transition(ctx, "local", task, store.Draft, store.Ready, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	name := testEndpointName(t)
+	process := startHelper(t, dir, name, os.Args[0], hex.EncodeToString(digest[:]))
+	defer func() {
+		if process.ProcessState == nil {
+			process.Process.Kill()
+			process.Wait()
+		}
+	}()
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return ipc.Dial(ctx, ipc.Config{StateDir: dir, Name: name})
+	}}}
+	defer client.CloseIdleConnections()
+	post := func(path, key, match string, body string) (int, []byte) {
+		t.Helper()
+		req, err := http.NewRequest("POST", "http://ipc"+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Idempotency-Key", key)
+		if match != "" {
+			req.Header.Set("If-Match", match)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, data
+	}
+	if code, body := post("/v1/tasks/running/start", "start-running", "1", `{"backend":"codex","mode":"auto"}`); code != 200 {
+		t.Fatalf("start = %d %s", code, body)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		task, err := s.Task(ctx, "local", "running")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.State == store.Running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task = %+v", task)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if code, body := post("/v1/tasks/queued/start", "start-queued", "1", `{"backend":"codex","mode":"auto"}`); code != 200 {
+		t.Fatalf("queued start = %d %s", code, body)
+	}
+	code, body := post("/v1/coordinator/stop", "quit", "", "")
+	if code != 202 || !bytes.Contains(body, []byte(`"running":1`)) || !bytes.Contains(body, []byte(`"queued":1`)) {
+		t.Fatalf("stop = %d %s", code, body)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- process.Wait() }()
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("coordinator exit: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("coordinator did not exit after the owner's stop")
+	}
+	for _, task := range []string{"running", "queued"} {
+		got, err := s.Task(ctx, "local", task)
+		if err != nil || got.State != store.Canceled {
+			t.Fatalf("task %s = %+v: %v", task, got, err)
+		}
+		var attemptID string
+		_, err = s.Do(ctx, "local", "read-"+task, "read", nil, func(tx *store.Tx) ([]byte, error) {
+			err := tx.QueryRowContext(ctx, "SELECT id FROM attempts WHERE task=? AND state='canceled'", task).Scan(&attemptID)
+			return []byte("ok"), err
+		})
+		if err != nil {
+			t.Fatalf("attempt of %s: %v", task, err)
+		}
+		events, err := s.Events(ctx, "local", attemptID, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reason := false
+		for _, event := range events {
+			if event.Kind == "cancel" && bytes.Contains(event.Payload, []byte(`"reason":"coordinator stopped by the owner"`)) {
+				reason = true
+			}
+		}
+		if !reason {
+			t.Fatalf("events of %s = %+v", task, events)
+		}
+		if task == "queued" {
+			if _, err := os.Stat(filepath.Join(dir, "attempts", attemptID)); !os.IsNotExist(err) {
+				t.Fatalf("queued attempt launched: %v", err)
+			}
+		}
 	}
 }
