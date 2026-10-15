@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -455,6 +458,7 @@ func (r *fakeReferences) count() int {
 
 type countingOpener struct {
 	*artifact.Store
+	dir   string
 	calls atomic.Int32
 }
 
@@ -463,9 +467,18 @@ func (o *countingOpener) Open(hash string) (io.ReadCloser, error) {
 	return o.Store.Open(hash)
 }
 
+// overwriteBlob replaces the stored bytes of hash behind the store's back.
+func (o *countingOpener) overwriteBlob(t *testing.T, hash string, content []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(o.dir, hash[:2], hash), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func storedPayload(t *testing.T, f *fixture, raw []byte) (*countingOpener, *fakeReferences, artifact.Ref) {
 	t.Helper()
-	artifacts, err := artifact.Open(t.TempDir())
+	dir := t.TempDir()
+	artifacts, err := artifact.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +490,326 @@ func storedPayload(t *testing.T, f *fixture, raw []byte) (*countingOpener, *fake
 	if err := f.s.AppendEvent(context.Background(), "alice", store.Event{Attempt: "limits-attempt", Seq: 1, Kind: "update", Payload: ReferencedPayload(ref.Hash, ref.Size)}); err != nil {
 		t.Fatal(err)
 	}
-	return &countingOpener{Store: artifacts}, refs, ref
+	return &countingOpener{Store: artifacts, dir: dir}, refs, ref
+}
+
+// getBody is get for a response whose body may end short: the read error is returned.
+func getBody(t *testing.T, url string) (*http.Response, []byte, error) {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(mustRequest(t, url))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	return resp, body, err
+}
+
+func mustRequest(t *testing.T, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func TestACorruptedArtifactOfTheSameSizeNeverReachesAClientWhole(t *testing.T) {
+	f := newFixture(t)
+	attemptForLimits(t, f)
+	raw := bytes.Repeat([]byte("artifact bytes "), 20<<10)
+	opener, refs, ref := storedPayload(t, f, raw)
+	corrupt := bytes.Clone(raw)
+	corrupt[len(corrupt)-1] ^= 1
+	opener.overwriteBlob(t, ref.Hash, corrupt)
+	server := httptest.NewServer(New(f.s, f.hub, func(*http.Request) (string, error) { return "alice", nil }, Execution{Artifacts: opener, References: refs}))
+	defer server.Close()
+	resp, body, err := getBody(t, server.URL+"/v1/attempts/limits-attempt/artifacts/"+ref.Hash)
+	if resp.StatusCode == 200 && err == nil {
+		t.Fatalf("corrupt artifact served whole: %d bytes, Content-Length %d", len(body), resp.ContentLength)
+	}
+	if resp.StatusCode == 200 && (!errors.Is(err, io.ErrUnexpectedEOF) || int64(len(body)) >= resp.ContentLength) {
+		t.Fatalf("status 200 with %d of %d bytes: %v", len(body), resp.ContentLength, err)
+	}
+}
+
+type readStep struct {
+	data []byte
+	err  error
+}
+
+// scriptedReader answers each Read with the next step's bytes and error.
+type scriptedReader struct {
+	steps []readStep
+}
+
+func (r *scriptedReader) Read(p []byte) (int, error) {
+	if len(r.steps) == 0 {
+		return 0, io.EOF
+	}
+	step := r.steps[0]
+	r.steps = r.steps[1:]
+	if len(step.data) > len(p) {
+		panic("scripted step larger than the read buffer")
+	}
+	return copy(p, step.data), step.err
+}
+
+func (r *scriptedReader) Close() error { return nil }
+
+type scriptedOpener struct {
+	steps []readStep
+}
+
+func (o scriptedOpener) Open(string) (io.ReadCloser, error) {
+	return &scriptedReader{steps: append([]readStep(nil), o.steps...)}, nil
+}
+
+func TestArtifactBytesReturnedTogetherWithAnErrorAreNeverServedAsComplete(t *testing.T) {
+	f := newFixture(t)
+	attemptForLimits(t, f)
+	raw := bytes.Repeat([]byte("abcdefgh"), 3<<10) // 24 KiB, under one read buffer
+	_, refs, ref := storedPayload(t, f, raw)
+	a, b, c := raw[:8<<10], raw[8<<10:16<<10], raw[16<<10:]
+	disk := errors.New("read: input/output error")
+	cases := []struct {
+		name     string
+		steps    []readStep
+		status   int
+		complete bool
+	}{
+		{"bytes with an error on the first read", []readStep{{raw, disk}}, 500, false},
+		{"bytes with an error after the response started", []readStep{{a, nil}, {b, nil}, {c, disk}}, 200, false},
+		{"bytes with EOF on the first read", []readStep{{raw, io.EOF}}, 200, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(New(f.s, f.hub, func(*http.Request) (string, error) { return "alice", nil }, Execution{Artifacts: scriptedOpener{tc.steps}, References: refs}))
+			defer server.Close()
+			resp, body, err := getBody(t, server.URL+"/v1/attempts/limits-attempt/artifacts/"+ref.Hash)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status %d, want %d: %d bytes %.60q", resp.StatusCode, tc.status, len(body), body)
+			}
+			if tc.complete {
+				if err != nil || !bytes.Equal(body, raw) {
+					t.Fatalf("complete artifact: %d bytes: %v", len(body), err)
+				}
+				return
+			}
+			if resp.StatusCode == 200 && (!errors.Is(err, io.ErrUnexpectedEOF) || len(body) >= len(raw)) {
+				t.Fatalf("client observed a whole body: %d of %d bytes: %v", len(body), len(raw), err)
+			}
+		})
+	}
+}
+
+func TestAnEmptyArtifactIsServedEmptyAndRefusedOnceItsBlobHoldsBytes(t *testing.T) {
+	f := newFixture(t)
+	attemptForLimits(t, f)
+	opener, refs, ref := storedPayload(t, f, nil)
+	server := httptest.NewServer(New(f.s, f.hub, func(*http.Request) (string, error) { return "alice", nil }, Execution{Artifacts: opener, References: refs}))
+	defer server.Close()
+	url := server.URL + "/v1/attempts/limits-attempt/artifacts/" + ref.Hash
+	resp, body, err := getBody(t, url)
+	if resp.StatusCode != 200 || resp.ContentLength != 0 || len(body) != 0 || err != nil || resp.Header.Get("ETag") != `"`+ref.Hash+`"` {
+		t.Fatalf("empty artifact: %d length=%d body=%q err=%v", resp.StatusCode, resp.ContentLength, body, err)
+	}
+	opener.overwriteBlob(t, ref.Hash, []byte("not empty any more"))
+	resp, body, err = getBody(t, url)
+	if resp.StatusCode != 500 || err != nil || !bytes.Contains(body, []byte(`"error":"internal"`)) {
+		t.Fatalf("grown empty artifact: %d %s %v", resp.StatusCode, body, err)
+	}
+}
+
+func hubAccounting(t *testing.T, h *Hub, used, queued int) {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.budgetUsed != used || len(h.budgetQueue) != queued {
+		t.Fatalf("used=%d queued=%d, want used=%d queued=%d", h.budgetUsed, len(h.budgetQueue), used, queued)
+	}
+}
+
+// momentContext ends at the moment the waiter first looks at it: Done runs
+// the hook (a release of the budget, a hub closure) and returns a channel
+// already closed. The grant and the end of the waiter's context are then ready
+// together in the waiter's select, an order no sequence of plain calls from
+// another goroutine can guarantee; a closure that never ends is the nil error.
+type momentContext struct {
+	context.Context
+	hook  func()
+	err   error
+	once  sync.Once
+	ended atomic.Bool
+	done  chan struct{}
+}
+
+func newMomentContext(err error, hook func()) *momentContext {
+	done := make(chan struct{})
+	if err != nil {
+		close(done)
+	}
+	return &momentContext{Context: context.Background(), hook: hook, err: err, done: done}
+}
+
+func (c *momentContext) Done() <-chan struct{} {
+	c.once.Do(func() {
+		c.hook()
+		c.ended.Store(true)
+	})
+	return c.done
+}
+
+func (c *momentContext) Err() error {
+	if c.ended.Load() {
+		return c.err
+	}
+	return nil
+}
+
+func queuedWaiters(h *Hub) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.budgetQueue)
+}
+
+// raceGrantAgainst queues a waiter behind a full budget and a successor behind
+// it, then lets the hook grant the waiter at the moment its context is read.
+// An open hub hands the grant to the successor; a closed one grants nobody.
+// Many rounds: a select with two ready cases picks one at random.
+func raceGrantAgainst(t *testing.T, closes bool, err error, hook func(h *Hub)) {
+	t.Helper()
+	for round := 0; round < 60; round++ {
+		h := NewHub()
+		h.BudgetBytes = pageBytes
+		if !h.reserveBytes(context.Background(), pageBytes) {
+			t.Fatal("initial reservation")
+		}
+		ctx := newMomentContext(err, func() {
+			// The waiter is queued and reading its context; let the successor
+			// line up behind it before the hook fires.
+			for deadline := time.Now().Add(2 * time.Second); queuedWaiters(h) < 2 && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond)
+			}
+			hook(h)
+		})
+		first := reserveInBackground(h, ctx, pageBytes)
+		waitBudgetWaiters(t, h, 1)
+		second := reserveInBackground(h, context.Background(), pageBytes)
+		select {
+		case ok := <-first:
+			if ok {
+				t.Fatalf("round %d: invalidated waiter took the grant", round)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("round %d: invalidated waiter did not return", round)
+		}
+		if closes {
+			select {
+			case ok := <-second:
+				if ok {
+					t.Fatalf("round %d: a page was admitted after the hub closed", round)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("round %d: successor did not return after the hub closed", round)
+			}
+			hubAccounting(t, h, 0, 0)
+			continue
+		}
+		expectGranted(t, "successor", second)
+		hubAccounting(t, h, pageBytes, 0)
+		h.releaseBytes(pageBytes)
+		hubAccounting(t, h, 0, 0)
+	}
+}
+
+func TestAGrantRacingTheWaitersCancellationIsHandedToTheNext(t *testing.T) {
+	raceGrantAgainst(t, false, context.Canceled, func(h *Hub) { h.releaseBytes(pageBytes) })
+}
+
+func TestAGrantRacingTheReservationDeadlineIsHandedToTheNext(t *testing.T) {
+	raceGrantAgainst(t, false, context.DeadlineExceeded, func(h *Hub) { h.releaseBytes(pageBytes) })
+}
+
+func TestAGrantRacingHubClosureAdmitsNoPage(t *testing.T) {
+	t.Run("release then close", func(t *testing.T) {
+		raceGrantAgainst(t, true, nil, func(h *Hub) { h.releaseBytes(pageBytes); h.Close() })
+	})
+	t.Run("close then release", func(t *testing.T) {
+		raceGrantAgainst(t, true, nil, func(h *Hub) { h.Close(); h.releaseBytes(pageBytes) })
+	})
+}
+
+func TestAnEndedContextOrAClosedHubTakesNoFreeBudget(t *testing.T) {
+	h := NewHub()
+	h.BudgetBytes = pageBytes
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if h.reserveBytes(ctx, 1) {
+		t.Fatal("cancelled context took free budget")
+	}
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if h.reserveBytes(expired, 1) {
+		t.Fatal("expired deadline took free budget")
+	}
+	hubAccounting(t, h, 0, 0)
+	h.Close()
+	if h.reserveBytes(context.Background(), 1) {
+		t.Fatal("closed hub gave out budget")
+	}
+	hubAccounting(t, h, 0, 0)
+}
+
+func TestAReservationOverTheWholeCapacityIsRefusedInsteadOfBlockingTheQueue(t *testing.T) {
+	h := NewHub()
+	h.BudgetBytes = pageBytes
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	expectRefusedAtOnce := func(name string, got <-chan bool) {
+		t.Helper()
+		select {
+		case ok := <-got:
+			if ok {
+				t.Fatalf("%s was granted", name)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s was queued", name)
+		}
+	}
+	expectRefusedAtOnce("a request over the capacity of an idle hub", reserveInBackground(h, ctx, pageBytes+1))
+	hubAccounting(t, h, 0, 0)
+	if !h.reserveBytes(context.Background(), pageBytes) {
+		t.Fatal("full-capacity reservation")
+	}
+	expectRefusedAtOnce("a request over the capacity of a busy hub", reserveInBackground(h, ctx, pageBytes+1))
+	smaller := reserveInBackground(h, context.Background(), 1)
+	waitBudgetWaiters(t, h, 1)
+	h.releaseBytes(pageBytes)
+	expectGranted(t, "smaller request after the impossible one", smaller)
+	h.releaseBytes(1)
+	hubAccounting(t, h, 0, 0)
+}
+
+func TestANewcomerFittingAPartialReleaseStillWaitsBehindTheQueuedHead(t *testing.T) {
+	h := NewHub()
+	h.BudgetBytes = pageBytes
+	if !h.reserveBytes(context.Background(), pageBytes) {
+		t.Fatal("initial reservation")
+	}
+	head := reserveInBackground(h, context.Background(), pageBytes)
+	waitBudgetWaiters(t, h, 1)
+	h.releaseBytes(1)
+	newcomer := reserveInBackground(h, context.Background(), 1)
+	expectWaiting(t, "newcomer that fits the free byte", newcomer)
+	hubAccounting(t, h, pageBytes-1, 2)
+	h.releaseBytes(pageBytes - 1)
+	expectGranted(t, "head", head)
+	expectWaiting(t, "newcomer behind the head", newcomer)
+	h.releaseBytes(pageBytes)
+	expectGranted(t, "newcomer", newcomer)
+	h.releaseBytes(1)
+	hubAccounting(t, h, 0, 0)
 }
 
 func get(t *testing.T, url, user string) (*http.Response, []byte) {

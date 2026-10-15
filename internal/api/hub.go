@@ -63,9 +63,15 @@ func (h *Hub) capacity() int {
 // reserveBytes takes n bytes of the shared budget, queueing behind earlier
 // waiters: a release serves the queue head first, so a later request cannot
 // overtake an earlier one even when it is smaller. It returns false, holding
-// nothing, when ctx ends or the hub closes first.
+// nothing, when ctx has ended or the hub has closed, whether before the call
+// or while a grant was on its way, and at once for n over the whole capacity,
+// which no release could ever serve and would block every later waiter.
 func (h *Hub) reserveBytes(ctx context.Context, n int) bool {
 	h.mu.Lock()
+	if n > h.capacity() || ctx.Err() != nil || h.closedLocked() {
+		h.mu.Unlock()
+		return false
+	}
 	if len(h.budgetQueue) == 0 && h.budgetUsed+n <= h.capacity() {
 		h.budgetUsed += n
 		h.mu.Unlock()
@@ -77,15 +83,20 @@ func (h *Hub) reserveBytes(ctx context.Context, n int) bool {
 	h.mu.Unlock()
 	select {
 	case <-w.granted:
-		return true
 	case <-ctx.Done():
 	case <-done:
 	}
+	// A grant and the end of the wait can be ready together: the grant counts
+	// only for a waiter whose context and hub are still live, checked under
+	// the lock so a later release cannot be double counted.
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	select {
 	case <-w.granted:
-		h.budgetUsed -= n // granted while leaving: hand the bytes on
+		if ctx.Err() == nil && !h.closedLocked() {
+			return true
+		}
+		h.budgetUsed -= n // granted while leaving: hand the bytes on, once
 	default:
 		for i, queued := range h.budgetQueue {
 			if queued == w {
@@ -98,8 +109,21 @@ func (h *Hub) reserveBytes(ctx context.Context, n int) bool {
 	return false
 }
 
-// grantLocked serves waiters from the head of the queue while they fit.
+func (h *Hub) closedLocked() bool {
+	select {
+	case <-h.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// grantLocked serves waiters from the head of the queue while they fit. A
+// closed hub grants nothing: its waiters leave through done.
 func (h *Hub) grantLocked() {
+	if h.closedLocked() {
+		return
+	}
 	for len(h.budgetQueue) != 0 {
 		w := h.budgetQueue[0]
 		if h.budgetUsed+w.n > h.capacity() {

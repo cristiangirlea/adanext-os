@@ -842,38 +842,86 @@ func (h *handler) artifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer blob.Close()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("ETag", "\""+hash+"\"")
-	w.Header().Set("Cache-Control", "private, no-cache")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(200)
+	// The reader verifies the blob only at EOF, so the body is sent one chunk
+	// behind the read: a chunk goes out once the next read succeeded, the last
+	// one only after a verified EOF with the byte count matching the reference.
+	// A failure before the first write is a 500; after it, the body stays short
+	// of Content-Length, so a client never holds a corrupt artifact as whole.
 	rc := http.NewResponseController(w)
 	deadline := h.hub.WriteDeadline
 	if deadline <= 0 {
 		deadline = 10 * time.Second
 	}
-	buf := make([]byte, 32<<10)
+	committed := false
+	var sent int64
+	write := func(chunk []byte) bool {
+		if !committed {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			w.Header().Set("ETag", "\""+hash+"\"")
+			w.Header().Set("Cache-Control", "private, no-cache")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.WriteHeader(200)
+			committed = true
+		}
+		if len(chunk) == 0 {
+			return true
+		}
+		_ = rc.SetWriteDeadline(time.Now().Add(deadline))
+		_, err := w.Write(chunk)
+		sent += int64(len(chunk))
+		return err == nil
+	}
+	fail := func(err error) {
+		err = fmt.Errorf("artifact %s: %w", hash, err)
+		if !committed {
+			writeInternalError(w, err)
+			return
+		}
+		requestID := "unknown"
+		if rw, ok := w.(*requestWriter); ok {
+			requestID = rw.id
+		}
+		fmt.Fprintf(os.Stderr, "adad: request %s: %v\n", requestID, err)
+	}
+	bufs := [2][]byte{make([]byte, 32<<10), make([]byte, 32<<10)}
+	var held []byte // the last chunk read, in the buffer the next read leaves alone
+	free, emptyReads := 0, 0
 	for {
-		n, readErr := blob.Read(buf)
-		if n != 0 {
-			_ = rc.SetWriteDeadline(time.Now().Add(deadline))
-			if _, err := w.Write(buf[:n]); err != nil {
+		n, readErr := blob.Read(bufs[free])
+		chunk := bufs[free][:n]
+		atEOF := errors.Is(readErr, io.EOF)
+		if readErr != nil && !atEOF {
+			fail(readErr)
+			return
+		}
+		read := sent + int64(len(held)) + int64(n)
+		if read > size {
+			fail(fmt.Errorf("blob holds more than the %d bytes referenced", size))
+			return
+		}
+		if atEOF {
+			if read != size {
+				fail(fmt.Errorf("blob holds %d bytes, %d referenced", read, size))
 				return
 			}
-		}
-		if readErr == io.EOF {
-			return
-		}
-		if readErr != nil {
-			// The bytes sent fall short of Content-Length, so the client sees
-			// a truncated body rather than a corrupt artifact passed off as whole.
-			requestID := "unknown"
-			if rw, ok := w.(*requestWriter); ok {
-				requestID = rw.id
+			if write(held) {
+				write(chunk)
 			}
-			fmt.Fprintf(os.Stderr, "adad: request %s: artifact %s: %v\n", requestID, hash, readErr)
 			return
 		}
+		if n == 0 {
+			if emptyReads++; emptyReads >= 100 {
+				fail(io.ErrNoProgress)
+				return
+			}
+			continue
+		}
+		emptyReads = 0
+		if len(held) != 0 && !write(held) {
+			return
+		}
+		held = chunk
+		free ^= 1
 	}
 }
