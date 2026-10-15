@@ -389,6 +389,16 @@ that the intermittent failures recorded above have been fixed.
   what the native test destroys. This follows the documented
   [Windows job inheritance and broker behavior](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
   and [process startup properties](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-processstartup).
+- **2026-10-16, adad re-execs on Windows even outside a job (#76).** Run from a PowerShell
+  launch, Electron's children were outside any job, so `-detach` served in the process Electron
+  spawned. Node spawns with handle inheritance on, so that coordinator held Electron's inheritable
+  handles, among them the stdout and stderr pipes Playwright reads: Electron exited 120 ms after
+  its last window closed, but its pipes closed only when adad stopped, and the window-close e2e
+  timed out. `-detach` now always re-execs before opening state; Go's child gets only its own
+  null stdio, and the spawned process exits. `TestCoordinatorOutsideAnyJobKeepsNothingTheLauncherInherited`
+  failed before the change when run outside a job (the launcher's output stayed open for 15 s).
+  The broker path still holds the inherited handles until the broker returns (at most 8 s
+  after launch).
 - **2026-10-16, M2.4c test boundary (#75).** The fake engine and project/membership seed helper
   require `-tags=fakeengine` and live in test-only paths. Playwright 1.63.0 uses the real built
   adad and the hash of the fake engine, one worker, unique endpoint names and temporary state.

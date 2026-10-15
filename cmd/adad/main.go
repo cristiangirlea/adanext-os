@@ -77,7 +77,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	stateDir := flags.String("state-dir", defaultStateDir(), "coordinator state directory")
 	name := flags.String("name", "adad", "coordinator endpoint name")
-	detach := flags.Bool("detach", false, "refuse to inherit the desktop's Windows job; re-exec with breakaway before serving")
+	detach := flags.Bool("detach", false, "keep neither the desktop's Windows job nor its inherited handles; re-exec with breakaway before serving")
 	enginePath := flags.String("engine", "", "pinned Harness engine path")
 	engineHash := flags.String("engine-sha256", "", "pinned Harness engine SHA-256")
 	concurrency := flags.Int("concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")

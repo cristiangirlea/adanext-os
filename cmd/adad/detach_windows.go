@@ -15,23 +15,18 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf16"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 // Node's detached spawn gives us a separate console/process group but can still
-// inherit Electron's job. Before opening state, re-exec outside that job. Git
-// Bash's job forbids breakaway; there the same-user WMI process broker starts us.
+// inherit Electron's job, and on Windows it always hands over Electron's inheritable
+// handles, such as the pipes whoever launched Electron reads. Before opening state,
+// re-exec, in or out of a job: the serving process gets only its own null stdio, and
+// this one exits, so nothing the desktop held outlives it. Git Bash's job forbids
+// breakaway; there the same-user WMI process broker starts us.
 func detachFromJob(args []string) (bool, error) {
-	return detachWith(args, func() (bool, error) {
-		var inJob int32
-		ok, _, err := windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob").Call(uintptr(windows.CurrentProcess()), 0, uintptr(unsafe.Pointer(&inJob)))
-		if ok == 0 {
-			return false, err
-		}
-		return inJob != 0, nil
-	}, func(cmd *exec.Cmd) error {
+	return detachWith(args, func(cmd *exec.Cmd) error {
 		if err := cmd.Start(); err != nil {
 			if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 				return brokerDetached(cmd.Args)
@@ -77,11 +72,7 @@ if ($result.ReturnValue -ne 0) { exit 1 }
 	return nil
 }
 
-func detachWith(args []string, inJob func() (bool, error), start func(*exec.Cmd) error) (bool, error) {
-	in, err := inJob()
-	if err != nil || !in {
-		return false, err
-	}
+func detachWith(args []string, start func(*exec.Cmd) error) (bool, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return false, err
