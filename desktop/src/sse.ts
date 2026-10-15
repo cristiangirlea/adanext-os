@@ -79,6 +79,7 @@ export interface StreamOptions {
   onMessage: (message: StreamMessage) => void;
   initialDelayMs?: number;
   maxDelayMs?: number;
+  onUnavailable?: () => Promise<void>;
   // Tests inject the timer to observe the delays; the default is setTimeout.
   schedule?: (fn: () => void, ms: number) => () => void;
 }
@@ -190,7 +191,7 @@ export function openEventStream(options: StreamOptions): EventStream {
       settle(() => {
         if (closed) return;
         options.onMessage({ type: "status", status: "unreachable", code: "coordinator_unreachable" });
-        reconnect();
+        void Promise.resolve().then(() => options.onUnavailable?.()).catch(() => {}).finally(reconnect);
       }),
     );
     req.end();

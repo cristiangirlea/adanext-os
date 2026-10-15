@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated 2026-10-15. Statuses: not started, in progress, implemented (code merged), verified
+Updated 2026-10-16. Statuses: not started, in progress, implemented (code merged), verified
 (evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
 are in `docs/backlog.md`.
 
@@ -210,7 +210,112 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
 `main`, CI passed on ubuntu-latest and windows-latest at `36174d9` (run 38436772635) and at
 `09ff3bf` (run 38441899352), so M2.1 is verified at `09ff3bf`.
 
+### M2.4c candidate (2026-10-16, #75 with #69)
+
+Uncommitted working tree on `m2/window`, based on
+`5e03a281ef5d747472bbaa15876c529ea54892cc`. No commit or push; M2 is not marked verified
+and the backlog is not ticked. The supervisor still owns the independent review, one commit,
+pull request and hosted CI checks. Local evidence:
+
+| Check | Result |
+|---|---|
+| `& 'C:/Program Files/Git/bin/bash.exe' .hrn/check.sh`, `GOFLAGS=-p=4` | Pass, exit 0: all Go checks, repository rules/hooks, lockfile installs, UI/desktop typechecks, 24 UI tests, 36 desktop tests, builds and five e2e scenarios; `.hrn/check-direct.log` / `.hrn/check-direct.exit` |
+| `go test -count=3 ./...`, Windows, `GOFLAGS=-p=4` | Fail, including a serial repeat: unchanged executor cancellation/exit tests reached `recovery_required`; `.hrn/windows-repeat.log` |
+| `& 'C:/Program Files/Git/bin/bash.exe' .hrn/linux-test.sh` | Pass: non-root `golang:1.26` container, read-only checkout; `go vet ./...`, `go test -count=1 ./...`, `go test -race -count=1 ./...`, all seven packages |
+| UI clean lockfile install, typecheck, Vitest, build | Pass; 24 tests, including selection of a pre-existing attempt and App through the complete bridge adapter against one fake adad |
+| Desktop clean lockfile install, typecheck, Vitest, build | Pass; 36 tests, including bounded startup/exit, detached spawn/unref, SID/name/configuration, repeated and refused Quit, sender checks and stop timeout |
+| Windows native job tests | Pass: launcher-owned job destroyed with the coordinator still serving, both native breakaway and the no-breakaway broker path; spaces, shell metacharacters and Unicode in the state path |
+| `bash scripts/test-e2e.sh` | Pass in the final full gate: **5 passed (47.7s)**, one worker, real adad and the hashed test-only fake engine |
+| `git diff --check` | Pass on the uncommitted changes (the wrapper's committed-range check alone would not cover them) |
+
+Playwright scenarios passed:
+
+1. Closing the window keeps adad and events alive; reopening replays every event, including
+   sequences received by a Node subscriber while no window was open, without gaps or duplicates.
+2. Quit cancels running and queued work, displays the returned reason/counts, and exits;
+   a reopened window shows both tasks canceled with their persisted stop reason.
+3. A second app finds the same coordinator (same PID and creation identity, one matching process);
+   a fake successful task reaches the existing M2 `verifying`/`ended_ok` states; the menu quits
+   while the first window remains open, and that window does not restart the coordinator.
+4. The UI displays queue position and `queue_full`; withdrawal cancels a queued task without
+   starting an engine and frees its queue place.
+5. A Node client reconnects after a forced coordinator restart during a 900-event replay spanning
+   multiple pages, and receives each sequence exactly once. The same test uses a pipe on Windows
+   and a socket in Linux CI.
+
+Regression tests were seen failing before the attempt field, subscribe-on-selection, lifecycle
+helpers, queued withdrawal and Quit wiring were implemented. The first real Windows run exposed
+the inherited job; the restrictive-job native regression failed before the broker fallback.
+The first full Windows gate stalled in the existing shell rules hook; even a standalone
+`xargs --version` probe was delayed. It was stopped and restarted with an output log in a hidden
+same-user process. That run passed Go, hooks, UI and desktop checks, then timed out waiting
+for the first Electron window and during its cleanup; it was stopped, and the fixture cleanup
+was bounded for an absent/exited window. The fresh direct Git Bash full run then passed,
+including all five e2e scenarios. The two permission-only hook cases skip on Windows because
+`chmod` cannot remove access; hosted Linux CI still owns those cases.
+No check was bypassed. No live model calls ran.
+
+The overlapping Windows three-repeat run reported
+`TestTheCancelVersusClaimRaceHasOneWinnerWhicheverSideIsFirst` (`ended_failed` instead of
+`canceled`, twice) and `TestPartialLineAfterASuccessfulResultFailsTheAttempt`
+(`recovery_required` instead of `ended_failed`). These tests and executor code were not changed;
+the same packages passed the earlier full single run and Linux race run. The serial repeat
+also failed: cancel-versus-claim reached `recovery_required`, and
+`TestResultBeforeNaturalExitAlwaysEndsOK` reached `recovery_required` after an `ok` result
+with reason "engine had to be killed after its result". All other packages passed three times.
+This remains unresolved; no executor behavior or deadlines were changed to conceal it.
+These failures need supervisor investigation before acceptance; this slice does not change
+executor behavior beyond the test-only protocol helper.
+
+Not verified here: Linux Playwright (runs in CI), hosted Windows/Linux CI, packaged installation,
+or an independent review. Windows has no cgo; the Linux race run supplies that evidence.
+The self-review found no open security issue in the changed bridge, sender validation,
+renderer isolation, detachment argument handling or test-only build boundary. It is not
+an independent review, and the unresolved repeated Windows executor failures remain open.
+
 ## Decisions log
+
+- **2026-10-16, M2.4c window lifetime (#75, folding in #69).** Task reads join the
+  newest attempt (insertion order, including terminal attempts) and its global queue position
+  in the same SQLite query as the task and membership check. The existing top-level
+  `queue_position` stays for compatibility; the new `attempt` is null when absent. Selection
+  subscribes to that attempt, including after reopening a window. No schema or engine-pin change.
+  Desktop startup uses `ADANEXT_ADAD` or the binary next to the app, the user's state directory,
+  and the configured `ADANEXT_ENGINE`/`ADANEXT_ENGINE_SHA256`. `ADANEXT_STATE_DIR` and
+  `ADANEXT_NAME` permit isolated instances/tests. The old explicit socket override remains a
+  connect-only option. Windows resolves the current SID with the system `whoami /user /fo csv /nh`
+  command and a tested parser; Unix uses `<state>/run/<name>.sock`. Startup and stop waits are
+  bounded. The menu and button use the same typed bridge flow: show adad's returned counts and
+  reason, wait for endpoint disappearance, then close the app. Running cancellation is described
+  as requested until the persisted task can be read; reopening shows its actual terminal state.
+  Only app launch starts the coordinator; existing windows reconnect without starting it,
+  so another open window cannot undo the owner's explicit stop. The two-window Quit test
+  first failed with a replacement coordinator, then exercises this boundary with both open.
+- **2026-10-16, Windows job detachment observed and tested (#75).** A real Electron run here
+  inherited a job, and plain Node `detached: true` left adad in it. The Git Bash launch path had
+  job flags `8192` (`KILL_ON_JOB_CLOSE`, no breakaway), whereas the direct PowerShell path had
+  `10240` (also `BREAKAWAY_OK`). Native breakaway under Git Bash returned access denied.
+  The desktop now passes `-detach`: before opening state, adad requests native breakaway;
+  on access denied it uses the same-user `Win32_Process.Create` broker through the system
+  PowerShell, hidden, with an eight-second bound, no elevation or installed service. Arguments
+  are Windows-escaped data, separately encoded from the script; the environment passes in memory,
+  not in argv or files. Broker failure never falls back to serving inside the desktop's job.
+  A native test destroys a launcher-owned job and verifies the coordinator still serves, both
+  with and without breakaway permission, including paths with spaces, metacharacters and Unicode.
+  The final Git Bash Playwright observation was `Electron in_job=true, adad in_job=false`.
+  A non-desktop ancestor job may remain on the native path; the launcher-owned job's lifetime is
+  what the native test destroys. This follows the documented
+  [Windows job inheritance and broker behavior](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+  and [process startup properties](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-processstartup).
+- **2026-10-16, M2.4c test boundary (#75).** The fake engine and project/membership seed helper
+  require `-tags=fakeengine` and live in test-only paths. Playwright 1.63.0 uses the real built
+  adad and the hash of the fake engine, one worker, unique endpoint names and temporary state.
+  The shared App also runs through the full bridge adapter against one fake HTTP adad; the
+  HTTPS adapter remains M4b. UI tooling pins `@types/node` to desktop's existing 22.20.4 solely
+  for that integration test. `check.sh` invokes `test-e2e.sh` after the builds, installs the pinned
+  Electron binary explicitly, and builds the three Go executables into a temporary directory.
+  Ubuntu CI installs xvfb and uses it when DISPLAY is absent; Windows runs directly. Only local
+  `ADANEXT_SKIP_E2E=1` skips the suite visibly; CI rejects that override.
 
 - **2026-10-11, engine baseline.** Ada pinned Harness `main` (`1ca5619`), not `8d521f0`, and
   moved the pin to `8dd2659` once M1.4 merged. The

@@ -11,6 +11,11 @@ const api = createApi(
     onEvent: (listener) => {
       ipcRenderer.on("ada:event", (_event, subId: unknown, message: unknown) => listener(subId, message));
     },
+    onQuitRequested: (listener) => {
+      const receive = () => listener();
+      ipcRenderer.on("ada:quit-requested", receive);
+      return () => { ipcRenderer.removeListener("ada:quit-requested", receive); };
+    },
   },
   crypto.randomUUID(),
 );

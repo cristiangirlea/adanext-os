@@ -77,6 +77,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	stateDir := flags.String("state-dir", defaultStateDir(), "coordinator state directory")
 	name := flags.String("name", "adad", "coordinator endpoint name")
+	detach := flags.Bool("detach", false, "refuse to inherit the desktop's Windows job; re-exec with breakaway before serving")
 	enginePath := flags.String("engine", "", "pinned Harness engine path")
 	engineHash := flags.String("engine-sha256", "", "pinned Harness engine SHA-256")
 	concurrency := flags.Int("concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")
@@ -102,6 +103,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if ctx.Err() != nil {
 		fmt.Fprintln(stderr, "adad: stopped during start-up")
 		return 0
+	}
+	if *detach {
+		launched, err := detachFromJob(args)
+		if err != nil {
+			fmt.Fprintln(stderr, "adad:", err)
+			return 1
+		}
+		if launched {
+			return 0
+		}
 	}
 	if err := os.MkdirAll(*stateDir, 0700); err != nil {
 		fmt.Fprintln(stderr, "adad: create state directory:", err)

@@ -13,6 +13,36 @@ async function flush(): Promise<void> {
 }
 
 describe("App", () => {
+  it("shows queue position and allows withdrawal", async () => {
+    const client = new FakeClient([makeTask({ id: "q", state: "preparing", revision: 2, attempt: { id: "aq", state: "pending", queue_position: 2 } })]);
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("objective q"));
+    expect(screen.getByText("Queue position 2")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await flush();
+    expect(client.calls).toContain("cancel");
+  });
+  it("shows the stop result before asking the shell to wait and quit", async () => {
+    const client = new FakeClient();
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Quit Ada and stop work" }));
+    await flush();
+    expect(screen.getByText(/coordinator stopped by the owner/)).toBeTruthy();
+    expect(client.calls.indexOf("finishQuit")).toBeGreaterThan(client.calls.indexOf("stopCoordinator"));
+  });
+  it("subscribes on selecting a task started before this window opened", async () => {
+    const client = new FakeClient([makeTask({ id: "old", state: "running", attempt: { id: "old-attempt", state: "running" } })]);
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("objective old"));
+    await flush();
+    expect(client.calls).toContain("subscribe:old-attempt");
+    act(() => client.listeners.get("old-attempt")!({ type: "event", event: { seq: 1, kind: "text", payload: "before opening" } }));
+    expect(screen.getByText(/before opening/)).toBeTruthy();
+    expect(client.calls.some((call) => call.startsWith("start:"))).toBe(false);
+  });
   it("lists every task with its state", async () => {
     const client = new FakeClient([
       makeTask({ id: "t1", objective: "fix the build", state: "draft" }),

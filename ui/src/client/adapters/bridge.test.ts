@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AdaError, type BridgeApi, type StreamMessage, type Task } from "../api";
 import { createBridgeClient } from "./bridge";
 
-const task: Task = { id: "t1", project: "p", created_by: "local", objective: "o", criteria: "", state: "draft", revision: 0, created: "", updated: "" };
+const task: Task = { id: "t1", project: "p", created_by: "local", objective: "o", criteria: "", state: "draft", revision: 0, created: "", updated: "", attempt: null };
 
 function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
   return {
@@ -13,7 +13,9 @@ function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
     start: async () => ({ ok: true, value: { ...task, attempt_id: "a1" } }),
     cancel: async () => ({ ok: true, value: task }),
     subscribeEvents: () => () => {},
-    stopCoordinator: async () => ({ ok: true, value: null }),
+    stopCoordinator: async () => ({ ok: true, value: { running: 0, queued: 0, reason: "coordinator stopped by the owner" } }),
+    finishQuit: async () => ({ ok: true, value: null }),
+    onQuitRequested: () => () => {},
     ...overrides,
   };
 }
