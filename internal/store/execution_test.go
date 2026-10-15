@@ -12,7 +12,9 @@ func TestPreparingCanFailOrInterruptWithoutOpeningOtherEdges(t *testing.T) {
 			t.Errorf("preparing -> %s refused", to)
 		}
 	}
-	for _, to := range []State{Canceled, Verifying, RecoveryRequired} {
+	// Canceled is admitted by the edge table and guarded by transition itself
+	// (queue_test.go): only with the pending attempt closed in the same transaction.
+	for _, to := range []State{Verifying, RecoveryRequired, Ready} {
 		if allowedTransition(Preparing, to) {
 			t.Errorf("preparing -> %s allowed", to)
 		}

@@ -832,6 +832,56 @@ its security read, #24 being the fix itself; CI green on ubuntu-latest (run 3843
   `recovery_required` task has no way out until a reconcile flow exists, so the stored result
   cannot be accepted yet. Owner action 12 below.
 
+- **2026-10-15, M2.4a queue.** The Go half of M2.4 (#64) lands what the #9 decision carried, and
+  settles what it left open. No migration: the attempt states have no CHECK constraint and
+  `canceled` is already a task state, so `preparing → canceled` is an edge in the store's table,
+  which `transition` admits only when the task's newest attempt is already closed as `canceled`;
+  `Tx.CancelQueued` does both in one transaction while the attempt is still `pending` and
+  returns `ErrAttemptLaunched` otherwise, writing nothing. The launch claim (`pending` →
+  `launching` under the ownership generation) and that withdrawal are two updates of the same
+  attempt row in SQLite's single writer, which is what serialises a cancel against a launch.
+  The queue is the set of `pending` attempts in row-id order, which is creation order: attempts
+  are inserted under SQLite's single writer and never deleted, and the `started` text cannot be
+  sorted (RFC3339Nano drops trailing zeros, so `...00.12Z` sorts after `...00.123Z`); the
+  executor launches from it (`NextPendingAttempt`) one at a time, skipping a project with an
+  attempt active (one writer per workspace) once the cap is above one. The cap is
+  `executor.Config.Concurrency`, set by `adad -concurrency` (default 1, the plan's section 8
+  default); it is a flag, not a stored setting, until settings exist. The per-user limit of 3
+  counts the user's `pending` attempts, so one about to launch counts until the claim; a
+  withdrawn attempt frees its place. The position `GET /v1/tasks/{id}` reports as
+  `queue_position` is 1-based across all users, present only while the task is `preparing` with
+  a `pending` attempt, and read after the task so a launched task never shows one. A withdrawal
+  and the owner's stop record their reason as a `cancel` event on the attempt (`{"reason":
+  "withdrawn by <user>"}` or `"coordinator stopped by the owner"`), which is what the actor sees
+  on the attempt's stream or the task's events; the stop writes it before the executor acts, so
+  for a running attempt the engine's own `result` event follows it. The stop endpoint is
+  `POST /v1/coordinator/stop`, an empty body with an `Idempotency-Key` and no `If-Match` (nothing
+  has a revision), answered `202` with `{"running", "queued", "reason"}` counting what it ended;
+  any account but the coordinator's owner (`local`, the implicit desktop user, as `api.
+  Execution.Owner`) gets `403 forbidden`, a project owner included. In one idempotent
+  transaction `Tx.StopWork` withdraws every queued attempt, puts the reason on every launching
+  or running one and moves each running task to `cancel_requested` (a cancel its actor already
+  requested stays as it is), so a result the engine returns before the executor acts cannot end
+  the task ok; a launching attempt's task is still `preparing`, and the executor's accept, which
+  moves it to `running`, moves it on to `cancel_requested` in the same transaction when a cancel
+  is on record. Start admission is held closed from before the stop's transaction until the
+  executor has been told (a lock and a stopping flag in the API handler, never held with the
+  executor's own lock), so no start commits in that window and every later one is refused
+  `503 shutting_down`; a replayed stop answers from the idempotency cache and tells the
+  coordinator nothing, so after a restart the old key cannot stop the new coordinator. Then
+  `adad` stops launching, cancels the running attempts through M2.3b's cancel path, drains the
+  hub (the stop wakes the affected attempts' streams, and every open stream sends what is
+  committed and ends, within the write deadline, before the HTTP shutdown closes the hub) so an
+  open stream receives the committed reason before it closes (a running attempt may still append
+  its result after it), and ends its serve loop as a signal would,
+  so an attempt that does not exit within the stop budget reaches recovery as before. The
+  signal path is unchanged: no reason is recorded, and a queued attempt it leaves is marked for
+  recovery at the next start, which now records `attempt_state` in its `recovery` event. Not in
+  this slice: the stop's preview of other users' affected work and the notice they see (M4b),
+  and the UI (M2.4b). Reason: the pending attempt M2.3b already records is the queue, so no
+  state, column or migration was needed, and the one row the launch and the cancel both update
+  is the simplest serialisation that holds across coordinators.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).

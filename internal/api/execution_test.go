@@ -159,6 +159,11 @@ func TestStartRefusesModelsThatAShellCouldInterpret(t *testing.T) {
 		if code, response := f.request(t, "POST", "/v1/tasks/"+id+"/start", fmt.Sprintf("plain-model-start-%d", i), "1", body); code != 200 {
 			t.Fatalf("model %q = %d %s", model, code, response)
 		}
+		// Withdrawn at once: without an executor each start would stay queued
+		// and the fourth would meet the per-user queue limit instead.
+		if code, response := f.request(t, "POST", "/v1/tasks/"+id+"/cancel", fmt.Sprintf("plain-model-withdraw-%d", i), "2", nil); code != 200 {
+			t.Fatalf("withdraw %q = %d %s", model, code, response)
+		}
 	}
 }
 

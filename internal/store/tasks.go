@@ -32,7 +32,9 @@ func allowedTransition(from, to State) bool {
 	case Ready:
 		return to == Preparing
 	case Preparing:
-		return to == Running || to == Failed || to == Interrupted
+		// Canceled withdraws a queued task: transition admits it only in the
+		// transaction that has just closed the task's pending attempt as canceled.
+		return to == Running || to == Failed || to == Interrupted || to == Canceled
 	case Running:
 		return to == Verifying || to == Failed || to == CancelRequested || to == Interrupted
 	case Verifying:
@@ -61,6 +63,11 @@ func transition(ctx context.Context, tx *sql.Tx, taskID string, from, to State, 
 	if !allowedTransition(from, to) {
 		return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, from, to)
 	}
+	if from == Preparing && to == Canceled {
+		if err := requireWithdrawnAttempt(ctx, tx, taskID); err != nil {
+			return err
+		}
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET state=?,revision=revision+1,updated=? WHERE id=? AND state=? AND revision=?`, to, now(), taskID, from, expectedRevision)
 	if err != nil {
 		return err
@@ -79,6 +86,25 @@ func transition(ctx context.Context, tx *sql.Tx, taskID string, from, to State, 
 			return err
 		}
 		return fmt.Errorf("%w: task %s, expected %d, current %d", ErrStaleRevision, taskID, expectedRevision, revision)
+	}
+	return nil
+}
+
+// requireWithdrawnAttempt admits preparing -> canceled only when the task's
+// newest attempt is already closed as canceled, which cancelQueued does in the
+// same transaction while the attempt is still pending. A pending attempt left
+// open, or one that is launching or running, refuses the edge.
+func requireWithdrawnAttempt(ctx context.Context, tx *sql.Tx, taskID string) error {
+	var state string
+	err := tx.QueryRowContext(ctx, "SELECT state FROM attempts WHERE task=? ORDER BY rowid DESC LIMIT 1", taskID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s -> %s without an attempt", ErrInvalidTransition, Preparing, Canceled)
+	}
+	if err != nil {
+		return err
+	}
+	if state != "canceled" {
+		return fmt.Errorf("%w: %s -> %s while the attempt is %s", ErrInvalidTransition, Preparing, Canceled, state)
 	}
 	return nil
 }
