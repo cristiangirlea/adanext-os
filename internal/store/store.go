@@ -408,7 +408,10 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 // across stores and processes and lets each sweep the temporaries a crashed one
 // left there. An error wrapping ErrPublishedWithWarning means the backup is
 // complete at destPath although a step after publishing it, or the cleanup
-// around it, failed; a retry would report an existing destination.
+// around it, failed; a retry would report an existing destination. On Windows a
+// published backup keeps the staging directory's owner-only ACL. On NFS flock
+// is per process, and some FUSE and SMB mounts refuse it: there a backup fails
+// rather than running unlocked.
 func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	if strings.HasPrefix(strings.ToLower(destPath), "file:") || !filepath.IsAbs(destPath) {
 		return errors.New("backup destination must be an absolute filesystem path, not a file: URI")
@@ -421,7 +424,7 @@ func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("check backup destination: %w", err)
 	}
-	staging, err := prepareBackupStaging(filepath.Dir(destPath))
+	staging, checked, err := prepareBackupStaging(filepath.Dir(destPath))
 	if err != nil {
 		return fmt.Errorf("prepare backup staging directory: %w", err)
 	}
@@ -430,6 +433,9 @@ func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 		return err
 	}
 	defer func() { err = withCleanup(err, unlock(), "release backup lock") }()
+	if err := checkBackupStaging(staging, checked); err != nil {
+		return err
+	}
 	sweepErr := sweepStaleBackupTemps(staging)
 	defer func() { err = withCleanup(err, sweepErr, "sweep stale backup temporaries") }()
 	file, err := os.CreateTemp(staging, backupTempPattern)

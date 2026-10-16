@@ -200,6 +200,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}()
 		// Before serving, so no launch can start a writer. A failure only
 		// costs disk space, since no API path reaches an unreferenced blob.
+		// Only the executor leaves orphans, so without an engine there is no sweep.
 		if _, err := local.RemoveUnreferencedArtifacts(ctx); err != nil {
 			fmt.Fprintln(stderr, "adad: remove unreferenced artifacts:", err)
 		}

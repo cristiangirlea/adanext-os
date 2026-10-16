@@ -1103,6 +1103,9 @@ func TestStartUpRemovesAnOrphanedBlobAndKeepsReferencedAndUnfinishedOnes(t *test
 			if readErr != nil || resp.StatusCode != 200 || !bytes.Equal(body, blob) {
 				t.Fatalf("the referenced blob: %d %.80s %v", resp.StatusCode, body, readErr)
 			}
+			if _, err := os.Stat(filepath.Join(dir, "artifacts", orphanRef.Hash[:2], orphanRef.Hash)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the orphaned blob remains while serving: %v", err)
+			}
 			break
 		}
 		select {
@@ -1114,9 +1117,6 @@ func TestStartUpRemovesAnOrphanedBlobAndKeepsReferencedAndUnfinishedOnes(t *test
 	cancel()
 	if code := <-done; code != 0 {
 		t.Fatalf("run = %d: %s", code, output.String())
-	}
-	if _, err := os.Stat(filepath.Join(dir, "artifacts", orphanRef.Hash[:2], orphanRef.Hash)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the orphaned blob remains: %v", err)
 	}
 	if got, err := os.ReadFile(unfinished); err != nil || string(got) != "half a blob" {
 		t.Fatalf("the unfinished write: %q, %v", got, err)

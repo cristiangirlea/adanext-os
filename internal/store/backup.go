@@ -65,16 +65,35 @@ func insideBackupStaging(path string) bool {
 
 // prepareBackupStaging creates the staging directory in dir, or takes the one
 // there, and makes it private. A link in its place is refused, and a missing
-// dir is not created.
-func prepareBackupStaging(dir string) (string, error) {
+// dir is not created. It returns what it checked, for checkBackupStaging.
+func prepareBackupStaging(dir string) (string, os.FileInfo, error) {
 	staging := filepath.Join(dir, backupStagingName)
 	if err := os.Mkdir(staging, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return "", err
+		return "", nil, err
 	}
 	if err := artifact.PrivateDirectory(staging); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return staging, nil
+	checked, err := os.Lstat(staging)
+	if err != nil {
+		return "", nil, err
+	}
+	// Windows reads the file ID lazily by path; load it now, not after a swap.
+	os.SameFile(checked, checked)
+	return staging, checked, nil
+}
+
+// checkBackupStaging refuses a staging directory that is no longer the
+// directory prepareBackupStaging checked, such as one swapped for a link.
+func checkBackupStaging(staging string, checked os.FileInfo) error {
+	current, err := os.Lstat(staging)
+	if err != nil {
+		return fmt.Errorf("check backup staging directory: %w", err)
+	}
+	if !current.Mode().IsDir() || !os.SameFile(checked, current) {
+		return fmt.Errorf("backup staging directory %s changed after its check", staging)
+	}
+	return nil
 }
 
 // lockBackupStaging takes the staging directory's lock, waiting while another

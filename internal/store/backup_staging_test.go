@@ -182,8 +182,15 @@ func TestAnAgedTemporaryOfARunningBackupSurvivesAConcurrentBackup(t *testing.T) 
 	secondDone := make(chan error, 1)
 	go func() { secondDone <- second.Backup(ctx, filepath.Join(dir, "second.sqlite")) }()
 	// Two refusals mean the second backup has started and is still waiting.
-	<-busy
-	<-busy
+	for range 2 {
+		select {
+		case <-busy:
+		case err := <-secondDone:
+			t.Fatalf("the second backup ran while the first held the lock: %v", err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("the second backup never waited for the lock")
+		}
+	}
 	if _, err := os.Lstat(tmp); err != nil {
 		t.Fatalf("the running backup's aged temporary was swept: %v", err)
 	}
@@ -348,6 +355,62 @@ func TestBackupRefusesAStagingDirectoryThatIsALink(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
 		t.Fatalf("the link's target was written: %v, %v", entries, err)
+	}
+}
+
+func TestBackupRefusesAStagingDirectorySwappedForALinkBeforeItsLock(t *testing.T) {
+	s := openTestStore(t)
+	seed(t, s)
+	dir := t.TempDir()
+	if err := s.Backup(ctx, filepath.Join(dir, "first.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(dir, backupStagingName)
+	unlock, err := lockBackupStaging(ctx, staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			unlock()
+		}
+	})
+	target := t.TempDir()
+	stale := filepath.Join(target, ".adanext-backup-stale.tmp")
+	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	age(t, stale)
+	resetBackupSeams(t)
+	var moveErr error
+	backupLockBusy = func(string) {
+		if released {
+			return
+		}
+		// Swap the checked directory for a link, then let the backup lock.
+		if moveErr = os.Rename(staging, filepath.Join(dir, "moved")); moveErr == nil {
+			linkDirectory(t, target, staging)
+		}
+		released = true
+		if err := unlock(); err != nil {
+			t.Error(err)
+		}
+	}
+	dest := filepath.Join(dir, "second.sqlite")
+	err = s.Backup(ctx, dest)
+	if moveErr != nil {
+		t.Skipf("the staging directory cannot be moved while its lock is open: %v", moveErr)
+	}
+	if err == nil {
+		t.Fatal("backup through a staging directory swapped for a link succeeded")
+	}
+	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination after the refusal: %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(stale) {
+		t.Fatalf("the link's target was written or swept: %v, %v", entries, err)
 	}
 }
 
