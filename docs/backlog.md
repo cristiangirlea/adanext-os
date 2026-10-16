@@ -144,13 +144,133 @@ records stay loadable, README and PLAN.md updated, tests first.
   `queue_full`, a queued task cancelled before launch, "Quit" with its reason), as the decisions
   log, 2026-10-14, lists them.
 
+## M3 Project workspaces
+
+Four slices, one at a time in this order: each touches the schema or the API, which
+`docs/plan.md` section 8 keeps sequential (decisions log, 2026-10-16). The desktop import screen
+is M4.
+
+- [ ] **M3.1 Safe git and inspection.** A new package, `internal/source`.
+  The git runner: git resolved once from PATH at start-up as an absolute path (Go's `LookPath`
+  already refuses the current directory), and git older than 2.45.1 refused at start-up
+  (`git version`); an environment built from an allow-list (PATH, SystemRoot, TEMP and TMP,
+  LANG) plus `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` set to `os.DevNull`, HOME on an Ada
+  scratch directory, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, `GIT_NO_LAZY_FETCH=1`,
+  `GIT_NO_REPLACE_OBJECTS=1` and `GIT_ATTR_NOSYSTEM=1`; on every call `--no-pager
+  -c core.hooksPath=<empty Ada dir> -c core.fsmonitor=false -c core.untrackedCache=false
+  -c credential.helper= -c protocol.allow=never` (the M3.3 clone and fetch alone add `-c protocol.file.allow=always`);
+  diffs always with `--no-ext-diff --no-textconv`; status and diff always with
+  `--ignore-submodules=all` and `-c diff.ignoreSubmodules=all`. No git process ever uses the
+  original's git directory as its repository, because its config can name commands (filters,
+  fsmonitor, textconv, ssh).
+  The layout is read in Go: a `.git` directory or a `gitdir:` file, `commondir`, the alternates
+  chain, `core.bare` and `core.worktree`, and the index, where gitlinks, unmerged entries and
+  skip-worktree entries are found before any git runs. A UNC or device path (`\\host\`, `\\?\`,
+  `\\.\`) in `gitdir:`, `commondir` or the alternates chain is refused without being opened,
+  since reading one sends the user's credentials over SMB. On Windows the user's files are opened
+  with `FILE_SHARE_DELETE`, so a handle Ada holds never fails the user's `index.lock` rename.
+  The mirror git directory under Ada's state: a config Ada writes, with the format version, the
+  object-format extension, and an allow-list of data-only keys copied from the repository, global
+  and system config as the Go reader resolves them (`core.filemode`, `core.symlinks`,
+  `core.ignorecase`, `core.precomposeunicode`, `core.autocrlf`, `core.eol`, `core.safecrlf`,
+  `core.checkRoundtripEncoding`, `core.checkStat`, `core.trustctime`); `info/exclude`,
+  `info/attributes` and the global excludes file (`core.excludesFile`) copied, so ignored and
+  untracked match the user's git; HEAD, refs, packed-refs and `shallow` copied; a copy of the
+  index that keeps the original's mtime (a newer one would hide racily clean edits); and the
+  original's objects reached read-only through `objects/info/alternates`. Git then runs with
+  `--git-dir=<mirror> --work-tree=<original>`. Filter and diff drivers named in `.gitattributes`
+  are undefined there, so nothing runs.
+  `Inspect(path)` returns the identity (canonical path, HEAD commit, branch or detached, remote
+  URLs read by a minimal Go config reader, which never follows `include` or `includeIf`); the status from `git status --porcelain=v2 -z
+  --untracked-files=all`, split into staged, unstaged and untracked; recent history
+  (`git log -n 20`); the instruction and manifest files present (AGENTS.md, CLAUDE.md, README*,
+  go.mod, package.json and similar); and a fingerprint, SHA-256 over HEAD, the parsed index
+  entries (path, mode, object ID, stage, flags; not the stat data, which any `git status` an
+  editor runs rewrites) and, for each changed or untracked path, its mode, size and content hash
+  (by Lstat: regular files, and link targets as text).
+  Import blockers, each a code and its paths: not a git repository; a bare repository or
+  `core.bare` set; `core.worktree` set (the work tree is then not the selected directory); a
+  partial clone (`extensions.partialClone`: objects are missing); reftable or an unknown
+  repository extension; a split index; sparse checkout (in config or as skip-worktree entries);
+  a merge, rebase, cherry-pick, revert or bisect in progress, or unmerged entries (they cannot be
+  shown as a staged and an unstaged patch); submodules (any gitlink); Git LFS (a `filter=lfs`
+  attribute in any `.gitattributes` in the tree or in `info/attributes`); and symlinks or
+  reparse points (junctions) that escape the work tree.
+  `POST /v1/projects/inspect` returns an inspection and stores nothing.
+  Acceptance, on repositories built in `t.TempDir`: a repository whose config defines a clean
+  filter, fsmonitor and textconv, with a hook that writes a marker file, is inspected and no
+  marker is written; a populated submodule whose own config defines fsmonitor and a clean filter
+  writes no marker; the mirror config holds only allow-listed keys (a filter or fsmonitor set in
+  the repository, global or system config is not copied); a git older than 2.45.1 is refused at
+  start-up; a UNC or device path in `gitdir:`, `commondir` or alternates is refused; each
+  blocker, including each kind of operation in progress and an unmerged entry; a shallow
+  repository inspects with its history; a path ignored only by the global excludes file is
+  ignored; staged, unstaged and untracked are told apart; the original's `.git` and work tree
+  are byte-identical before and after (every file hashed); the index copy keeps the original's
+  mtime; the fingerprint changes when HEAD, the index entries or a changed file changes, and not
+  when a `git status` in the original rewrites only stat data. On Windows CI: with
+  `core.autocrlf=true` and `core.filemode=false`, a clean checkout inspects clean and a one-line
+  edit gives a one-line patch; the user's git can replace its index while Ada holds it open.
+- [ ] **M3.2 Import and snapshots.** Migration 0005: the project's source identity (canonical
+  path, git common directory, the identity's fingerprint at import) and `source_snapshots`
+  (project, base commit, fingerprint, staged patch artifact, unstaged patch artifact, untracked
+  files as a list of path, mode and artifact, `created_by`, created). `POST /v1/projects`
+  imports: it inspects, refuses on blockers with `import_blocked` and their list, and creates the
+  project with its creator as owner. The import result lists the Ada tasks already recorded for
+  the same source (canonical path and common directory); verifiable Harness history waits for M6
+  (decisions log, 2026-10-16). `POST /v1/projects/{id}/snapshots` with `{untracked: [paths]}`
+  captures `git diff --cached --binary` and `git diff --binary` through the mirror, and the
+  selected untracked files, into artifacts. The fingerprint is taken before and after; a
+  difference refuses with `source_changed` and stores nothing. Untracked selection is explicit:
+  each requested path must be an exact member of the untracked list of the inspection the same
+  snapshot takes, is opened relative to the work tree with no symlink or reparse point anywhere
+  on its path, and must be a regular file; anything else is refused with `invalid_path`.
+  Ignored files (judged with the mirror's excludes, M3.1), and paths that look like credentials
+  (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `.npmrc`, `.netrc`, `.pypirc`, `*.p12`, `*.pfx`,
+  `*.kdbx`, anything under `.aws/` or `.ssh/`, credentials files), are refused unless listed in
+  `include_sensitive`.
+  Acceptance: import creates the project and the owner's membership; blockers refuse; a second
+  import of the same source lists the first one's tasks; a snapshot reproduces the staged,
+  unstaged and selected untracked content exactly (applied to a clone of the base, it gives the
+  original's work tree for those paths); a change during capture is refused; each of these is
+  refused with `invalid_path`: a path not in the untracked list, `..`, an absolute or drive path,
+  `file:stream` (an NTFS alternate data stream), `CON`, a trailing dot, a directory, a symlink,
+  and a junction swapped in after inspection; each credential pattern is refused without
+  `include_sensitive`; the original is byte-identical before and after; idempotency and
+  membership as for the other mutations.
+- [ ] **M3.3 Managed clone and task workspaces.** `git clone --bare --no-local --no-hardlinks
+  --template=` from the mirror, never from the original, into `<state>/projects/<id>/repo.git`,
+  with `GIT_NO_LAZY_FETCH=1` and `-c transfer.bundleURI=false`, and its config replaced by Ada's;
+  later imports rebuild the mirror and fetch from it the same way. Upload-pack therefore reads
+  only Ada's config, and `--no-local` makes pack-objects copy the objects the mirror reaches
+  through alternates into the clone's own pack. A task bound to a snapshot gets a feature branch
+  `ada/<task id>` from the snapshot's base commit. The attempt's worktree,
+  `<state>/projects/<id>/worktrees/<attempt>`, has the snapshot applied and committed as one
+  commit, "Imported working changes" (staged and unstaged as recorded), so the task's own changes
+  stay apart. A versioned workspace manifest (a stored `workspaces` row, and a copy in the
+  worktree's git admin directory) binds project, task, attempt, snapshot, base commit, executor
+  and policy. The executor runs the engine in that worktree instead of its scratch directory; a
+  missing or mismatched manifest moves the attempt to `recovery_required` and is never rebuilt
+  silently.
+  Acceptance: the clone shares no files or object storage with the original (no alternates, no
+  hardlinks: file IDs compared); a repository whose config names upload-pack and pack-objects
+  commands and a bundle URI is cloned and fetched, and no marker is written; the imported-changes
+  commit reproduces the snapshot; the engine's working directory is the worktree; a tampered
+  manifest goes to recovery.
+- [ ] **M3.4 Drift and launch revalidation.** `GET /v1/projects/{id}/drift` inspects the original
+  again and compares it with the newest snapshot: new commits, a moved branch, changed or new
+  paths, each reported. Immediately before launch the scheduler checks that the snapshot's
+  artifacts still hash to their recorded values and that the workspace manifest matches the
+  attempt (task revision, snapshot, ownership generation); a mismatch refuses the launch with a
+  reason.
+  Acceptance: each kind of drift is reported, and an unchanged original reports none; a
+  corrupted snapshot artifact or a stale manifest refuses the launch.
+
 ## Later milestones
 
 Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
 
-- **M3 Project workspaces:** import without running repository code, snapshots of staged,
-  unstaged and selected untracked files, an Ada-owned clone, task worktrees, drift detection,
-  import blockers.
+- **M3 Project workspaces:** broken into slices; see "M3 Project workspaces" above.
 - **M4 First local workflow:** desktop import, task, edit, checks, diff and review on Windows and
   Ubuntu with a real backend.
 - **M4b Web access:** the TLS listener and its setting, local accounts and sessions, per-user
