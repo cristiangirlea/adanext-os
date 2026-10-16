@@ -40,6 +40,24 @@ describe("coordinator lifecycle", () => {
     missing.spawn = async () => { throw new Error("missing binary"); };
     await expect(findOrStart(config, "/pipe", missing)).rejects.toThrow("missing binary");
   });
+  it("keeps waiting while a coordinator it launched times out, and only then", async () => {
+    const timedOut = () => Object.assign(new Error("adad did not answer in time"), { code: "ETIMEDOUT" });
+    const starting = io([]);
+    const answers: (boolean | Error)[] = [false, timedOut(), timedOut(), true];
+    starting.probe = vi.fn(async () => { const next = answers.shift() ?? false; if (next instanceof Error) throw next; return next; });
+    await findOrStart(config, "/pipe", starting);
+    expect(starting.spawn).toHaveBeenCalledOnce();
+    expect(starting.probe).toHaveBeenCalledTimes(4);
+    const hung = io([]);
+    hung.probe = async () => { throw timedOut(); };
+    await expect(findOrStart(config, "/pipe", hung)).rejects.toThrow("adad did not answer in time");
+    expect(hung.spawn).not.toHaveBeenCalled();
+    const neverReady = io([]);
+    let launched = false;
+    neverReady.probe = async () => { if (!launched) { launched = true; return false; } throw timedOut(); };
+    await expect(findOrStart(config, "/pipe", neverReady, 1000)).rejects.toThrow("timed out waiting for adad to start");
+    expect(neverReady.spawn).toHaveBeenCalledOnce();
+  });
   it("waits for disappearance without starting anything and bounds the wait", async () => {
     const fake = io([true, true, false]);
     await waitForExit("/pipe", fake, 1000);

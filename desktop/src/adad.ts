@@ -323,7 +323,11 @@ export async function findOrStart(config: CoordinatorConfig, socketPath: string,
   if (await io.probe(socketPath, Math.min(500, timeoutMs))) return;
   await io.spawn(config.binary, config.args);
   while (io.now() < deadline) {
-    if (await io.probe(socketPath, Math.min(500, deadline - io.now()))) return;
+    // The coordinator we launched may still be starting: a slow answer is not ready yet, not a failure.
+    if (await io.probe(socketPath, Math.min(500, deadline - io.now())).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ETIMEDOUT") return false;
+      throw error;
+    })) return;
     await io.sleep(Math.min(100, Math.max(0, deadline - io.now())));
   }
   throw new Error("timed out waiting for adad to start");
