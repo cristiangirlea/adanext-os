@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated 2026-10-16. Statuses: not started, in progress, implemented (code merged), verified
+Updated 2026-10-17. Statuses: not started, in progress, implemented (code merged), verified
 (evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
 are in `docs/backlog.md`.
 
@@ -8,8 +8,8 @@ are in `docs/backlog.md`.
 |---|---|---|---|
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
-| M2 Durable coordinator | in progress | M2.1 store: #18 and #24 merged, verified; M2.2 IPC and `adad`: #28, #31 merged; M2.3 artifacts and executor: #35, #40 merged; hardening #38, #43, #45, #47, #49 | M2.4 the window can close; the follow-up issues #39, #42, #44, #46, #48 |
-| M3 Project workspaces | not started | | |
+| M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
+| M3 Project workspaces | in progress | Slices in `docs/backlog.md` (#78); M3.1 #81 | M3.2 import and snapshots |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -343,6 +343,23 @@ Windows executor comparison, both with `GOFLAGS=-p=4`, `go test -count=3 ./inter
 `.hrn/executor-baseline`, then that detached temporary worktree was removed. This branch at
 `16c77bd` plus the uncommitted fixes passed (175.797s). This observation does not establish
 that the intermittent failures recorded above have been fixed.
+
+### M3.1 safe git and inspection (2026-10-16 to 2026-10-17, #80, PR #81)
+
+`internal/source` and `POST /v1/projects/inspect`, as the M3.1 entry of `docs/backlog.md` and the
+decisions-log entry of 2026-10-16 ("M3 in four slices") describe them. Implementation and fix
+rounds ran as Claude Opus runs through hrn (`20261016-172957-7df2c1`, `-204148-fd3076`,
+`-221139-e72776`, `-233544-ff2c1e`); three independent read-only reviews, each also the security
+read (`20261016-190627-df5d74`, `-214007-c65c38`, `-231407-f5e92b`), are on the pull request.
+
+Evidence at `3ca8e3a`: `.hrn/check.sh` passed, that is `bash scripts/check.sh` on Windows (all
+steps; `-race` left to Linux for want of cgo) and `go vet`, `go test` and `go test -race` for
+every package in `golang:1.26` in Docker. Earlier rounds met only the executor timing flakes of
+#72 on Windows, each passing on a re-run. The marker tests prove that no filter, fsmonitor,
+textconv, external diff, ssh command or hook the repository, its submodules or the global and
+system config define runs; every original file is hashed before and after.
+
+Not verified: a repository in OneDrive with online-only metadata (#83); macOS.
 
 ## Decisions log
 

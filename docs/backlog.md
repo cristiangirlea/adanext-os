@@ -150,7 +150,7 @@ Four slices, one at a time in this order: each touches the schema or the API, wh
 `docs/plan.md` section 8 keeps sequential (decisions log, 2026-10-16). The desktop import screen
 is M4.
 
-- [ ] **M3.1 Safe git and inspection.** A new package, `internal/source`.
+- [x] **M3.1 Safe git and inspection** (#80: #81, 2026-10-17). A new package, `internal/source`.
   The git runner: git resolved once from PATH at start-up as an absolute path (Go's `LookPath`
   already refuses the current directory), and git without the May 2024 clone fixes refused at
   start-up (`git version`); an environment built from an allow-list (PATH, SystemRoot, TEMP and
