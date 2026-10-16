@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -52,19 +53,6 @@ func readUnder(base, path string, limit int64) ([]byte, os.FileInfo, error) {
 		return nil, nil, err
 	}
 	return readFile(path, limit)
-}
-
-// isLink is a symlink, or an irregular file (a junction on Windows) that
-// Readlink reads; a cloud or dedup reparse point is not one.
-func isLink(path string, info os.FileInfo) bool {
-	if info.Mode()&os.ModeSymlink != 0 {
-		return true
-	}
-	if info.Mode()&os.ModeIrregular == 0 {
-		return false
-	}
-	_, err := os.Readlink(path)
-	return err == nil
 }
 
 // noLinks Lstats each component of path below base and refuses a link or
@@ -150,6 +138,10 @@ func resolve(root, p string, bounded, follow bool) (string, bool) {
 		next := filepath.Join(cur, part)
 		info, err := os.Lstat(next)
 		if err != nil {
+			// A later `..` would be taken lexically, through links never resolved.
+			if slices.Contains(rest, "..") {
+				return "", false
+			}
 			return filepath.Join(append([]string{next}, rest...)...), true
 		}
 		if !isLink(next, info) {

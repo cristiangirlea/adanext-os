@@ -20,15 +20,7 @@ func openShared(path string) (*os.File, error) {
 	if IsRemotePath(path) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: errRemote}
 	}
-	name := path
-	if len(name) >= 248 && filepath.VolumeName(name) != "" && !strings.HasPrefix(name, `\\`) {
-		name = `\\?\` + filepath.Clean(name)
-	}
-	p, err := windows.UTF16PtrFromString(name)
-	if err != nil {
-		return nil, &os.PathError{Op: "open", Path: path, Err: err}
-	}
-	h, err := windows.CreateFile(p, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	h, err := openReparsePoint(path, windows.GENERIC_READ)
 	if err != nil {
 		if err == windows.ERROR_FILE_NOT_FOUND || err == windows.ERROR_PATH_NOT_FOUND {
 			err = os.ErrNotExist
@@ -45,9 +37,7 @@ func openShared(path string) (*os.File, error) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		var tag struct{ FileAttributes, ReparseTag uint32 } // FILE_ATTRIBUTE_TAG_INFO
-		err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&tag)), uint32(unsafe.Sizeof(tag)))
-		if err != nil || isNameSurrogate(tag.ReparseTag) {
+		if tag, err := reparseTag(h); err != nil || isNameSurrogate(tag) {
 			windows.CloseHandle(h)
 			return nil, &os.PathError{Op: "open", Path: path, Err: errLink}
 		}
@@ -62,3 +52,47 @@ func openShared(path string) (*os.File, error) {
 // isNameSurrogate is a reparse tag that redirects to another name (a symlink
 // or junction), unlike a cloud or dedup file's.
 func isNameSurrogate(tag uint32) bool { return tag&0x20000000 != 0 }
+
+// openReparsePoint opens path itself, never a final reparse point's target;
+// BACKUP_SEMANTICS lets it open a directory or junction so it can be refused.
+func openReparsePoint(path string, access uint32) (windows.Handle, error) {
+	name := path
+	if len(name) >= 248 && filepath.VolumeName(name) != "" && !strings.HasPrefix(name, `\\`) {
+		name = `\\?\` + filepath.Clean(name)
+	}
+	p, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	return windows.CreateFile(p, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+}
+
+// reparseTag is the handle's reparse tag, 0 when it is not a reparse point.
+func reparseTag(h windows.Handle) (uint32, error) {
+	var tag struct{ FileAttributes, ReparseTag uint32 } // FILE_ATTRIBUTE_TAG_INFO
+	if err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&tag)), uint32(unsafe.Sizeof(tag))); err != nil {
+		return 0, err
+	}
+	if tag.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return 0, nil
+	}
+	return tag.ReparseTag, nil
+}
+
+// isLink is a symlink, or a reparse point whose tag redirects to another name
+// or cannot be read; a cloud or dedup file is not one.
+func isLink(path string, info os.FileInfo) bool {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return true
+	}
+	if info.Mode()&os.ModeIrregular == 0 {
+		return false
+	}
+	h, err := openReparsePoint(path, windows.FILE_READ_ATTRIBUTES)
+	if err != nil {
+		return true
+	}
+	defer windows.CloseHandle(h)
+	tag, err := reparseTag(h)
+	return err != nil || isNameSurrogate(tag)
+}

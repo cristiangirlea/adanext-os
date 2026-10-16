@@ -26,3 +26,15 @@ func openShared(path string) (*os.File, error) {
 	}
 	return f, nil
 }
+
+// isLink is a symlink, or an irregular file Readlink reads.
+func isLink(path string, info os.FileInfo) bool {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return true
+	}
+	if info.Mode()&os.ModeIrregular == 0 {
+		return false
+	}
+	_, err := os.Readlink(path)
+	return err == nil
+}

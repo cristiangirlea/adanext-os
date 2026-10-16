@@ -122,3 +122,23 @@ func TestALinkWhoseDotDotFollowsAnIgnoredLinkOutsideIsABlocker(t *testing.T) {
 		t.Fatalf("blockers = %+v", r.Blockers)
 	}
 }
+
+func TestResolveNeverJoinsADotDotAfterAMissingComponent(t *testing.T) {
+	t.Parallel()
+	root := tempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(root, "l2")); err != nil {
+		t.Fatal(err)
+	}
+	// The kernel fails at missing; joining the rest would pass through l2 unresolved.
+	if err := os.Symlink("missing/../l2/x", filepath.Join(root, "a")); err != nil {
+		t.Fatal(err)
+	}
+	for _, bounded := range []bool{true, false} {
+		if got, ok := resolve(root, filepath.Join(root, "a"), bounded, true); ok {
+			t.Errorf("resolve(bounded=%v) = %q, ok", bounded, got)
+		}
+	}
+}

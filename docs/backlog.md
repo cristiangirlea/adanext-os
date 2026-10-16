@@ -196,7 +196,7 @@ is M4.
   shown as a staged and an unstaged patch); assume-unchanged entries (git skips those files, so
   their edits would not show); submodules (any gitlink); Git LFS (a `filter=lfs`
   attribute in any `.gitattributes` in the tree or in `info/attributes`); and symlinks or
-  reparse points (junctions) that escape the work tree.
+  redirecting reparse points (symlinks or junctions) that escape the work tree.
   `POST /v1/projects/inspect` returns an inspection and stores nothing.
   Acceptance, on repositories built in `t.TempDir`: a repository whose config defines a clean
   filter, fsmonitor and textconv, with a hook that writes a marker file, is inspected and no
@@ -224,8 +224,9 @@ is M4.
   selected untracked files, into artifacts. The fingerprint is taken before and after; a
   difference refuses with `source_changed` and stores nothing. Untracked selection is explicit:
   each requested path must be an exact member of the untracked list of the inspection the same
-  snapshot takes, is opened relative to the work tree with no symlink or reparse point anywhere
-  on its path, and must be a regular file; anything else is refused with `invalid_path`.
+  snapshot takes, is opened relative to the work tree with no symlink or redirecting reparse
+  point (symlink or junction) anywhere on its path, and must be a regular file; anything else is
+  refused with `invalid_path`.
   Ignored files (judged with the mirror's excludes, M3.1), and paths that look like credentials
   (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `.npmrc`, `.netrc`, `.pypirc`, `*.p12`, `*.pfx`,
   `*.kdbx`, anything under `.aws/` or `.ssh/`, credentials files), are refused unless listed in
