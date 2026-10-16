@@ -1090,6 +1090,29 @@ that the intermittent failures recorded above have been fixed.
   state, column or migration was needed, and the one row the launch and the cancel both update
   is the simplest serialisation that holds across coordinators.
 
+- **2026-10-16, M3 in four slices, and reading a repository without running it.** M3 is
+  `docs/backlog.md`'s M3.1 safe git and inspection, M3.2 import and snapshots, M3.3 managed clone
+  and task workspaces, and M3.4 drift and launch revalidation, taken one at a time in that order,
+  since each touches the schema or the API. Ada never runs git against the original repository's
+  own git directory. Its config can name commands (clean and smudge filters, fsmonitor, textconv,
+  an ssh command), and `git status` alone can run clean filters and fsmonitor, so "inspect
+  without executing repository code" cannot hold if git reads that config. Inspection instead
+  reads the layout in Go and builds a mirror git directory under Ada's state: a config Ada
+  writes, copies of HEAD, the refs and the index, and the original's objects reached read-only
+  through `objects/info/alternates`. Git runs with that mirror as its git directory and the
+  original as its work tree, with system and global config off and hooks pointed at an empty
+  directory, so filter and diff drivers named in `.gitattributes` are undefined and nothing runs.
+  The mirror is for reads only. The Ada-owned clone is made through upload-pack
+  (`git clone --bare --no-local --no-hardlinks`), which is safe on an untrusted repository because
+  git ignores `uploadpack.packObjectsHook` in repository config, and its config is replaced by
+  Ada's, so it borrows no objects and keeps none of the original's settings. Two amendments to
+  `docs/plan.md` section 3, Import: v1 blocks every submodule (the plan said "unresolved
+  submodules") and every Git LFS path (the plan said "missing LFS objects") until a later slice
+  supports them, because supporting them means running or reimplementing their transports; and
+  sparse checkout is blocked in every form (the plan said "unsupported sparse-checkout cases").
+  Reason: a blocker the user can see is better than an import that quietly runs a transport or
+  reads a partial work tree.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
