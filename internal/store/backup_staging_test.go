@@ -464,8 +464,8 @@ func TestBackupRefusesALockOpenedThroughALinkSwappedBackBeforeTheCheck(t *testin
 		}
 	}
 	dest := filepath.Join(dir, "second.sqlite")
-	if err := s.Backup(ctx, dest); err == nil {
-		t.Fatal("backup holding a lock opened through a link succeeded")
+	if err := s.Backup(ctx, dest); !errors.Is(err, errBackupLockNotChecked) {
+		t.Fatalf("backup holding a lock opened through a link: %v, want %v", err, errBackupLockNotChecked)
 	}
 	if !released {
 		t.Fatal("the lock in the link's target was never found busy")

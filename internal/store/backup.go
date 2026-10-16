@@ -23,6 +23,9 @@ var (
 	// links nor a no-replace rename, so a backup cannot be published there
 	// without the risk of replacing a file.
 	ErrPublishUnsupported = errors.New("backup destination filesystem supports neither hard links nor a no-replace rename")
+	// errBackupLockNotChecked says the lock a backup holds is not the one in
+	// the staging directory it checked, such as one opened through a link.
+	errBackupLockNotChecked = errors.New("backup lock held is not the one in the checked staging directory")
 )
 
 const (
@@ -104,7 +107,7 @@ func checkBackupStaging(staging string, checked os.FileInfo, lock *os.File) erro
 	}
 	named, err := os.Lstat(filepath.Join(staging, backupLockName))
 	if err != nil || !os.SameFile(held, named) {
-		return fmt.Errorf("backup lock held is not the one in %s", staging)
+		return fmt.Errorf("%w: %s", errBackupLockNotChecked, staging)
 	}
 	return nil
 }

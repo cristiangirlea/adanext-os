@@ -91,3 +91,61 @@ func TestTrustedBackupDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestBackupWorksOnlyFromTheDestinationsResolvedDirectory(t *testing.T) {
+	s := openTestStore(t)
+	seed(t, s)
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	realDir := filepath.Join(home, "real")
+	other := filepath.Join(root, "other")
+	share := filepath.Join(root, "share")
+	for _, d := range []string{realDir, other, share} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(share, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	// home/b -> share/current -> home/real, and share is open to everyone.
+	current := filepath.Join(share, "current")
+	linkDirectory(t, realDir, current)
+	b := filepath.Join(home, "b")
+	linkDirectory(t, current, b)
+	resetBackupSeams(t)
+	beforeBackupLock = func(string) {
+		if err := os.Remove(current); err != nil {
+			t.Fatal(err)
+		}
+		linkDirectory(t, other, current)
+	}
+	if err := s.Backup(ctx, filepath.Join(b, "backup.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+	assertSQLiteFile(t, filepath.Join(realDir, "backup.sqlite"))
+	if entries, err := os.ReadDir(other); err != nil || len(entries) != 0 {
+		t.Fatalf("the repointed link's target holds %v, %v", entries, err)
+	}
+}
+
+func TestBackupRefusesALinkResolvingBelowADirectoryOthersCanRenameIn(t *testing.T) {
+	s := openTestStore(t)
+	seed(t, s)
+	shared := filepath.Join(t.TempDir(), "shared")
+	target := filepath.Join(shared, "private")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	linkDirectory(t, target, link)
+	if err := s.Backup(ctx, filepath.Join(link, "backup.sqlite")); err == nil || !strings.Contains(err.Error(), "another user") {
+		t.Fatalf("backup through a link below a 0777 directory: %v, want a refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, backupStagingName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused backup created its staging directory: %v", err)
+	}
+}

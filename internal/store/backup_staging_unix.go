@@ -14,30 +14,39 @@ import (
 // checkBackupDestination refuses a destination directory that another user
 // could rename entries in, by owning it or one of its ancestors, or by being
 // able to write to one: SQLite writes the snapshot by path, so such a user
-// could swap the staging directory and receive the database. Both the path as
-// given and the path its links resolve to are checked, as OpenSSH's
-// StrictModes does.
-func checkBackupDestination(dir string) error {
+// could swap the staging directory and receive the database. It resolves dir
+// once and returns that path, every component of which it found to be a real
+// directory, not a link, that only the user or root can change; the backup
+// then works only from it, since a link on the given path could be repointed.
+// The path as given is checked too.
+func checkBackupDestination(dir string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return fmt.Errorf("check backup destination directory: %w", err)
+		return "", fmt.Errorf("check backup destination directory: %w", err)
 	}
 	for _, start := range []string{dir, resolved} {
 		for p := filepath.Clean(start); ; p = filepath.Dir(p) {
-			info, err := os.Stat(p)
+			stat := os.Stat
+			if start == resolved {
+				stat = os.Lstat
+			}
+			info, err := stat(p)
 			if err != nil {
-				return fmt.Errorf("check backup destination directory: %w", err)
+				return "", fmt.Errorf("check backup destination directory: %w", err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("backup destination directory %s: %s became a link", dir, p)
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
 			if !ok || !trustedBackupDirectory(st.Uid, st.Gid, info.Mode(), os.Geteuid(), os.Getegid()) {
-				return fmt.Errorf("backup destination directory %s: %s can be changed by another user", dir, p)
+				return "", fmt.Errorf("backup destination directory %s: %s can be changed by another user", dir, p)
 			}
 			if filepath.Dir(p) == p {
 				break
 			}
 		}
 	}
-	return nil
+	return resolved, nil
 }
 
 // trustedBackupDirectory reports whether only the user and root can rename
