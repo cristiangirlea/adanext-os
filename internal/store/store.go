@@ -329,6 +329,9 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT attempt,seq,time,kind,payload FROM events LIMIT 0",
 		"SELECT user,key,request_hash,response,created,project FROM idempotency LIMIT 0",
 		"SELECT hash,size,origin,created FROM artifacts LIMIT 0",
+		"SELECT project,canonical_path,common_dir,fingerprint,imported FROM project_sources LIMIT 0",
+		"SELECT id,project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created FROM source_snapshots LIMIT 0",
+		"SELECT snapshot,path,mode,artifact FROM snapshot_untracked LIMIT 0",
 	} {
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {
