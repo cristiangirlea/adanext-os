@@ -20,6 +20,7 @@ import (
 	"github.com/cristiangirlea/ada-os/internal/artifact"
 	"github.com/cristiangirlea/ada-os/internal/executor"
 	"github.com/cristiangirlea/ada-os/internal/ipc"
+	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
 
@@ -175,6 +176,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	stop := &coordinatorStop{requested: make(chan struct{})}
 	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Owner: ownerAccount, Stopper: stop}
+	// Without a usable git adad still serves; only inspection answers git_unavailable.
+	mirrors := filepath.Join(*stateDir, "inspect")
+	_ = os.RemoveAll(mirrors) // mirrors an earlier coordinator did not finish removing
+	if git, err := source.Resolve(ctx, filepath.Join(*stateDir, "git")); err != nil {
+		fmt.Fprintln(stderr, "adad: inspection unavailable:", err)
+		execution.GitUnavailable = err.Error()
+	} else {
+		execution.Inspector = &source.Inspector{Git: git, MirrorRoot: mirrors, Config: source.DefaultConfigFiles(git.Path)}
+	}
 	var local *executor.Executor
 	var stopOnce sync.Once
 	var stopErr error
