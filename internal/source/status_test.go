@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -58,6 +59,35 @@ func TestAPathIgnoredOnlyByTheGlobalExcludesFileIsIgnored(t *testing.T) {
 		if hasPath(r.Status.Untracked, "secret.txt") || !hasPath(r.Status.Untracked, "keep.txt") {
 			t.Fatalf("key set %v: untracked = %v", keySet, r.Status.Untracked)
 		}
+	}
+}
+
+func TestAGlobalExcludesFileThatIsALinkIsFollowedButARepositoryOneIsNot(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink on Windows needs a privilege CI does not have")
+	}
+	home := tempDir(t)
+	write(t, filepath.Join(home, "dotfiles", "ignore"), "secret.txt\n")
+	link := filepath.Join(home, ".config", "git", "ignore")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../dotfiles/ignore", link); err != nil {
+		t.Fatal(err)
+	}
+	dir := newRepo(t, nil)
+	write(t, filepath.Join(dir, "secret.txt"), "s\n")
+	in := newInspector(t)
+	in.Config = ConfigFiles{XDG: filepath.Join(home, ".config", "git"), Home: home}
+	if r := inspect(t, in, dir); hasPath(r.Status.Untracked, "secret.txt") {
+		t.Fatalf("the linked global excludes file was not followed: untracked = %v", r.Status.Untracked)
+	}
+	other := newRepo(t, nil)
+	write(t, filepath.Join(other, "secret.txt"), "s\n")
+	git(t, other, "config", "core.excludesFile", filepath.ToSlash(link))
+	if r := inspect(t, newInspector(t), other); !hasPath(r.Status.Untracked, "secret.txt") {
+		t.Fatalf("the repository config's linked excludes file was followed: untracked = %v", r.Status.Untracked)
 	}
 }
 

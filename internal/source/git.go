@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -34,6 +35,10 @@ func Resolve(ctx context.Context, scratch string) (*Git, error) {
 	}
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("git resolved to a relative path %q", path)
+	}
+	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(path), ".exe") {
+		// A .bat or .cmd runs through cmd.exe, which reads & in its arguments as a command.
+		return nil, fmt.Errorf("git resolved to %q, not an .exe", path)
 	}
 	g := &Git{Path: path, home: filepath.Join(scratch, "home"), hooks: filepath.Join(scratch, "hooks")}
 	for _, dir := range []string{g.home, g.hooks} {

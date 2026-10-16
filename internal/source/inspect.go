@@ -11,8 +11,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +39,7 @@ const (
 	BlockLFS              = "git_lfs"
 	BlockEscapingLink     = "escaping_link"
 	BlockRemotePath       = "unc_path"
+	BlockAssumeUnchanged  = "assume_unchanged"
 )
 
 // maxBlockerPaths bounds a blocker's listed paths; Count keeps the total.
@@ -177,12 +178,12 @@ func (in *Inspector) inspect(ctx context.Context, path, mirror string) (Inspecti
 		return r, nil
 	}
 
-	repo, err := readConfigFile(filepath.Join(l.commonDir, "config"))
+	repo, err := readConfigFile(l.commonDir, filepath.Join(l.commonDir, "config"))
 	if err != nil {
 		return r, err
 	}
 	if repo.boolean("extensions.worktreeConfig") {
-		wt, err := readConfigFile(filepath.Join(l.gitDir, "config.worktree"))
+		wt, err := readConfigFile(l.gitDir, filepath.Join(l.gitDir, "config.worktree"))
 		if err != nil {
 			return r, err
 		}
@@ -190,7 +191,7 @@ func (in *Inspector) inspect(ctx context.Context, path, mirror string) (Inspecti
 	}
 	merged := &config{}
 	for _, file := range append(append([]string{}, in.Config.System...), in.Config.Global...) {
-		c, err := readConfigFile(file)
+		c, err := readConfigFile("", file)
 		if err != nil {
 			return r, err
 		}
@@ -203,7 +204,7 @@ func (in *Inspector) inspect(ctx context.Context, path, mirror string) (Inspecti
 		return r, nil
 	}
 
-	indexData, indexTime, idx, err := readIndex(filepath.Join(l.gitDir, "index"), hashSize)
+	indexData, indexTime, idx, err := readIndex(l.gitDir, hashSize)
 	if err != nil {
 		return r, err
 	}
@@ -234,10 +235,12 @@ func (in *Inspector) inspect(ctx context.Context, path, mirror string) (Inspecti
 		}
 		r.History = parseLog(out)
 	}
-	r.checkLFS(root, l.commonDir, idx)
-	r.checkLinks(root, idx)
+	links := r.checkLinks(root, idx)
+	if err := r.checkLFS(root, l.commonDir, idx, links); err != nil {
+		return r, err
+	}
 	r.Files = instructionFiles(root)
-	r.Fingerprint = fingerprint(root, r.Identity.Head, idx, r.Status)
+	r.Fingerprint = fingerprint(root, r.Identity.Head, idx, r.Status, links)
 	return r, nil
 }
 
@@ -301,15 +304,16 @@ func remotes(c *config) []Remote {
 	return out
 }
 
-// readIndex copies the index, holding its handle only for the copy, and
+// readIndex copies gitDir's index, holding its handle only for the copy, and
 // retries a copy that raced the user's git replacing it.
-func readIndex(path string, hashSize int) ([]byte, time.Time, *index, error) {
+func readIndex(gitDir string, hashSize int) ([]byte, time.Time, *index, error) {
+	path := filepath.Join(gitDir, "index")
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * 20 * time.Millisecond)
 		}
-		data, info, err := readFile(path)
+		data, info, err := readUnder(gitDir, path, maxIndexSize)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, time.Time{}, &index{}, nil
 		}
@@ -328,7 +332,7 @@ func (r *Inspection) checkIndex(idx *index, repo *config) {
 	if idx.has("link") {
 		r.block(BlockSplitIndex, "index")
 	}
-	var unmerged, gitlinks, skipped []string
+	var unmerged, gitlinks, skipped, assumed []string
 	for _, e := range idx.entries {
 		if e.stage != 0 {
 			if len(unmerged) == 0 || unmerged[len(unmerged)-1] != e.path {
@@ -341,6 +345,10 @@ func (r *Inspection) checkIndex(idx *index, repo *config) {
 		}
 		if e.skipWork {
 			skipped = append(skipped, e.path)
+		}
+		if e.assumeValid {
+			// git never compares these, so their edits are missing from status and snapshots.
+			assumed = append(assumed, e.path)
 		}
 	}
 	var sparse []string
@@ -358,6 +366,9 @@ func (r *Inspection) checkIndex(idx *index, repo *config) {
 	}
 	if len(gitlinks) > 0 {
 		r.block(BlockSubmodule, gitlinks...)
+	}
+	if len(assumed) > 0 {
+		r.block(BlockAssumeUnchanged, assumed...)
 	}
 }
 
@@ -382,7 +393,7 @@ func (r *Inspection) checkOperations(gitDir string) {
 	}
 	if exists("sequencer") && !exists("CHERRY_PICK_HEAD") && !exists("REVERT_HEAD") {
 		// A paused multi-commit pick or revert; its todo says which.
-		todo, _, _ := readFile(filepath.Join(gitDir, "sequencer", "todo"))
+		todo, _, _ := readUnder(gitDir, filepath.Join(gitDir, "sequencer", "todo"), maxFileSize)
 		if bytes.HasPrefix(bytes.TrimSpace(todo), []byte("revert")) {
 			r.block(BlockRevert, "sequencer")
 		} else {
@@ -396,7 +407,7 @@ func (r *Inspection) checkOperations(gitDir string) {
 
 // resolveHead reads HEAD and the ref it names, as files, never through git.
 func resolveHead(l layout, hashSize int) (commit, branch string, err error) {
-	data, _, err := readFile(filepath.Join(l.gitDir, "HEAD"))
+	data, _, err := readUnder(l.gitDir, filepath.Join(l.gitDir, "HEAD"), maxFileSize)
 	if err != nil {
 		return "", "", err
 	}
@@ -435,14 +446,14 @@ func readRef(l layout, ref string) (string, error) {
 			dir = l.gitDir
 		}
 	}
-	data, _, err := readFile(filepath.Join(dir, filepath.FromSlash(ref)))
+	data, _, err := readUnder(dir, filepath.Join(dir, filepath.FromSlash(ref)), maxFileSize)
 	if err == nil {
 		return strings.TrimSpace(string(data)), nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
-	packed, _, err := readFile(filepath.Join(l.commonDir, "packed-refs"))
+	packed, _, err := readUnder(l.commonDir, filepath.Join(l.commonDir, "packed-refs"), maxFileSize)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
@@ -524,38 +535,58 @@ func isGitattributes(p string) bool {
 	return p == ".gitattributes" || strings.HasSuffix(p, "/.gitattributes")
 }
 
-// checkLFS looks for filter=lfs in every .gitattributes of the tree and in
-// info/attributes.
-func (r *Inspection) checkLFS(root, commonDir string, idx *index) {
+// checkLFS looks for filter=lfs in every .gitattributes of the tree, except
+// under a link, and in info/attributes.
+func (r *Inspection) checkLFS(root, commonDir string, idx *index, links map[string]bool) error {
 	var found []string
 	seen := map[string]bool{}
-	check := func(rel, full string) {
+	check := func(base, rel, full string) error {
 		if seen[full] {
-			return
+			return nil
 		}
 		seen[full] = true
 		if info, err := os.Lstat(full); err != nil || !info.Mode().IsRegular() {
-			return
+			return nil
 		}
-		if data, _, err := readFile(full); err == nil && usesLFS(data) {
+		data, _, err := readUnder(base, full, maxFileSize)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errLink) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if usesLFS(data) {
 			found = append(found, rel)
 		}
+		return nil
 	}
+	var paths []string
 	for _, e := range idx.entries {
 		if e.stage == 0 && isGitattributes(e.path) {
-			check(e.path, filepath.Join(root, filepath.FromSlash(e.path)))
+			paths = append(paths, e.path)
 		}
 	}
 	for _, p := range r.Status.Untracked {
 		if isGitattributes(p) {
-			check(p, filepath.Join(root, filepath.FromSlash(p)))
+			paths = append(paths, p)
+		}
+	}
+	for _, p := range paths {
+		if underLink(links, p) {
+			continue
+		}
+		if err := check(root, p, filepath.Join(root, filepath.FromSlash(p))); err != nil {
+			return err
 		}
 	}
 	info := filepath.Join(commonDir, "info", "attributes")
-	check(info, info)
+	if err := check(commonDir, info, info); err != nil {
+		return err
+	}
 	if len(found) > 0 {
 		r.block(BlockLFS, found...)
 	}
+	return nil
 }
 
 func usesLFS(data []byte) bool {
@@ -574,8 +605,9 @@ func usesLFS(data []byte) bool {
 }
 
 // checkLinks finds symlinks and reparse points on the paths git reported, or
-// tracked as links, whose targets leave the work tree.
-func (r *Inspection) checkLinks(root string, idx *index) {
+// tracked as links, whose targets leave the work tree. It returns every link
+// prefix it found, so nothing is read beneath one.
+func (r *Inspection) checkLinks(root string, idx *index) map[string]bool {
 	var paths []string
 	for _, e := range idx.entries {
 		if e.stage == 0 && e.mode&modeTypeMask == modeSymlink {
@@ -586,7 +618,7 @@ func (r *Inspection) checkLinks(root string, idx *index) {
 		paths = append(paths, c.Path)
 	}
 	paths = append(paths, r.Status.Untracked...)
-	checked := map[string]bool{}
+	checked, links := map[string]bool{}, map[string]bool{}
 	var escaping []string
 	for _, p := range paths {
 		parts := strings.Split(strings.TrimSuffix(p, "/"), "/")
@@ -601,8 +633,11 @@ func (r *Inspection) checkLinks(root string, idx *index) {
 			if err != nil {
 				break
 			}
-			if linkEscapes(root, full, info) {
-				escaping = append(escaping, prefix)
+			if isLink(info) {
+				links[prefix] = true
+				if linkEscapes(root, full, info) {
+					escaping = append(escaping, prefix)
+				}
 				break
 			}
 		}
@@ -611,8 +646,25 @@ func (r *Inspection) checkLinks(root string, idx *index) {
 		sort.Strings(escaping)
 		r.block(BlockEscapingLink, escaping...)
 	}
+	return links
 }
 
+// underLink reports a path at or beneath a link checkLinks found.
+func underLink(links map[string]bool, p string) bool {
+	for prefix := p; ; {
+		if links[prefix] {
+			return true
+		}
+		i := strings.LastIndex(prefix, "/")
+		if i < 0 {
+			return false
+		}
+		prefix = prefix[:i]
+	}
+}
+
+// linkEscapes reports a link whose target leaves the work tree: a target
+// outside it is never resolved, and one inside is followed with Lstat.
 func linkEscapes(root, full string, info os.FileInfo) bool {
 	symlink := info.Mode()&os.ModeSymlink != 0
 	if !symlink && info.Mode()&os.ModeIrregular == 0 {
@@ -623,28 +675,12 @@ func linkEscapes(root, full string, info os.FileInfo) bool {
 		// A symlink we cannot read is refused; another reparse point is not a link.
 		return symlink
 	}
-	if runtime.GOOS == "windows" {
-		for _, prefix := range []string{`\\?\`, `\??\`} {
-			if rest, ok := strings.CutPrefix(target, prefix); ok && filepath.VolumeName(rest) != "" && !strings.HasPrefix(rest, `UNC\`) {
-				target = rest
-			}
-		}
-	}
-	if isRemotePath(target) {
+	abs, ok := linkTarget(full, target)
+	if !ok || !within(root, abs) {
 		return true
 	}
-	if !filepath.IsAbs(target) {
-		if filepath.VolumeName(target) != "" || strings.HasPrefix(target, `\`) || strings.HasPrefix(target, "/") {
-			return true // drive-relative or rooted without a volume
-		}
-		target = filepath.Join(filepath.Dir(full), target)
-	}
-	target = filepath.Clean(target)
-	if within(root, target) {
-		return false
-	}
-	resolved, err := filepath.EvalSymlinks(target)
-	return err != nil || !within(root, resolved)
+	_, ok = resolve(root, abs, true, true)
+	return !ok
 }
 
 func within(root, p string) bool {
@@ -678,7 +714,7 @@ func instructionFiles(root string) []string {
 
 // fingerprint hashes HEAD, the index entries without their stat data, and
 // each changed or untracked path's mode, size and content as Lstat sees it.
-func fingerprint(root, head string, idx *index, st Status) string {
+func fingerprint(root, head string, idx *index, st Status, links map[string]bool) string {
 	h := sha256.New()
 	field := func(parts ...string) {
 		for _, p := range parts {
@@ -708,7 +744,11 @@ func fingerprint(root, head string, idx *index, st Status) string {
 	}
 	sort.Strings(paths)
 	for _, p := range paths {
-		field(append([]string{"path", p}, pathState(filepath.Join(root, filepath.FromSlash(p)))...)...)
+		state := []string{"under a link"}
+		if !underLink(links, path.Dir(p)) {
+			state = pathState(filepath.Join(root, filepath.FromSlash(p)))
+		}
+		field(append([]string{"path", p}, state...)...)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -70,6 +70,21 @@ func TestInspectRefusesARelativeOrMissingPath(t *testing.T) {
 	}
 }
 
+func TestInspectRefusesAUNCOrDevicePath(t *testing.T) {
+	inspector := &fakeInspector{}
+	f := newFixture(t, Execution{Inspector: inspector})
+	for _, path := range []string{`\\host\share\repo`, `//host/share/repo`, `\\?\C:\repo`, `\\.\pipe\x`, `\??\C:\repo`} {
+		body, _ := json.Marshal(map[string]string{"path": path})
+		status, data := f.request(t, "POST", "/v1/projects/inspect", "", "", body)
+		if status != 400 || !strings.Contains(string(data), `"bad_request"`) {
+			t.Errorf("%s: %d %s", path, status, data)
+		}
+	}
+	if len(inspector.paths) != 0 {
+		t.Fatalf("inspected %v", inspector.paths)
+	}
+}
+
 func TestInspectAnswers503WithTheReasonWhenGitIsUnavailable(t *testing.T) {
 	f := newFixture(t, Execution{GitUnavailable: "git 2.45.0 lacks the 2024 clone fixes"})
 	body, _ := json.Marshal(map[string]string{"path": absolute(t)})

@@ -73,9 +73,17 @@ func parseBool(v string) bool {
 
 func (c *config) merge(other *config) { c.entries = append(c.entries, other.entries...) }
 
-// readConfigFile parses a config file; a missing file is an empty config.
-func readConfigFile(path string) (*config, error) {
-	data, _, err := readFile(path)
+// readConfigFile parses a config file under base, read through no link; with
+// base empty it is the user's own file, whose local links are followed. A
+// missing file is an empty config.
+func readConfigFile(base, path string) (*config, error) {
+	var data []byte
+	var err error
+	if base == "" {
+		data, err = readUserFile(path)
+	} else {
+		data, _, err = readUnder(base, path, maxFileSize)
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return &config{}, nil
 	}

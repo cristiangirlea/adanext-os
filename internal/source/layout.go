@@ -2,18 +2,34 @@ package source
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
-// openFile is how every user file is opened; tests record it.
+// openFile is how every user file is opened; it refuses anything but a
+// regular file reached through no final link. Tests record it.
 var openFile = openShared
 
-// readFile reads a user's file, holding its handle only for the read.
-func readFile(path string) ([]byte, os.FileInfo, error) {
+// Read caps: over one is an inspection error.
+const (
+	maxIndexSize = 256 << 20
+	maxFileSize  = 16 << 20
+)
+
+var (
+	errLink       = errors.New("a link or reparse point")
+	errNotRegular = errors.New("not a regular file")
+	errRemote     = errors.New("a remote path")
+)
+
+// readFile reads a regular file of at most limit bytes, holding its handle
+// only for the read.
+func readFile(path string, limit int64) ([]byte, os.FileInfo, error) {
 	f, err := openFile(path)
 	if err != nil {
 		return nil, nil, err
@@ -23,14 +39,140 @@ func readFile(path string) ([]byte, os.FileInfo, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err == nil && int64(len(data)) > limit {
+		err = fmt.Errorf("%s: larger than %d bytes", path, limit)
+	}
 	return data, info, err
 }
 
-// isRemotePath reports a UNC or device path (\\host\, \\?\, \\.\ and their
+// readUnder reads path, refusing a link at any component below base.
+func readUnder(base, path string, limit int64) ([]byte, os.FileInfo, error) {
+	if err := noLinks(base, path); err != nil {
+		return nil, nil, err
+	}
+	return readFile(path, limit)
+}
+
+func isLink(info os.FileInfo) bool { return info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 }
+
+// noLinks Lstats each component of path below base and refuses a link or
+// reparse point; a missing component is fs.ErrNotExist.
+func noLinks(base, path string) error {
+	rel, err := filepath.Rel(base, path)
+	if err != nil || !within(base, path) {
+		return fmt.Errorf("%s is not under %s", path, base)
+	}
+	cur := base
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return err
+		}
+		if isLink(info) {
+			return &os.PathError{Op: "open", Path: cur, Err: errLink}
+		}
+	}
+	return nil
+}
+
+// linkTarget makes a link's target absolute; ok is false for a remote,
+// rooted or drive-relative one.
+func linkTarget(link, target string) (string, bool) {
+	if runtime.GOOS == "windows" {
+		for _, prefix := range []string{`\\?\`, `\??\`} {
+			if rest, ok := strings.CutPrefix(target, prefix); ok && filepath.VolumeName(rest) != "" && !strings.HasPrefix(rest, `UNC\`) {
+				target = rest
+			}
+		}
+	}
+	if IsRemotePath(target) {
+		return "", false
+	}
+	if !filepath.IsAbs(target) {
+		if filepath.VolumeName(target) != "" || strings.HasPrefix(target, `\`) || strings.HasPrefix(target, "/") {
+			return "", false
+		}
+		target = filepath.Join(filepath.Dir(link), target)
+	}
+	return filepath.Clean(target), true
+}
+
+func volumeRoot(p string) string { return filepath.VolumeName(p) + string(filepath.Separator) }
+
+// resolve follows the links in p, under root, one component at a time with
+// Lstat and never through a remote target. ok is false at an unreadable
+// symlink, a remote or rooted target, a loop, a target outside root when
+// bounded, or any link at all when follow is false.
+func resolve(root, p string, bounded, follow bool) (string, bool) {
+	parts := func(root, p string) []string {
+		rel, err := filepath.Rel(root, p)
+		if err != nil || rel == "." {
+			return nil
+		}
+		return strings.Split(rel, string(filepath.Separator))
+	}
+	rest, cur := parts(root, p), root
+	for hops := 0; len(rest) > 0; {
+		next := filepath.Join(cur, rest[0])
+		rest = rest[1:]
+		info, err := os.Lstat(next)
+		if err != nil {
+			return filepath.Join(append([]string{next}, rest...)...), true
+		}
+		if !isLink(info) {
+			cur = next
+			continue
+		}
+		target, err := os.Readlink(next)
+		if err != nil && info.Mode()&os.ModeSymlink == 0 {
+			cur = next // a reparse point that is not a link
+			continue
+		}
+		if hops++; err != nil || !follow || hops > 40 {
+			return "", false
+		}
+		abs, ok := linkTarget(next, target)
+		if !ok {
+			return "", false
+		}
+		if !bounded {
+			root = volumeRoot(abs)
+		} else if !within(root, abs) {
+			return "", false
+		}
+		rest, cur = append(parts(root, abs), rest...), root
+	}
+	return cur, true
+}
+
+// localPath resolves a path named by the user's own config, following its
+// links (when follow is set) but never to a remote path.
+func localPath(p string, follow bool) (string, bool) {
+	if IsRemotePath(p) || !filepath.IsAbs(p) {
+		return "", false
+	}
+	return resolve(volumeRoot(p), filepath.Clean(p), false, follow)
+}
+
+// readUserFile reads a system or global config file, following its local links.
+func readUserFile(path string) ([]byte, error) {
+	resolved, ok := localPath(path, true)
+	if !ok {
+		return nil, fmt.Errorf("%s: a remote or unresolvable link", path)
+	}
+	data, _, err := readFile(resolved, maxFileSize)
+	return data, err
+}
+
+// IsRemotePath reports a UNC or device path (\\host\, \\?\, \\.\ and their
 // forward-slash forms), which is refused unopened: opening one sends the
 // user's credentials over SMB.
-func isRemotePath(p string) bool {
+func IsRemotePath(p string) bool {
 	p = strings.ReplaceAll(p, `/`, `\`)
 	return strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, `\??\`)
 }
@@ -41,8 +183,8 @@ type layout struct {
 }
 
 // readPointer reads a one-line pointer file such as .git or commondir.
-func readPointer(path string) (string, error) {
-	data, _, err := readFile(path)
+func readPointer(base, path string) (string, error) {
+	data, _, err := readUnder(base, path, maxFileSize)
 	if err != nil {
 		return "", err
 	}
@@ -51,7 +193,7 @@ func readPointer(path string) (string, error) {
 
 // resolvePointer makes a pointer absolute against base, refusing a remote one.
 func resolvePointer(base, value string) (string, *Blocker) {
-	if isRemotePath(value) {
+	if IsRemotePath(value) {
 		return "", &Blocker{Code: BlockRemotePath, Paths: []string{value}}
 	}
 	if !filepath.IsAbs(value) {
@@ -77,7 +219,7 @@ func readLayout(root string) (layout, *Blocker) {
 	case info.IsDir():
 		l.gitDir = dotGit
 	case info.Mode().IsRegular():
-		line, err := readPointer(dotGit)
+		line, err := readPointer(root, dotGit)
 		value, ok := strings.CutPrefix(line, "gitdir: ")
 		if err != nil || !ok || value == "" {
 			return l, &Blocker{Code: BlockNotRepository, Paths: []string{dotGit}}
@@ -93,7 +235,7 @@ func readLayout(root string) (layout, *Blocker) {
 		return l, &Blocker{Code: BlockNotRepository, Paths: []string{l.gitDir}}
 	}
 	l.commonDir = l.gitDir
-	if value, err := readPointer(filepath.Join(l.gitDir, "commondir")); err == nil {
+	if value, err := readPointer(l.gitDir, filepath.Join(l.gitDir, "commondir")); err == nil {
 		var b *Blocker
 		if l.commonDir, b = resolvePointer(l.gitDir, value); b != nil {
 			return l, b
@@ -112,9 +254,13 @@ func (l *layout) readAlternates(objects string, depth int) *Blocker {
 	if depth > 5 {
 		return nil
 	}
-	data, _, err := readFile(filepath.Join(objects, "info", "alternates"))
-	if err != nil {
+	file := filepath.Join(objects, "info", "alternates")
+	data, _, err := readUnder(objects, file, maxFileSize)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
+	}
+	if err != nil {
+		return &Blocker{Code: BlockNotRepository, Paths: []string{file}}
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimRight(line, "\r")
@@ -125,6 +271,9 @@ func (l *layout) readAlternates(objects string, depth int) *Blocker {
 		alt, b := resolvePointer(objects, line)
 		if b != nil {
 			return b
+		}
+		if info, err := os.Lstat(alt); err == nil && isLink(info) {
+			return &Blocker{Code: BlockNotRepository, Paths: []string{alt}}
 		}
 		l.alternates = append(l.alternates, alt)
 		if b := l.readAlternates(alt, depth+1); b != nil {
@@ -140,16 +289,26 @@ func isGitDir(dir string) bool {
 		return false
 	}
 	for _, sub := range []string{"objects", "refs"} {
-		if info, err := os.Stat(filepath.Join(dir, sub)); err != nil || !info.IsDir() {
+		if info, err := os.Lstat(filepath.Join(dir, sub)); err != nil || !info.IsDir() || isLink(info) {
 			return false
 		}
 	}
-	return true
+	return !linkedDir(dir, "info")
+}
+
+// linkedDir reports a git directory's own directory that is a link.
+func linkedDir(dir string, subs ...string) bool {
+	for _, sub := range subs {
+		if info, err := os.Lstat(filepath.Join(dir, sub)); err == nil && isLink(info) {
+			return true
+		}
+	}
+	return false
 }
 
 // isLinkedGitDir is a worktree's git directory: HEAD and a commondir file.
 func isLinkedGitDir(dir string) bool {
 	_, head := os.Lstat(filepath.Join(dir, "HEAD"))
 	_, common := os.Lstat(filepath.Join(dir, "commondir"))
-	return head == nil && common == nil
+	return head == nil && common == nil && !linkedDir(dir, "refs", "info")
 }

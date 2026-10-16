@@ -59,11 +59,13 @@ func writeMirror(mirror string, src mirrorSource) error {
 		{"core.attributesFile", "attributes", "ada-attributes"},
 	} {
 		path := src.files.userFile(src.merged, f.key, f.fallback)
-		if path == "" || isRemotePath(path) {
+		if path == "" || IsRemotePath(path) {
 			continue
 		}
+		// Only a file the user's own config names is followed through its links.
+		_, fromRepo := src.repo.get(f.key)
 		dst := filepath.Join(mirror, f.name)
-		copied, err := copyUserFile(path, dst)
+		copied, err := copyUserFile(path, dst, !fromRepo)
 		if err != nil {
 			return err
 		}
@@ -77,14 +79,14 @@ func writeMirror(mirror string, src mirrorSource) error {
 	if err := os.WriteFile(filepath.Join(mirror, "config"), []byte(cfg.String()), 0o600); err != nil {
 		return err
 	}
-	if copied, err := copyUserFile(filepath.Join(l.gitDir, "HEAD"), filepath.Join(mirror, "HEAD")); err != nil || !copied {
+	if copied, err := copyRepoFile(l.gitDir, filepath.Join(l.gitDir, "HEAD"), filepath.Join(mirror, "HEAD")); err != nil || !copied {
 		if err == nil {
 			err = errors.New("HEAD vanished")
 		}
 		return err
 	}
 	for _, name := range []string{"packed-refs", "shallow", "info/exclude", "info/attributes"} {
-		if _, err := copyUserFile(filepath.Join(l.commonDir, filepath.FromSlash(name)), filepath.Join(mirror, filepath.FromSlash(name))); err != nil {
+		if _, err := copyRepoFile(l.commonDir, filepath.Join(l.commonDir, filepath.FromSlash(name)), filepath.Join(mirror, filepath.FromSlash(name))); err != nil {
 			return err
 		}
 	}
@@ -96,6 +98,9 @@ func writeMirror(mirror string, src mirrorSource) error {
 		if err := copyTree(filepath.Join(l.gitDir, "refs"), filepath.Join(mirror, "refs")); err != nil {
 			return err
 		}
+	}
+	if info, err := os.Lstat(filepath.Join(l.commonDir, "objects")); err != nil || !info.IsDir() || isLink(info) {
+		return errors.New("objects is not a directory")
 	}
 	objects := filepath.ToSlash(filepath.Join(l.commonDir, "objects"))
 	if err := os.WriteFile(filepath.Join(mirror, "objects", "info", "alternates"), []byte(objects+"\n"), 0o600); err != nil {
@@ -114,16 +119,32 @@ func writeMirror(mirror string, src mirrorSource) error {
 	return nil
 }
 
-// copyUserFile copies a regular file; a missing one is not copied.
-func copyUserFile(src, dst string) (bool, error) {
-	if info, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
+// copyUserFile copies a regular file the user's config names, following its
+// local links when follow is set; a missing, linked or remote one is not copied.
+func copyUserFile(src, dst string, follow bool) (bool, error) {
+	resolved, ok := localPath(src, follow)
+	if !ok {
+		return false, nil
+	}
+	if info, err := os.Lstat(resolved); errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	} else if !info.Mode().IsRegular() {
 		return false, nil
 	}
-	data, _, err := readFile(src)
+	data, _, err := readFile(resolved, maxFileSize)
+	return writeCopy(dst, data, err)
+}
+
+// copyRepoFile copies a file of the git directory base, read through no link;
+// a missing one is not copied.
+func copyRepoFile(base, src, dst string) (bool, error) {
+	data, _, err := readUnder(base, src, maxFileSize)
+	return writeCopy(dst, data, err)
+}
+
+func writeCopy(dst string, data []byte, err error) (bool, error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
@@ -138,6 +159,7 @@ func copyUserFile(src, dst string) (bool, error) {
 
 // copyTree copies the regular files under src, following no links.
 func copyTree(src, dst string) error {
+	base := filepath.Dir(src)
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -154,7 +176,7 @@ func copyTree(src, dst string) error {
 		case d.IsDir():
 			return os.MkdirAll(target, 0o700)
 		case d.Type().IsRegular():
-			_, err := copyUserFile(path, target)
+			_, err := copyRepoFile(base, path, target)
 			return err
 		}
 		return nil

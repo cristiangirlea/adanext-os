@@ -66,6 +66,10 @@ func TestEachBlockerIsReported(t *testing.T) {
 			git(t, dir, "update-index", "--skip-worktree", "README.md")
 			return dir
 		}, BlockSparse, "README.md"},
+		{"an assume-unchanged entry", func(t *testing.T, dir string) string {
+			git(t, dir, "update-index", "--assume-unchanged", "README.md")
+			return dir
+		}, BlockAssumeUnchanged, "README.md"},
 		{"a merge", func(t *testing.T, dir string) string { return gitFile("MERGE_HEAD", head(t, dir)+"\n")(t, dir) }, BlockMerge, "MERGE_HEAD"},
 		{"a rebase (merge backend)", gitDir("rebase-merge"), BlockRebase, "rebase-merge"},
 		{"a rebase (apply backend)", gitDir("rebase-apply"), BlockRebase, "rebase-apply"},
@@ -191,6 +195,134 @@ func TestATrackedSymlinkLeavingTheWorkTreeIsABlocker(t *testing.T) {
 	}
 }
 
+func TestALinkThroughAnIgnoredLinkThatLeavesIsABlocker(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{".gitignore": "hidden\n"})
+	outside := tempDir(t)
+	write(t, filepath.Join(outside, "secret.txt"), "outside\n")
+	makeLink(t, outside, filepath.Join(dir, "hidden"))
+	makeLink(t, filepath.Join(dir, "hidden"), filepath.Join(dir, "visible"))
+	r := inspect(t, newInspector(t), dir)
+	if b, ok := blocker(r, BlockEscapingLink); !ok || !hasPath(b.Paths, "visible") {
+		t.Fatalf("blockers = %+v", r.Blockers)
+	}
+}
+
+func TestALinkOutsideThatLeadsBackInIsABlocker(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"inside/file.txt": "x\n"})
+	outside := tempDir(t)
+	makeLink(t, filepath.Join(dir, "inside"), filepath.Join(outside, "back"))
+	makeLink(t, filepath.Join(outside, "back"), filepath.Join(dir, "away"))
+	r := inspect(t, newInspector(t), dir)
+	if b, ok := blocker(r, BlockEscapingLink); !ok || !hasPath(b.Paths, "away") {
+		t.Fatalf("blockers = %+v", r.Blockers)
+	}
+}
+
+func TestNothingIsReadThroughALinkInTheWorkTree(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"sub/.gitattributes": "*.txt text\n", "sub/a.txt": "a\n"})
+	outside := tempDir(t)
+	write(t, filepath.Join(outside, ".gitattributes"), "*.bin filter=lfs\n")
+	write(t, filepath.Join(outside, "a.txt"), "outside\n")
+	if err := os.RemoveAll(filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	makeLink(t, outside, filepath.Join(dir, "sub"))
+	in := newInspector(t)
+	r := inspect(t, in, dir)
+	if _, ok := blocker(r, BlockLFS); ok {
+		t.Fatalf("an attributes file was read through the link: %+v", r.Blockers)
+	}
+	if _, ok := blocker(r, BlockEscapingLink); !ok {
+		t.Fatalf("blockers = %+v", r.Blockers)
+	}
+	write(t, filepath.Join(outside, "a.txt"), "changed outside\n")
+	if again := inspect(t, in, dir); again.Fingerprint != r.Fingerprint {
+		t.Fatal("the fingerprint hashed a file through the link")
+	}
+}
+
+// refused is an inspection that ends in a not_git_repository blocker or an
+// error naming a link.
+func refused(t *testing.T, in *Inspector, path string) bool {
+	t.Helper()
+	r, err := in.Inspect(context.Background(), path)
+	_, blocked := blocker(r, BlockNotRepository)
+	return blocked || err != nil && strings.Contains(err.Error(), "link")
+}
+
+// moveAndLink moves dir away and leaves a link to it in its place.
+func moveAndLink(t *testing.T, dir string) {
+	t.Helper()
+	moved := filepath.Join(tempDir(t), filepath.Base(dir))
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatal(err)
+	}
+	makeLink(t, moved, dir)
+}
+
+func TestLinksInTheGitDirectoryAreRefused(t *testing.T) {
+	t.Parallel()
+	for _, part := range []string{"refs", "objects", "refs/heads", "objects/info"} {
+		t.Run(part, func(t *testing.T) {
+			t.Parallel()
+			dir := newRepo(t, nil)
+			moveAndLink(t, filepath.Join(dir, ".git", filepath.FromSlash(part)))
+			if !refused(t, newInspector(t), dir) {
+				t.Fatalf("a linked .git/%s was followed", part)
+			}
+		})
+	}
+	t.Run("an alternate", func(t *testing.T) {
+		t.Parallel()
+		dir, other := newRepo(t, nil), newRepo(t, nil)
+		link := filepath.Join(tempDir(t), "objects")
+		makeLink(t, filepath.Join(other, ".git", "objects"), link)
+		write(t, filepath.Join(dir, ".git", "objects", "info", "alternates"), filepath.ToSlash(link)+"\n")
+		if !refused(t, newInspector(t), dir) {
+			t.Fatal("a linked alternate was followed")
+		}
+	})
+}
+
+func TestAnOversizedConfigIsAnError(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	config := filepath.Join(dir, ".git", "config")
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, config, string(data)+"#"+strings.Repeat("a", 16<<20)+"\n")
+	if _, err := newInspector(t).Inspect(context.Background(), dir); err == nil {
+		t.Fatal("a config over 16 MiB was read")
+	}
+}
+
+func TestALinkedWorktreeInspects(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	wt := filepath.Join(tempDir(t), "wt")
+	git(t, dir, "worktree", "add", "-q", "-b", "feature", wt)
+	write(t, filepath.Join(wt, "new.txt"), "new\n")
+	r := inspect(t, newInspector(t), wt)
+	if len(r.Blockers) != 0 {
+		t.Fatalf("blockers = %+v", r.Blockers)
+	}
+	gitDir, commonDir := filepath.Join(dir, ".git", "worktrees", "wt"), filepath.Join(dir, ".git")
+	if !strings.EqualFold(r.Identity.GitDir, gitDir) || !strings.EqualFold(r.Identity.CommonDir, commonDir) {
+		t.Fatalf("identity = %+v", r.Identity)
+	}
+	if r.Identity.Branch != "feature" || r.Identity.Head != git(t, dir, "rev-parse", "main") || len(r.History) != 1 {
+		t.Fatalf("identity = %+v, history = %+v", r.Identity, r.History)
+	}
+	if !hasPath(r.Status.Untracked, "new.txt") || len(r.Status.Staged)+len(r.Status.Unstaged) != 0 {
+		t.Fatalf("status = %+v", r.Status)
+	}
+}
+
 // makeLink makes a directory link: a symlink, or on Windows a junction,
 // which needs no privilege.
 func makeLink(t *testing.T, target, link string) {
@@ -216,27 +348,38 @@ func TestRemotePathsAreRefusedUnopened(t *testing.T) {
 	t.Cleanup(func() { openFile = openShared })
 	remotes := []string{`\\host\share\repo`, `//host/share/repo`, `\\?\C:\repo`, `\\.\pipe\repo`}
 	type layoutCase struct {
-		name  string
-		setup func(t *testing.T, remote string) string
+		name    string
+		setup   func(t *testing.T, remote string) string
+		blocked bool // refused with a unc_path blocker
+	}
+	repoConfig := func(key string) func(t *testing.T, remote string) string {
+		return func(t *testing.T, remote string) string {
+			dir := newRepo(t, nil)
+			git(t, dir, "config", key, remote)
+			return dir
+		}
 	}
 	cases := []layoutCase{
 		{"gitdir", func(t *testing.T, remote string) string {
 			dir := tempDir(t)
 			write(t, filepath.Join(dir, ".git"), "gitdir: "+remote+"\n")
 			return dir
-		}},
+		}, true},
 		{"commondir", func(t *testing.T, remote string) string {
 			dir, linked := tempDir(t), tempDir(t)
 			write(t, filepath.Join(linked, "HEAD"), "ref: refs/heads/main\n")
 			write(t, filepath.Join(linked, "commondir"), remote+"\n")
 			write(t, filepath.Join(dir, ".git"), "gitdir: "+linked+"\n")
 			return dir
-		}},
+		}, true},
 		{"alternates", func(t *testing.T, remote string) string {
 			dir := newRepo(t, nil)
 			write(t, filepath.Join(dir, ".git", "objects", "info", "alternates"), remote+"\n")
 			return dir
-		}},
+		}, true},
+		// The repository config's own excludes and attributes files: skipped, never opened.
+		{"core.excludesFile", repoConfig("core.excludesFile"), false},
+		{"core.attributesFile", repoConfig("core.attributesFile"), false},
 	}
 	in := newInspector(t)
 	for _, c := range cases {
@@ -246,9 +389,12 @@ func TestRemotePathsAreRefusedUnopened(t *testing.T) {
 				opened = nil
 				r := inspect(t, in, path)
 				for _, p := range opened {
-					if isRemotePath(p) {
+					if IsRemotePath(p) {
 						t.Fatalf("opened %s", p)
 					}
+				}
+				if !c.blocked {
+					return
 				}
 				if b, ok := blocker(r, BlockRemotePath); !ok || !hasPath(b.Paths, remote) {
 					t.Fatalf("blockers = %+v", r.Blockers)

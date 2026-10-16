@@ -1114,6 +1114,10 @@ that the intermittent failures recorded above have been fixed.
   pack-objects copies the objects into the clone's own pack, so the clone borrows no objects and
   keeps none of the original's settings. Git older than 2.45.1 is refused at start-up, so
   `GIT_NO_LAZY_FETCH` and the fixes for CVE-2024-32004 and CVE-2024-32465 are always present.
+  Amended in M3.1: the floor is the first release of each maintained line carrying the May 2024
+  clone fixes (2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4, 2.44.1, 2.45.1), since Debian and Ubuntu
+  ship patched older lines, and `core.longpaths` joined the mirror's data-only keys for Windows
+  paths over 260 characters.
   Two amendments to `docs/plan.md` section 3, Import: v1 blocks every submodule (the plan said
   "unresolved submodules") and every Git LFS path (the plan said "missing LFS objects") until a
   later milestone supports them (not yet in the backlog), because supporting them means running

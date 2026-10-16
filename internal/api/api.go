@@ -1188,7 +1188,8 @@ func (h *handler) inspect(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Path string `json:"path"`
 	}
-	if err := decode(body, &input); err != nil || !filepath.IsAbs(input.Path) || strings.ContainsRune(input.Path, 0) {
+	// A UNC or device path is refused before anything touches it: opening one sends credentials over SMB.
+	if err := decode(body, &input); err != nil || source.IsRemotePath(input.Path) || !filepath.IsAbs(input.Path) || strings.ContainsRune(input.Path, 0) {
 		writeError(w, 400, "bad_request")
 		return
 	}

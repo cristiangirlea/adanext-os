@@ -90,6 +90,18 @@ func TestResolveAcceptsAFixedGitByAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestResolveRefusesAGitThatIsNotAnExe(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("a .cmd on PATH runs through cmd.exe only on Windows")
+	}
+	dir := tempDir(t)
+	write(t, filepath.Join(dir, "git.cmd"), "@echo git version 2.46.0\r\n")
+	t.Setenv("PATH", dir)
+	if _, err := Resolve(context.Background(), tempDir(t)); err == nil || !strings.Contains(err.Error(), "not an .exe") {
+		t.Fatalf("resolve = %v", err)
+	}
+}
+
 func TestResolveReportsAMissingGit(t *testing.T) {
 	t.Setenv("PATH", tempDir(t))
 	if _, err := Resolve(context.Background(), tempDir(t)); err == nil {
