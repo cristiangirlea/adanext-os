@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1043,4 +1044,81 @@ func stopCoordinator(t *testing.T, cfg ipc.Config) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("detached coordinator did not exit")
+}
+
+func TestStartUpRemovesAnOrphanedBlobAndKeepsReferencedAndUnfinishedOnes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	s, err := store.Open(ctx, filepath.Join(dir, "adanext.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, blob := seedReferencedArtifact(t, ctx, s, dir)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := artifact.Open(filepath.Join(dir, "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The previous coordinator crashed after publishing this blob and before
+	// the commit that would have referenced it, and while writing another.
+	orphan := []byte("published, never committed")
+	orphanRef, err := artifacts.Write(ctx, bytes.NewReader(orphan), int64(len(orphan)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unfinished := filepath.Join(dir, "artifacts", "tmp", "artifact-unfinished")
+	if err := os.WriteFile(unfinished, []byte("half a blob"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	name := testEndpointName(t)
+	var output bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- run(ctx, []string{"-state-dir", dir, "-name", name, "-engine", os.Args[0], "-engine-sha256", hex.EncodeToString(digest[:])}, &output, &output)
+	}()
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return ipc.Dial(ctx, ipc.Config{StateDir: dir, Name: name})
+	}}}
+	defer client.CloseIdleConnections()
+	// The coordinator serves only after its start-up sweep, so an answer
+	// means the sweep has run.
+	deadline := time.After(5 * time.Second)
+	for {
+		resp, err := client.Get("http://ipc/v1/attempts/attempt-p/artifacts/" + ref.Hash)
+		if err == nil {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil || resp.StatusCode != 200 || !bytes.Equal(body, blob) {
+				t.Fatalf("the referenced blob: %d %.80s %v", resp.StatusCode, body, readErr)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("did not serve: %v: %s", err, output.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("run = %d: %s", code, output.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "artifacts", orphanRef.Hash[:2], orphanRef.Hash)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the orphaned blob remains: %v", err)
+	}
+	if got, err := os.ReadFile(unfinished); err != nil || string(got) != "half a blob" {
+		t.Fatalf("the unfinished write: %q, %v", got, err)
+	}
 }

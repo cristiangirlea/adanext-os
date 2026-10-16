@@ -22,7 +22,7 @@ func refuseSymlink(path string) error {
 		return err
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("artifact directory %s is not a directory", path)
+		return fmt.Errorf("%s is not a directory", path)
 	}
 	return nil
 }
@@ -48,10 +48,10 @@ func makePrivateDirectoryForUID(path string, uid uint32) error {
 		return &os.PathError{Op: "fstat", Path: path, Err: err}
 	}
 	if stat.Mode&syscall.S_IFMT != syscall.S_IFDIR {
-		return fmt.Errorf("artifact directory %s is not a directory", path)
+		return fmt.Errorf("%s is not a directory", path)
 	}
 	if stat.Uid != uid {
-		return fmt.Errorf("artifact directory %s is not owned by the current user", path)
+		return fmt.Errorf("directory %s is not owned by the current user", path)
 	}
 	if beforeDirectoryChmod != nil {
 		beforeDirectoryChmod(path)
@@ -66,7 +66,7 @@ func makePrivateDirectoryForUID(path string, uid uint32) error {
 		return &os.PathError{Op: "lstat", Path: path, Err: err}
 	}
 	if now.Dev != stat.Dev || now.Ino != stat.Ino {
-		return fmt.Errorf("artifact directory %s was replaced while being made private", path)
+		return fmt.Errorf("directory %s was replaced while being made private", path)
 	}
 	return nil
 }

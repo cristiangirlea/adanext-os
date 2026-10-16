@@ -42,6 +42,16 @@ func TestStoreAndBackupFilesArePrivateWithPermissiveUmask(t *testing.T) {
 			t.Errorf("%s mode = %04o, want 0600", file, got)
 		}
 	}
+	staging := filepath.Join(filepath.Dir(dest), backupStagingName)
+	for file, want := range map[string]os.FileMode{staging: 0o700, filepath.Join(staging, backupLockName): 0o600} {
+		info, err := os.Lstat(file)
+		if err != nil {
+			t.Fatalf("stat %s: %v", file, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %04o, want %04o", file, got, want)
+		}
+	}
 }
 
 func TestOpenPreservesExistingStoreFileMode(t *testing.T) {
