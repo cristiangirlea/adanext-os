@@ -150,11 +150,11 @@ Four slices, one at a time in this order: each touches the schema or the API, wh
 `docs/plan.md` section 8 keeps sequential (decisions log, 2026-10-16). The desktop import screen
 is M4.
 
-- [ ] **M3.1 Safe git and inspection.** A new package, `internal/source`.
+- [x] **M3.1 Safe git and inspection** (#80: #81, 2026-10-17). A new package, `internal/source`.
   The git runner: git resolved once from PATH at start-up as an absolute path (Go's `LookPath`
-  already refuses the current directory), and git older than 2.45.1 refused at start-up
-  (`git version`); an environment built from an allow-list (PATH, SystemRoot, TEMP and TMP,
-  LANG) plus `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` set to `os.DevNull`, HOME on an Ada
+  already refuses the current directory), and git without the May 2024 clone fixes refused at
+  start-up (`git version`); an environment built from an allow-list (PATH, SystemRoot, TEMP and
+  TMP, LANG) plus `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` set to `os.DevNull`, HOME on an Ada
   scratch directory, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, `GIT_NO_LAZY_FETCH=1`,
   `GIT_NO_REPLACE_OBJECTS=1` and `GIT_ATTR_NOSYSTEM=1`; on every call `--no-pager
   -c core.hooksPath=<empty Ada dir> -c core.fsmonitor=false -c core.untrackedCache=false
@@ -193,17 +193,18 @@ is M4.
   partial clone (`extensions.partialClone`: objects are missing); reftable or an unknown
   repository extension; a split index; sparse checkout (in config or as skip-worktree entries);
   a merge, rebase, cherry-pick, revert or bisect in progress, or unmerged entries (they cannot be
-  shown as a staged and an unstaged patch); submodules (any gitlink); Git LFS (a `filter=lfs`
+  shown as a staged and an unstaged patch); assume-unchanged entries (git skips those files, so
+  their edits would not show); submodules (any gitlink); Git LFS (a `filter=lfs`
   attribute in any `.gitattributes` in the tree or in `info/attributes`); and symlinks or
-  reparse points (junctions) that escape the work tree.
+  redirecting reparse points (symlinks or junctions) that escape the work tree.
   `POST /v1/projects/inspect` returns an inspection and stores nothing.
   Acceptance, on repositories built in `t.TempDir`: a repository whose config defines a clean
   filter, fsmonitor and textconv, with a hook that writes a marker file, is inspected and no
   marker is written; a populated submodule whose own config defines fsmonitor and a clean filter
   writes no marker; the mirror config holds only allow-listed keys (a filter or fsmonitor set in
-  the repository, global or system config is not copied); a git older than 2.45.1 is refused at
-  start-up; a UNC or device path in `gitdir:`, `commondir` or alternates is refused; each
-  blocker, including each kind of operation in progress and an unmerged entry; a shallow
+  the repository, global or system config is not copied); git without the May 2024 clone fixes is
+  refused at start-up; a UNC or device path in `gitdir:`, `commondir` or alternates is refused;
+  each blocker, including each kind of operation in progress and an unmerged entry; a shallow
   repository inspects with its history; a path ignored only by the global excludes file is
   ignored; staged, unstaged and untracked are told apart; the original's `.git` and work tree
   are byte-identical before and after (every file hashed); the index copy keeps the original's
@@ -223,8 +224,9 @@ is M4.
   selected untracked files, into artifacts. The fingerprint is taken before and after; a
   difference refuses with `source_changed` and stores nothing. Untracked selection is explicit:
   each requested path must be an exact member of the untracked list of the inspection the same
-  snapshot takes, is opened relative to the work tree with no symlink or reparse point anywhere
-  on its path, and must be a regular file; anything else is refused with `invalid_path`.
+  snapshot takes, is opened relative to the work tree with no symlink or redirecting reparse
+  point (symlink or junction) anywhere on its path, and must be a regular file; anything else is
+  refused with `invalid_path`.
   Ignored files (judged with the mirror's excludes, M3.1), and paths that look like credentials
   (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `.npmrc`, `.netrc`, `.pypirc`, `*.p12`, `*.pfx`,
   `*.kdbx`, anything under `.aws/` or `.ssh/`, credentials files), are refused unless listed in
