@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated 2026-10-16. Statuses: not started, in progress, implemented (code merged), verified
+Updated 2026-10-17. Statuses: not started, in progress, implemented (code merged), verified
 (evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
 are in `docs/backlog.md`.
 
@@ -8,8 +8,8 @@ are in `docs/backlog.md`.
 |---|---|---|---|
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
-| M2 Durable coordinator | in progress | M2.1 store: #18 and #24 merged, verified; M2.2 IPC and `adad`: #28, #31 merged; M2.3 artifacts and executor: #35, #40 merged; hardening #38, #43, #45, #47, #49 | M2.4 the window can close; the follow-up issues #39, #42, #44, #46, #48 |
-| M3 Project workspaces | not started | | |
+| M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
+| M3 Project workspaces | in progress | Slices in `docs/backlog.md` (#78); M3.1 #81 | M3.2 import and snapshots |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -343,6 +343,23 @@ Windows executor comparison, both with `GOFLAGS=-p=4`, `go test -count=3 ./inter
 `.hrn/executor-baseline`, then that detached temporary worktree was removed. This branch at
 `16c77bd` plus the uncommitted fixes passed (175.797s). This observation does not establish
 that the intermittent failures recorded above have been fixed.
+
+### M3.1 safe git and inspection (2026-10-16 to 2026-10-17, #80, PR #81)
+
+`internal/source` and `POST /v1/projects/inspect`, as the M3.1 entry of `docs/backlog.md` and the
+decisions-log entry of 2026-10-16 ("M3 in four slices") describe them. Implementation and fix
+rounds ran as Claude Opus runs through hrn (`20261016-172957-7df2c1`, `-204148-fd3076`,
+`-221139-e72776`, `-233544-ff2c1e`); three independent read-only reviews, each also the security
+read (`20261016-190627-df5d74`, `-214007-c65c38`, `-231407-f5e92b`), are on the pull request.
+
+Evidence at `3ca8e3a`: `.hrn/check.sh` passed, that is `bash scripts/check.sh` on Windows (all
+steps; `-race` left to Linux for want of cgo) and `go vet`, `go test` and `go test -race` for
+every package in `golang:1.26` in Docker. Earlier rounds met only the executor timing flakes of
+#72 on Windows, each passing on a re-run. The marker tests prove that no filter, fsmonitor,
+textconv, external diff, ssh command or hook the repository, its submodules or the global and
+system config define runs; every original file is hashed before and after.
+
+Not verified: a repository in OneDrive with online-only metadata (#83); macOS.
 
 ## Decisions log
 
@@ -1114,6 +1131,11 @@ that the intermittent failures recorded above have been fixed.
   pack-objects copies the objects into the clone's own pack, so the clone borrows no objects and
   keeps none of the original's settings. Git older than 2.45.1 is refused at start-up, so
   `GIT_NO_LAZY_FETCH` and the fixes for CVE-2024-32004 and CVE-2024-32465 are always present.
+  Amended in M3.1: the floor is the first release of each maintained line carrying the May 2024
+  clone fixes (2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4, 2.44.1, 2.45.1). It accepts upstream
+  maintenance releases only: a distribution backport that reports an older version number
+  (Ubuntu 24.04's patched 2.43.0) is refused. `core.longpaths` joined the mirror's data-only keys
+  for Windows paths over 260 characters.
   Two amendments to `docs/plan.md` section 3, Import: v1 blocks every submodule (the plan said
   "unresolved submodules") and every Git LFS path (the plan said "missing LFS objects") until a
   later milestone supports them (not yet in the backlog), because supporting them means running
@@ -1121,7 +1143,8 @@ that the intermittent failures recorded above have been fixed.
   "unsupported sparse-checkout cases"). Reason: a blocker the user can see is better than an
   import that quietly runs a transport or reads a partial work tree. M3.1 also blocks what a
   snapshot cannot represent: `core.bare` or `core.worktree` set, a partial clone, and a merge,
-  rebase, cherry-pick, revert or bisect in progress or unmerged entries. Of section 3's
+  rebase, cherry-pick, revert or bisect in progress or unmerged entries, and assume-unchanged
+  entries (git skips those files, so their edits would not show). Of section 3's
   "existing Ada tasks and verifiable Harness history", M3.2's import lists the existing Ada tasks
   for the source; Harness history is deferred to M6.
 

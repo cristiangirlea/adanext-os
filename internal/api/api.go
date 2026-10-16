@@ -12,11 +12,13 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
 
@@ -76,6 +78,12 @@ type ArtifactReferences interface {
 // through its cancel path, and the coordinator exits.
 type Stopper interface{ StopWork() }
 
+// Inspector reads a repository without running its code; *source.Inspector
+// satisfies it.
+type Inspector interface {
+	Inspect(ctx context.Context, path string) (source.Inspection, error)
+}
+
 type Execution struct {
 	EngineSHA256 string
 	Generation   int64
@@ -84,6 +92,9 @@ type Execution struct {
 	References   ArtifactReferences // nil until the store resolves references by attempt
 	Owner        string             // The coordinator's owner account, the only one that may stop it.
 	Stopper      Stopper            // nil when there is no coordinator lifecycle to stop (tests).
+	Inspector    Inspector          // nil when git is missing or too old
+	// GitUnavailable is why Inspector is nil, the message of git_unavailable.
+	GitUnavailable string
 }
 
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
@@ -99,6 +110,7 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
+	mux.HandleFunc("POST /v1/projects/inspect", h.inspect)
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
 	mux.HandleFunc("GET /v1/attempts/{id}/artifacts/{hash}", h.artifact)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1162,4 +1174,40 @@ func (h *handler) artifact(w http.ResponseWriter, r *http.Request) {
 		held = chunk
 		free ^= 1
 	}
+}
+
+// inspect stores nothing, so the idempotency rules of mutating requests do not apply.
+func (h *handler) inspect(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.actor(w, r); !ok {
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Path string `json:"path"`
+	}
+	// A UNC or device path is refused before anything touches it: opening one sends credentials over SMB.
+	if err := decode(body, &input); err != nil || source.IsRemotePath(input.Path) || !filepath.IsAbs(input.Path) || strings.ContainsRune(input.Path, 0) {
+		writeError(w, 400, "bad_request")
+		return
+	}
+	if h.exec.Inspector == nil {
+		reason := h.exec.GitUnavailable
+		if reason == "" {
+			reason = "git unavailable"
+		}
+		writeJSON(w, 503, struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+		}{"git_unavailable", reason})
+		return
+	}
+	result, err := h.exec.Inspector.Inspect(r.Context(), input.Path)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	writeJSON(w, 200, result)
 }
