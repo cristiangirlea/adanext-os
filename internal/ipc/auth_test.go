@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -156,5 +157,39 @@ func TestHTTPWorksAfterEndpointAuthentication(t *testing.T) {
 	b, err := io.ReadAll(res.Body)
 	if err != nil || string(b) != "authenticated" {
 		t.Fatalf("HTTP: %q %v", b, err)
+	}
+}
+
+// slowCloseListener's Accept returns some time after Close, like a real
+// listener whose blocked accept is still unwinding.
+type slowCloseListener struct {
+	net.Listener
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (l *slowCloseListener) Accept() (net.Conn, error) {
+	<-l.closed
+	time.Sleep(50 * time.Millisecond)
+	return nil, net.ErrClosed
+}
+
+func (l *slowCloseListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func TestCloseReturnsOnlyAfterTheAcceptLoopHasExited(t *testing.T) {
+	a := authenticateListener(&slowCloseListener{closed: make(chan struct{})}, make([]byte, 32))
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-a.loopEnd:
+	default:
+		t.Fatal("Close returned while the accept loop was still running")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("second Close = %v", err)
 	}
 }

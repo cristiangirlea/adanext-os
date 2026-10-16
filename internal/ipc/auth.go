@@ -118,6 +118,7 @@ type authenticatedListener struct {
 	key     []byte
 	ready   chan net.Conn
 	done    chan struct{}
+	loopEnd chan struct{}
 	once    sync.Once
 	mu      sync.Mutex
 	pending map[net.Conn]bool
@@ -125,18 +126,19 @@ type authenticatedListener struct {
 }
 
 func authenticateListener(l net.Listener, key []byte) *authenticatedListener {
-	a := &authenticatedListener{Listener: l, key: key, ready: make(chan net.Conn), done: make(chan struct{}), pending: make(map[net.Conn]bool)}
+	a := &authenticatedListener{Listener: l, key: key, ready: make(chan net.Conn), done: make(chan struct{}), loopEnd: make(chan struct{}), pending: make(map[net.Conn]bool)}
 	go a.acceptLoop()
 	return a
 }
 func (a *authenticatedListener) acceptLoop() {
+	defer close(a.loopEnd)
 	for {
 		c, err := a.Listener.Accept()
 		if err != nil {
 			a.mu.Lock()
 			a.err = err
 			a.mu.Unlock()
-			a.Close()
+			a.shutdown()
 			return
 		}
 		a.mu.Lock()
@@ -204,7 +206,17 @@ func (a *authenticatedListener) Accept() (net.Conn, error) {
 		return nil, net.ErrClosed
 	}
 }
+
+// Close returns only after the accept loop has exited, so no listener
+// goroutine outlives it.
 func (a *authenticatedListener) Close() error {
+	err := a.shutdown()
+	<-a.loopEnd
+	return err
+}
+
+// shutdown stops accepting without waiting; the accept loop calls it itself.
+func (a *authenticatedListener) shutdown() error {
 	var err error
 	a.once.Do(func() {
 		close(a.done)

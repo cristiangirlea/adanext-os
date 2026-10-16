@@ -125,6 +125,9 @@ func TestPipeOwnerSIDAllowsOnlyTheCurrentUser(t *testing.T) {
 
 func TestDialRefusesAPipeWhenTheExpectedSIDChanges(t *testing.T) {
 	cfg := Config{StateDir: t.TempDir(), Name: "sid-check"}
+	current := pipeCheckSID
+	pipeCheckSID = func() (string, error) { return "S-1-5-18", nil }
+	defer func() { pipeCheckSID = current }()
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +138,6 @@ func TestDialRefusesAPipeWhenTheExpectedSIDChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	current := pipeCheckSID
 	done := make(chan struct{})
 	go func() {
 		conn, err := listener.Accept()
@@ -145,8 +147,6 @@ func TestDialRefusesAPipeWhenTheExpectedSIDChanges(t *testing.T) {
 		}
 	}()
 	defer close(done)
-	pipeCheckSID = func() (string, error) { return "S-1-5-18", nil }
-	defer func() { pipeCheckSID = current }()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	conn, err := Dial(ctx, cfg)
@@ -160,6 +160,9 @@ func TestDialRefusesAPipeWhenTheExpectedSIDChanges(t *testing.T) {
 
 func TestDialRefusesAPipeWhenOnlyTheOwnerSIDChanges(t *testing.T) {
 	cfg := Config{StateDir: t.TempDir(), Name: "owner-check"}
+	readOwner := pipeReadOwnerSID
+	pipeReadOwnerSID = func(net.Conn) (string, error) { return "S-1-5-18", nil }
+	defer func() { pipeReadOwnerSID = readOwner }()
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -179,9 +182,6 @@ func TestDialRefusesAPipeWhenOnlyTheOwnerSIDChanges(t *testing.T) {
 		}
 	}()
 	defer close(done)
-	readOwner := pipeReadOwnerSID
-	pipeReadOwnerSID = func(net.Conn) (string, error) { return "S-1-5-18", nil }
-	defer func() { pipeReadOwnerSID = readOwner }()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	conn, err := Dial(ctx, cfg)
