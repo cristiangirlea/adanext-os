@@ -399,6 +399,17 @@ that the intermittent failures recorded above have been fixed.
   failed before the change when run outside a job (the launcher's output stayed open for 15 s).
   The broker path still holds the inherited handles until the broker returns (at most 8 s
   after launch).
+- **2026-10-16, adad re-execs on Unix too, with every inherited descriptor close-on-exec (#76).**
+  On ubuntu-latest the window-close e2e still timed out. In the Playwright 1.63.0 noble image,
+  Electron exited (code 0) 32 ms after its window closed, but Playwright's `close` came only after
+  5 s: Electron's fds 3 and 4 (the extra stdio channels Playwright spawns it with) and Chromium's
+  own descriptors without close-on-exec were open in adad and in its engine child. Node's
+  `stdio: "ignore"` replaces only fds 0-2, and Go's `os/exec` does not close inherited
+  descriptors either, so a plain re-exec still kept them (observed with the new test). `-detach`
+  on Unix now marks every descriptor above 2 close-on-exec, then re-execs into a new session
+  with null stdio, and the spawned process exits. `TestCoordinatorKeepsNothingTheLauncherInherited`
+  hands the launcher a pipe as fd 3 and requires its EOF while the coordinator serves; it failed
+  before the change both without a re-exec and with a plain one.
 - **2026-10-16, M2.4c test boundary (#75).** The fake engine and project/membership seed helper
   require `-tags=fakeengine` and live in test-only paths. Playwright 1.63.0 uses the real built
   adad and the hash of the fake engine, one worker, unique endpoint names and temporary state.

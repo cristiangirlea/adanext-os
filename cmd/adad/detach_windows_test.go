@@ -6,8 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,32 +122,6 @@ func testDetachedCoordinator(t *testing.T, launcher launcherJob) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	stopCoordinator(t, cfg)
-}
-
-func stopCoordinator(t *testing.T, cfg ipc.Config) {
-	t.Helper()
-	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return ipc.Dial(ctx, cfg) }}}
-	defer client.CloseIdleConnections()
-	req, _ := http.NewRequest("POST", "http://ipc/v1/coordinator/stop", nil)
-	req.Header.Set("Idempotency-Key", "stop-detached")
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 202 {
-		t.Fatal(resp.StatusCode)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		lock, err := ipc.Acquire(cfg)
-		if err == nil {
-			lock.Release()
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("detached coordinator did not exit")
 }
 
 func TestDesktopJobWithoutBreakawayUsesTheOwnerProcessBroker(t *testing.T) {
