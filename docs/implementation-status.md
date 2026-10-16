@@ -1093,25 +1093,37 @@ that the intermittent failures recorded above have been fixed.
 - **2026-10-16, M3 in four slices, and reading a repository without running it.** M3 is
   `docs/backlog.md`'s M3.1 safe git and inspection, M3.2 import and snapshots, M3.3 managed clone
   and task workspaces, and M3.4 drift and launch revalidation, taken one at a time in that order,
-  since each touches the schema or the API. Ada never runs git against the original repository's
-  own git directory. Its config can name commands (clean and smudge filters, fsmonitor, textconv,
-  an ssh command), and `git status` alone can run clean filters and fsmonitor, so "inspect
-  without executing repository code" cannot hold if git reads that config. Inspection instead
-  reads the layout in Go and builds a mirror git directory under Ada's state: a config Ada
-  writes, copies of HEAD, the refs and the index, and the original's objects reached read-only
-  through `objects/info/alternates`. Git runs with that mirror as its git directory and the
-  original as its work tree, with system and global config off and hooks pointed at an empty
-  directory, so filter and diff drivers named in `.gitattributes` are undefined and nothing runs.
-  The mirror is for reads only. The Ada-owned clone is made through upload-pack
-  (`git clone --bare --no-local --no-hardlinks`), which is safe on an untrusted repository because
-  git ignores `uploadpack.packObjectsHook` in repository config, and its config is replaced by
-  Ada's, so it borrows no objects and keeps none of the original's settings. Two amendments to
-  `docs/plan.md` section 3, Import: v1 blocks every submodule (the plan said "unresolved
-  submodules") and every Git LFS path (the plan said "missing LFS objects") until a later slice
-  supports them, because supporting them means running or reimplementing their transports; and
-  sparse checkout is blocked in every form (the plan said "unsupported sparse-checkout cases").
-  Reason: a blocker the user can see is better than an import that quietly runs a transport or
-  reads a partial work tree.
+  since each touches the schema or the API. No git process ever uses the original's git
+  directory as its repository. Its config can name commands (clean and smudge filters, fsmonitor,
+  textconv, an ssh command), and `git status` alone can run clean filters and fsmonitor, so
+  "inspect without executing repository code" cannot hold if git reads that config. Inspection
+  instead reads the layout and the index in Go and builds a mirror git directory under Ada's
+  state: a config Ada writes, copies of HEAD, the refs, `shallow` and the index, and the
+  original's objects reached read-only through `objects/info/alternates`. Git runs with that
+  mirror as its git directory and the original as its work tree, with system and global config
+  off, hooks pointed at an empty directory and submodules ignored, so filter and diff drivers
+  named in `.gitattributes` are undefined, nothing runs, and no child git starts inside a
+  submodule. The mirror's config is not empty: an allow-list of data-only keys (`core.filemode`,
+  `core.autocrlf`, `core.ignorecase` and the like) is copied from the repository, global and
+  system config, with the excludes and attributes files, because without them status and diffs
+  are wrong on Windows (every executable a mode change, every CRLF file a whole rewrite). The
+  Ada-owned clone is made from the mirror, never from the original
+  (`git clone --bare --no-local --no-hardlinks --template=`, with `GIT_NO_LAZY_FETCH=1` and
+  `transfer.bundleURI=false`, the file protocol allowed for that call alone), and later imports
+  rebuild the mirror and fetch from it. Upload-pack therefore reads only Ada's config, and
+  pack-objects copies the objects into the clone's own pack, so the clone borrows no objects and
+  keeps none of the original's settings. Git older than 2.45.1 is refused at start-up, so
+  `GIT_NO_LAZY_FETCH` and the fixes for CVE-2024-32004 and CVE-2024-32465 are always present.
+  Two amendments to `docs/plan.md` section 3, Import: v1 blocks every submodule (the plan said
+  "unresolved submodules") and every Git LFS path (the plan said "missing LFS objects") until a
+  later milestone supports them (not yet in the backlog), because supporting them means running
+  or reimplementing their transports; and sparse checkout is blocked in every form (the plan said
+  "unsupported sparse-checkout cases"). Reason: a blocker the user can see is better than an
+  import that quietly runs a transport or reads a partial work tree. M3.1 also blocks what a
+  snapshot cannot represent: `core.bare` or `core.worktree` set, a partial clone, and a merge,
+  rebase, cherry-pick, revert or bisect in progress or unmerged entries. Of section 3's
+  "existing Ada tasks and verifiable Harness history", M3.2's import lists the existing Ada tasks
+  for the source; Harness history is deferred to M6.
 
 ## Owner actions pending
 
