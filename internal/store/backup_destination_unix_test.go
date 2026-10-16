@@ -149,3 +149,20 @@ func TestBackupRefusesALinkResolvingBelowADirectoryOthersCanRenameIn(t *testing.
 		t.Fatalf("a refused backup created its staging directory: %v", err)
 	}
 }
+
+func TestBackupRefusesALinkResolvingInsideAStagingDirectory(t *testing.T) {
+	s := openTestStore(t)
+	seed(t, s)
+	staging := filepath.Join(t.TempDir(), backupStagingName)
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	linkDirectory(t, staging, link)
+	if err := s.Backup(ctx, filepath.Join(link, "backup.sqlite")); err == nil || !strings.Contains(err.Error(), "inside a backup staging directory") {
+		t.Fatalf("backup through a link to a staging directory: %v, want a refusal", err)
+	}
+	if entries, err := os.ReadDir(staging); err != nil || len(entries) != 0 {
+		t.Fatalf("the staging directory holds %v, %v", entries, err)
+	}
+}

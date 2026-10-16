@@ -18,32 +18,25 @@ import (
 // once and returns that path, every component of which it found to be a real
 // directory, not a link, that only the user or root can change; the backup
 // then works only from it, since a link on the given path could be repointed.
-// The path as given is checked too.
 func checkBackupDestination(dir string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return "", fmt.Errorf("check backup destination directory: %w", err)
 	}
-	for _, start := range []string{dir, resolved} {
-		for p := filepath.Clean(start); ; p = filepath.Dir(p) {
-			stat := os.Stat
-			if start == resolved {
-				stat = os.Lstat
-			}
-			info, err := stat(p)
-			if err != nil {
-				return "", fmt.Errorf("check backup destination directory: %w", err)
-			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				return "", fmt.Errorf("backup destination directory %s: %s became a link", dir, p)
-			}
-			st, ok := info.Sys().(*syscall.Stat_t)
-			if !ok || !trustedBackupDirectory(st.Uid, st.Gid, info.Mode(), os.Geteuid(), os.Getegid()) {
-				return "", fmt.Errorf("backup destination directory %s: %s can be changed by another user", dir, p)
-			}
-			if filepath.Dir(p) == p {
-				break
-			}
+	for p := filepath.Clean(resolved); ; p = filepath.Dir(p) {
+		info, err := os.Lstat(p)
+		if err != nil {
+			return "", fmt.Errorf("check backup destination directory: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("backup destination directory %s: %s became a link", dir, p)
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !trustedBackupDirectory(st.Uid, st.Gid, info.Mode(), os.Geteuid(), os.Getegid()) {
+			return "", fmt.Errorf("backup destination directory %s: %s can be changed by another user", dir, p)
+		}
+		if filepath.Dir(p) == p {
+			break
 		}
 	}
 	return resolved, nil

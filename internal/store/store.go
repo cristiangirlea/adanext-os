@@ -435,6 +435,10 @@ func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 		return err
 	}
 	destPath = filepath.Join(dir, filepath.Base(destPath))
+	// A link on the given path can still lead into a staging directory.
+	if insideBackupStaging(destPath) {
+		return errors.New("backup destination is inside a backup staging directory")
+	}
 	staging, checked, err := prepareBackupStaging(dir)
 	if err != nil {
 		return fmt.Errorf("prepare backup staging directory: %w", err)
