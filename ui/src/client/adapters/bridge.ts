@@ -30,8 +30,8 @@ export function createBridgeClient(): AdaClient {
     start: async (id, revision, policy) => unwrap(await bridge().start(id, revision, policy)),
     cancel: async (id, revision) => unwrap(await bridge().cancel(id, revision)),
     subscribeEvents: (attemptId, onMessage) => bridge().subscribeEvents(attemptId, onMessage),
-    stopCoordinator: async () => {
-      unwrap(await bridge().stopCoordinator());
-    },
+    stopCoordinator: async () => unwrap(await bridge().stopCoordinator()),
+    finishQuit: async () => { unwrap(await bridge().finishQuit()); },
+    onQuitRequested: (listener) => bridge().onQuitRequested(listener),
   };
 }

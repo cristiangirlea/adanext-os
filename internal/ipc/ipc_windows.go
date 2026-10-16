@@ -53,7 +53,7 @@ func listen(cfg Config) (net.Listener, error) {
 func pipeSDDL(sid string) string { return "O:" + sid + "D:P(A;;GA;;;" + sid + ")" }
 
 // Dial connects only when the pipe server process belongs to the current user.
-func Dial(ctx context.Context, cfg Config) (net.Conn, error) {
+func dial(ctx context.Context, cfg Config) (net.Conn, error) {
 	path, err := pipePath(cfg)
 	if err != nil {
 		return nil, err

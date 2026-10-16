@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { StreamMessage } from "../../ui/src/client/api";
-import { errorCode, readJSON } from "./adad";
+import { endpointConnection, EndpointAuthenticationError, errorCode, readJSON } from "./adad";
 
 // Electron's main process has no EventSource, so it reads adad's event stream over the pipe or
 // socket with its own parser (decisions log, 2026-10-14, #4): it keeps the last id:, reconnects
@@ -79,6 +79,7 @@ export interface StreamOptions {
   onMessage: (message: StreamMessage) => void;
   initialDelayMs?: number;
   maxDelayMs?: number;
+  onUnavailable?: () => Promise<void>;
   // Tests inject the timer to observe the delays; the default is setTimeout.
   schedule?: (fn: () => void, ms: number) => () => void;
 }
@@ -122,7 +123,7 @@ export function openEventStream(options: StreamOptions): EventStream {
       settled = true;
       fn();
     };
-    const req = http.request({ socketPath: options.socketPath, path, method: "GET", headers }, (res) => {
+    const req = http.request({ createConnection: endpointConnection(options.socketPath), path, method: "GET", headers }, (res) => {
       if (res.statusCode !== 200) {
         // The refusal's code is wanted; a body that cannot be read leaves the status's own.
         void readJSON(res, 64 * 1024).then((body) => body, () => undefined).then((body) => {
@@ -186,11 +187,15 @@ export function openEventStream(options: StreamOptions): EventStream {
       );
     });
     request = req;
-    req.on("error", () =>
+    req.on("error", (error) =>
       settle(() => {
         if (closed) return;
+        if (error instanceof EndpointAuthenticationError) {
+          options.onMessage({ type: "status", status: "unreachable", code: error.code });
+          return;
+        }
         options.onMessage({ type: "status", status: "unreachable", code: "coordinator_unreachable" });
-        reconnect();
+        void Promise.resolve().then(() => options.onUnavailable?.()).catch(() => {}).finally(reconnect);
       }),
     );
     req.end();

@@ -8,6 +8,7 @@ import type { BridgeApi, BridgeResult, StreamMessage } from "../../ui/src/client
 export interface Ipc {
   invoke(method: string, args: unknown[]): Promise<BridgeResult<unknown>>;
   onEvent(listener: (subId: unknown, message: unknown) => void): void;
+  onQuitRequested?(listener: () => void): () => void;
 }
 
 // documentId scopes the subscription ids to this document: a reload recreates the preload and
@@ -45,5 +46,7 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
       };
     },
     stopCoordinator: () => invoke("stopCoordinator", []),
+    finishQuit: () => invoke("finishQuit", []),
+    onQuitRequested: (listener) => ipc.onQuitRequested?.(listener) ?? (() => {}),
   };
 }

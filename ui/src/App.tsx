@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { AdaError, type AdaClient, type AttemptEvent, type ExecutionPolicy, type Task, type TaskState } from "./client/api";
+import { AdaError, type AdaClient, type AttemptEvent, type ExecutionPolicy, type Task, type TaskState, type StopResult } from "./client/api";
 
 // The one view of M2.4: the task list with each task's state, and the selected task's attempt
 // events streaming in. The layout of docs/plan.md section 3 comes with M4.
@@ -42,12 +42,14 @@ export function App({ client }: { client: AdaClient }) {
   const [events, setEvents] = useState<AttemptEvent[]>([]);
   const [stream, setStream] = useState<string>("");
   const [error, setError] = useState<Shown | null>(null);
+  const [stopResult, setStopResult] = useState<StopResult | null>(null);
+  const quitting = useRef(false);
   const [project, setProject] = useState("");
   const [objective, setObjective] = useState("");
   const [policy, setPolicy] = useState<ExecutionPolicy>({ backend: "claude", model: "", effort: "", mode: "readonly" });
 
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
-  const attemptId = selected ? attempts[selected.id] : undefined;
+  const attemptId = selected?.attempt?.id ?? (selected ? attempts[selected.id] : undefined);
 
   // A reply never moves a task backwards: a refresh sent before a request may answer after it.
   const replace = useCallback((task: Task) => {
@@ -64,7 +66,7 @@ export function App({ client }: { client: AdaClient }) {
       try {
         replace(await client.getTask(id));
       } catch (e) {
-        setError(shown(e));
+        if (!quitting.current) setError(shown(e));
       } finally {
         reading.current.delete(id);
       }
@@ -90,6 +92,20 @@ export function App({ client }: { client: AdaClient }) {
   useEffect(() => {
     void run(async () => setTasks(await client.listTasks()));
   }, [client, run]);
+
+  const quit = useCallback(() => {
+    if (quitting.current) return;
+    quitting.current = true;
+    void run(async () => {
+      try { setStopResult(await client.stopCoordinator()); }
+      catch (e) { quitting.current = false; throw e; }
+    });
+  }, [client, run]);
+  useEffect(() => client.onQuitRequested(quit), [client, quit]);
+  // The result has been rendered before main waits for exit and closes the shell.
+  useEffect(() => {
+    if (stopResult) void run(() => client.finishQuit());
+  }, [client, stopResult, run]);
 
   useEffect(() => {
     if (!attemptId || selectedId === null) return;
@@ -125,13 +141,13 @@ export function App({ client }: { client: AdaClient }) {
     .map((task) => task.id)
     .join(",");
   useEffect(() => {
-    if (activeIds === "") return;
+    if (activeIds === "" || stopResult) return;
     const ids = activeIds.split(",");
     const timer = setInterval(() => {
       for (const id of ids) void refresh(id);
     }, pollMs);
     return () => clearInterval(timer);
-  }, [activeIds, refresh]);
+  }, [activeIds, refresh, stopResult]);
 
   const create = (e: FormEvent) => {
     e.preventDefault();
@@ -223,6 +239,7 @@ export function App({ client }: { client: AdaClient }) {
                   </>
                 )}
               </p>
+              {selected.attempt?.queue_position !== undefined && <p>Queue position {selected.attempt.queue_position}</p>}
             </header>
             <div className="actions">
               <button type="button" disabled={selected.state !== "draft"} onClick={() => void run(async () => replace(await client.ready(selected.id, selected.revision)), selected.id)}>
@@ -258,7 +275,10 @@ export function App({ client }: { client: AdaClient }) {
               >
                 Start
               </button>
-              <button type="button" disabled={selected.state !== "running"} onClick={() => void run(async () => replace(await client.cancel(selected.id, selected.revision)), selected.id)}>
+              <button type="button" disabled={selected.state !== "running" && selected.attempt?.state !== "pending"} onClick={() => void run(async () => {
+                replace(await client.cancel(selected.id, selected.revision));
+                await refresh(selected.id);
+              }, selected.id)}>
                 Cancel
               </button>
             </div>
@@ -280,7 +300,7 @@ export function App({ client }: { client: AdaClient }) {
                 </ol>
               )
             ) : (
-              <p className="empty">Events stream once this task is started from here.</p>
+              <p className="empty">This task has no attempt yet.</p>
             )}
           </>
         ) : (
@@ -290,7 +310,8 @@ export function App({ client }: { client: AdaClient }) {
 
       <footer className="status">
         <span>{tasks.length} tasks</span>
-        <button type="button" className="quit" onClick={() => void run(() => client.stopCoordinator())}>
+        {stopResult && <p role="status">{stopResult.reason}: {stopResult.running} running cancellation requested, {stopResult.queued} queued canceled. Waiting for the coordinator to exit.</p>}
+        <button type="button" className="quit" disabled={stopResult !== null} onClick={quit}>
           Quit Ada and stop work
         </button>
       </footer>

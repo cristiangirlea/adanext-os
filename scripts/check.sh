@@ -74,4 +74,7 @@ step "ui typecheck, tests and build"
 step "desktop typecheck, tests and build"
 (cd desktop && npm run typecheck && npm test && npm run build)
 
+step "desktop end-to-end (real adad, fake engine, one worker)"
+bash scripts/test-e2e.sh
+
 printf '\nall checks passed\n'

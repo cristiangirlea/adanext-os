@@ -77,6 +77,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	stateDir := flags.String("state-dir", defaultStateDir(), "coordinator state directory")
 	name := flags.String("name", "adad", "coordinator endpoint name")
+	detach := flags.Bool("detach", false, "keep neither the desktop's Windows job nor any handle or descriptor it inherited; re-exec before serving")
 	enginePath := flags.String("engine", "", "pinned Harness engine path")
 	engineHash := flags.String("engine-sha256", "", "pinned Harness engine SHA-256")
 	concurrency := flags.Int("concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")
@@ -102,6 +103,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if ctx.Err() != nil {
 		fmt.Fprintln(stderr, "adad: stopped during start-up")
 		return 0
+	}
+	if *detach {
+		launched, err := detachFromJob(args)
+		if err != nil {
+			fmt.Fprintln(stderr, "adad:", err)
+			return 1
+		}
+		if launched {
+			return 0
+		}
 	}
 	if err := os.MkdirAll(*stateDir, 0700); err != nil {
 		fmt.Fprintln(stderr, "adad: create state directory:", err)
@@ -165,14 +176,25 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	stop := &coordinatorStop{requested: make(chan struct{})}
 	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Owner: ownerAccount, Stopper: stop}
 	var local *executor.Executor
+	var stopOnce sync.Once
+	var stopErr error
+	stopExecutor := func() error {
+		stopOnce.Do(func() {
+			if local == nil {
+				return
+			}
+			stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
+			defer cancel()
+			stopErr = local.Stop(stopCtx)
+		})
+		return stopErr
+	}
 	if *enginePath != "" && *engineHash != "" {
 		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: *concurrency})
 		stop.local = local
 		execution.EngineSHA256, execution.Runner = *engineHash, local
 		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
-			defer cancel()
-			if err := local.Stop(stopCtx); err != nil {
+			if err := stopExecutor(); err != nil {
 				fmt.Fprintln(stderr, "adad: stop executor:", err)
 			}
 		}()
@@ -181,10 +203,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	server.RegisterOnShutdown(hub.Close)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
-	// A signal and the owner's stop request both end the serve loop the same
-	// way; the stop request has already recorded its reason on every attempt
-	// and asked the running ones to cancel, the signal path leaves that to
-	// the executor's orderly stop below.
+	// A signal and the owner's stop request take the same path: the stop request
+	// has already recorded its reason on every attempt and asked the running ones
+	// to cancel; either way the executor stops first and the HTTP server closes
+	// after it, so a vanished endpoint means work has stopped.
 	stopping := make(chan struct{})
 	go func() {
 		select {
@@ -200,6 +222,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	case <-stopping:
+		// Keep the endpoint alive until cancellation and process-tree shutdown
+		// finish. Its disappearance is the desktop's proof that work stopped.
+		if err := stopExecutor(); err != nil {
+			fmt.Fprintln(stderr, "adad: stop executor:", err)
+			return 1
+		}
 		// Open streams first deliver what the stop committed, within the write
 		// deadline, before the shutdown closes the hub under them.
 		hub.Drain()
@@ -214,13 +242,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	if local != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), local.StopBudget())
-		defer cancel()
-		if err := local.Stop(stopCtx); err != nil {
-			fmt.Fprintln(stderr, "adad: stop executor:", err)
-			return 1
-		}
+	if err := stopExecutor(); err != nil {
+		fmt.Fprintln(stderr, "adad: stop executor:", err)
+		return 1
 	}
 	return 0
 }

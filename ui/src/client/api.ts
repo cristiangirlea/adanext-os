@@ -27,6 +27,7 @@ export interface Task {
   revision: number;
   created: string;
   updated: string;
+  attempt: { id: string; state: string; queue_position?: number } | null;
 }
 
 // POST /v1/tasks/{id}/start answers with the task and the attempt it created.
@@ -38,6 +39,12 @@ export interface NewTask {
   project: string;
   objective: string;
   criteria?: string;
+}
+
+export interface StopResult {
+  running: number;
+  queued: number;
+  reason: string;
 }
 
 // The execution policy body of POST /v1/tasks/{id}/start.
@@ -114,7 +121,9 @@ export interface AdaClient {
   start(id: string, revision: number, policy: ExecutionPolicy): Promise<StartedTask>;
   cancel(id: string, revision: number): Promise<Task>;
   subscribeEvents(attemptId: string, onMessage: (message: StreamMessage) => void): () => void;
-  stopCoordinator(): Promise<void>;
+  stopCoordinator(): Promise<StopResult>;
+  finishQuit(): Promise<void>;
+  onQuitRequested(listener: () => void): () => void;
 }
 
 // The preload bridge's shape, the `ada` global the desktop's preload exposes: the same methods,
@@ -129,5 +138,7 @@ export interface BridgeApi {
   start(id: string, revision: number, policy: ExecutionPolicy): Promise<BridgeResult<StartedTask>>;
   cancel(id: string, revision: number): Promise<BridgeResult<Task>>;
   subscribeEvents(attemptId: string, onMessage: (message: StreamMessage) => void): () => void;
-  stopCoordinator(): Promise<BridgeResult<null>>;
+  stopCoordinator(): Promise<BridgeResult<StopResult>>;
+  finishQuit(): Promise<BridgeResult<null>>;
+  onQuitRequested(listener: () => void): () => void;
 }

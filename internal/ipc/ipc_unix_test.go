@@ -229,6 +229,11 @@ func TestListenAndDialNameAUnixSocketPathThatIsTooLong(t *testing.T) {
 
 func TestDialRefusesAServerWhenTheExpectedUIDChanges(t *testing.T) {
 	cfg := Config{StateDir: t.TempDir(), Name: "uid-check"}
+	// The listener's accept goroutine reads the seam: swap it before Listen
+	// and restore it only after Close has waited for that goroutine.
+	old := currentPeerUID
+	currentPeerUID = func() uint32 { return uint32(os.Getuid() + 1) }
+	defer func() { currentPeerUID = old }()
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -239,9 +244,6 @@ func TestDialRefusesAServerWhenTheExpectedUIDChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	old := currentPeerUID
-	currentPeerUID = func() uint32 { return uint32(os.Getuid() + 1) }
-	defer func() { currentPeerUID = old }()
 	conn, err := Dial(context.Background(), cfg)
 	if conn != nil {
 		conn.Close()
@@ -317,8 +319,8 @@ func TestCloseRemovesItsSocketWhileTheListenerIsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := listener.(*ownerListener)
-	defer owner.Close()
+	defer listener.Close()
+	owner := listener.(*authenticatedListener).Listener.(*ownerListener)
 	owner.removePath = func(path string) error {
 		raw, err := owner.UnixListener.SyscallConn()
 		if err != nil {

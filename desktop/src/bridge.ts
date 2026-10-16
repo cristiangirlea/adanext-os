@@ -38,6 +38,7 @@ export interface BridgeOptions {
   // The channel events are pushed on. The preload listens on it.
   eventChannel?: string;
   openStream?: (options: StreamOptions) => EventStream;
+  finishQuit?: () => Promise<void>;
 }
 
 export interface Bridge {
@@ -107,6 +108,8 @@ export function createBridge(options: BridgeOptions): Bridge {
   const streams = new Map<string, { stream: EventStream; senderId: number }>();
   const watched = new Set<number>();
   let closed = false;
+  let stopAccepted = false;
+  let stopRequest: Promise<BridgeResult<unknown>> | undefined;
 
   const key = (senderId: number, subId: string): string => `${senderId}:${subId}`;
 
@@ -199,9 +202,23 @@ export function createBridge(options: BridgeOptions): Bridge {
           return forward({ method: "POST", path: `/v1/tasks/${args[0]}/start`, revision: args[1], body: args[2], idempotent: true });
         case "stopCoordinator": {
           if (args.length !== 0) return bad();
-          const result = await forward({ method: "POST", path: "/v1/coordinator/stop", idempotent: true, emptyOk: true });
-          return result.ok ? { ok: true, value: null } : result;
+          // Repeated clicks share the accepted stop; a refusal permits a retry.
+          stopRequest ??= (async () => {
+            const result = await forward({ method: "POST", path: "/v1/coordinator/stop", idempotent: true });
+            if (result.ok) stopAccepted = true;
+            else stopRequest = undefined;
+            return result;
+          })();
+          return stopRequest;
         }
+        case "finishQuit":
+          if (args.length !== 0 || !stopAccepted || !options.finishQuit) return bad();
+          try {
+            await options.finishQuit();
+            return { ok: true, value: null };
+          } catch (error) {
+            return refused("stop_timeout", error instanceof Error ? error.message : String(error));
+          }
         case "subscribe":
           if (args.length !== 2 || !isId(args[0]) || !isId(args[1])) return bad();
           return subscribe(event, args[0], args[1]);

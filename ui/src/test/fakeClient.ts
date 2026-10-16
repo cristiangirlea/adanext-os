@@ -54,9 +54,12 @@ export class FakeClient implements AdaClient {
       this.unsubscribed.push(attemptId);
     };
   }
-  async stopCoordinator(): Promise<void> {
+  async stopCoordinator() {
     this.check("stopCoordinator");
+    return { running: 1, queued: 1, reason: "coordinator stopped by the owner" };
   }
+  async finishQuit(): Promise<void> { this.check("finishQuit"); }
+  onQuitRequested(): () => void { return () => {}; }
 
   private find(id: string): Task {
     const task = this.tasks.find((t) => t.id === id);
@@ -82,6 +85,7 @@ export function makeTask(fields: Partial<Task> & { id: string }): Task {
     revision: 0,
     created: "2026-10-15T00:00:00Z",
     updated: "2026-10-15T00:00:00Z",
+    attempt: null,
     ...fields,
   };
 }

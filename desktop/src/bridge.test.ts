@@ -87,6 +87,38 @@ async function bridgeTo(handler: (req: http.IncomingMessage, res: http.ServerRes
 const task = { id: "t1", project: "p", created_by: "local", objective: "o", criteria: "", state: "draft", revision: 0, created: "", updated: "" };
 
 describe("bridge", () => {
+  it("validates Quit senders and only finishes an accepted stop", async () => {
+    let finishes = 0;
+    const fake = await listenFake((_req, res) => json(res, 202, { running: 1, queued: 1, reason: "coordinator stopped by the owner" }));
+    fakes.push(fake);
+    const bridge = createBridge({ socketPath: fake.socketPath, pageUrl, finishQuit: async () => { finishes++; } });
+    bridges.push(bridge);
+    const s = sender();
+    expect((await bridge.handle(s.event(), "finishQuit", [])).ok).toBe(false);
+    for (const method of ["stopCoordinator", "finishQuit", "subscribe"]) {
+      expect((await bridge.handle(s.event({ url: "https://elsewhere.invalid", parent: null }), method, [])).ok).toBe(false);
+    }
+    expect((await bridge.handle(s.event(), "stopCoordinator", [])).ok).toBe(true);
+    expect((await bridge.handle(s.event(), "stopCoordinator", [])).ok).toBe(true);
+    expect(fake.requests).toHaveLength(1);
+    expect((await bridge.handle(s.event(), "finishQuit", [])).ok).toBe(true);
+    expect(finishes).toBe(1);
+  });
+  it("does not finish a refused stop and surfaces a bounded-exit failure", async () => {
+    const fake = await listenFake((_req, res) => json(res, 403, { error: "forbidden", message: "forbidden" }));
+    fakes.push(fake);
+    const bridge = createBridge({ socketPath: fake.socketPath, pageUrl, finishQuit: async () => { throw new Error("timed out waiting for adad to stop"); } });
+    bridges.push(bridge);
+    const s = sender();
+    expect(await bridge.handle(s.event(), "stopCoordinator", [])).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect((await bridge.handle(s.event(), "finishQuit", [])).ok).toBe(false);
+    const stopped = await listenFake((_req, res) => json(res, 202, { running: 0, queued: 0, reason: "coordinator stopped by the owner" }));
+    fakes.push(stopped);
+    const waiting = createBridge({ socketPath: stopped.socketPath, pageUrl, finishQuit: async () => { throw new Error("timed out waiting for adad to stop"); } });
+    bridges.push(waiting);
+    await waiting.handle(s.event(), "stopCoordinator", []);
+    expect(await waiting.handle(s.event(), "finishQuit", [])).toMatchObject({ ok: false, error: { code: "stop_timeout" } });
+  });
   it("refuses a call from an unexpected frame before touching adad", async () => {
     const { fake, bridge } = await bridgeTo((_req, res) => json(res, 200, []));
     const s = sender();
@@ -121,7 +153,7 @@ describe("bridge", () => {
     expect(await bridge.handle(s.event(), "getTask", ["t1"])).toEqual({ ok: true, value: task });
     const policy = { backend: "claude", model: "", effort: "", mode: "readonly" };
     expect(await bridge.handle(s.event(), "start", ["t1", 1, policy])).toEqual({ ok: true, value: { ...task, state: "preparing", revision: 2, attempt_id: "a1" } });
-    expect(await bridge.handle(s.event(), "stopCoordinator", [])).toEqual({ ok: true, value: null });
+    expect(await bridge.handle(s.event(), "stopCoordinator", [])).toEqual({ ok: true, value: {} });
     expect(bodies[0]).toBe(JSON.stringify({ project: "repo", objective: "add a test" }));
     expect(bodies[2]).toBe(JSON.stringify(policy));
     const start = fake.requests[2]!;

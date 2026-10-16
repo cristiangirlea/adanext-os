@@ -77,6 +77,30 @@ type Task struct {
 	State                                                 State
 	Revision                                              int64
 	Created, Updated                                      string
+	Attempt                                               TaskAttempt
+}
+
+// TaskAttempt is the newest attempt, even after it ends. Task reads join it
+// and its global queue position in the same SQLite snapshot as the task.
+type TaskAttempt struct {
+	ID, State     string
+	QueuePosition int
+}
+
+const taskReadColumns = `t.id,t.project,t.created_by,t.objective,t.acceptance_criteria,t.state,t.revision,t.created,t.updated,
+	a.id,a.state,CASE WHEN a.state='pending' THEN (SELECT count(*)+1 FROM attempts p WHERE p.state='pending' AND p.rowid<a.rowid) ELSE 0 END`
+const taskReadFrom = ` FROM tasks t LEFT JOIN attempts a ON a.rowid=(SELECT max(latest.rowid) FROM attempts latest WHERE latest.task=t.id)`
+
+func scanTaskRead(row interface{ Scan(...any) error }, extra ...any) (Task, error) {
+	var task Task
+	var id, state sql.NullString
+	var position int
+	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &id, &state, &position}
+	err := row.Scan(append(args, extra...)...)
+	if id.Valid {
+		task.Attempt = TaskAttempt{ID: id.String, State: state.String, QueuePosition: position}
+	}
+	return task, err
 }
 
 const taskColumns = "id,project,created_by,objective,acceptance_criteria,state,revision,created,updated"
@@ -88,14 +112,14 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 }
 
 func (s *Store) ListTasks(ctx context.Context, userID string) ([]Task, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+taskColumns+" FROM tasks WHERE project IN (SELECT project FROM project_members WHERE user=?) ORDER BY id", userID)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+taskReadColumns+taskReadFrom+" WHERE t.project IN (SELECT project FROM project_members WHERE user=?) ORDER BY t.id", userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	tasks := []Task{}
 	for rows.Next() {
-		task, err := scanTask(rows)
+		task, err := scanTaskRead(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -106,9 +130,8 @@ func (s *Store) ListTasks(ctx context.Context, userID string) ([]Task, error) {
 
 func (s *Store) Task(ctx context.Context, userID, taskID string) (Task, error) {
 	// A single query includes the access check, avoiding a write lock for reads.
-	var task Task
 	var member bool
-	err := s.db.QueryRowContext(ctx, "SELECT "+taskColumns+",EXISTS(SELECT 1 FROM project_members WHERE project=tasks.project AND user=?) FROM tasks WHERE id=?", userID, taskID).Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &member)
+	task, err := scanTaskRead(s.db.QueryRowContext(ctx, "SELECT "+taskReadColumns+",EXISTS(SELECT 1 FROM project_members WHERE project=t.project AND user=?)"+taskReadFrom+" WHERE t.id=?", userID, taskID), &member)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}

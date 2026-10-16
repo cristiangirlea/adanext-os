@@ -263,18 +263,25 @@ func newID() (string, error) {
 }
 
 type taskJSON struct {
-	ID        string      `json:"id"`
-	Project   string      `json:"project"`
-	CreatedBy string      `json:"created_by"`
-	Objective string      `json:"objective"`
-	Criteria  string      `json:"criteria"`
-	State     store.State `json:"state"`
-	Revision  int64       `json:"revision"`
-	Created   string      `json:"created"`
-	Updated   string      `json:"updated"`
+	ID        string           `json:"id"`
+	Project   string           `json:"project"`
+	CreatedBy string           `json:"created_by"`
+	Objective string           `json:"objective"`
+	Criteria  string           `json:"criteria"`
+	State     store.State      `json:"state"`
+	Revision  int64            `json:"revision"`
+	Created   string           `json:"created"`
+	Updated   string           `json:"updated"`
+	Attempt   *taskAttemptJSON `json:"attempt"`
 	// QueuePosition is the task's 1-based place among the pending attempts of
 	// all users while it is queued; absent otherwise. Only GET reports it.
 	QueuePosition int `json:"queue_position,omitempty"`
+}
+
+type taskAttemptJSON struct {
+	ID            string `json:"id"`
+	State         string `json:"state"`
+	QueuePosition int    `json:"queue_position,omitempty"`
 }
 
 type startedTaskJSON struct {
@@ -283,7 +290,13 @@ type startedTaskJSON struct {
 }
 
 func taskValue(t store.Task) taskJSON {
-	return taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated}
+	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated}
+	if a := t.Attempt; a.ID != "" {
+		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition}
+		// Keep the existing top-level field for /v1 clients.
+		v.QueuePosition = a.QueuePosition
+	}
+	return v
 }
 
 type cachedResponse struct {
@@ -383,16 +396,6 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value := taskValue(task)
-	if task.State == store.Preparing {
-		// Read after the task, so a position is never shown for a task that
-		// has already left preparing; one that launched meanwhile reads 0.
-		position, err := h.store.QueuePosition(r.Context(), task.ID)
-		if err != nil {
-			storeError(w, err)
-			return
-		}
-		value.QueuePosition = position
-	}
 	w.Header().Set("ETag", fmt.Sprintf("\"%d\"", task.Revision))
 	writeJSON(w, 200, value)
 }
