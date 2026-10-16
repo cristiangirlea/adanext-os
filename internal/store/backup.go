@@ -41,10 +41,11 @@ const (
 	backupLockPoll = 10 * time.Millisecond
 )
 
-// Test seams: after a backup has created its temporary, each time a backup
-// finds the staging lock held, and between the sweep's inspection of a stale
-// temporary and its removal.
+// Test seams: before a backup opens the staging lock, after it has created
+// its temporary, each time it finds the staging lock held, and between the
+// sweep's inspection of a stale temporary and its removal.
 var (
+	beforeBackupLock         func(staging string)
 	afterBackupStaged        func(tmpPath string)
 	backupLockBusy           func(staging string)
 	beforeStaleBackupRemoval func(path string)
@@ -84,8 +85,12 @@ func prepareBackupStaging(dir string) (string, os.FileInfo, error) {
 }
 
 // checkBackupStaging refuses a staging directory that is no longer the
-// directory prepareBackupStaging checked, such as one swapped for a link.
-func checkBackupStaging(staging string, checked os.FileInfo) error {
+// directory prepareBackupStaging checked, such as one swapped for a link, or
+// whose lock file is not the one held, such as one opened through a link.
+func checkBackupStaging(staging string, checked os.FileInfo, lock *os.File) error {
+	if err := artifact.PrivateDirectory(staging); err != nil {
+		return fmt.Errorf("check backup staging directory: %w", err)
+	}
 	current, err := os.Lstat(staging)
 	if err != nil {
 		return fmt.Errorf("check backup staging directory: %w", err)
@@ -93,24 +98,33 @@ func checkBackupStaging(staging string, checked os.FileInfo) error {
 	if !current.Mode().IsDir() || !os.SameFile(checked, current) {
 		return fmt.Errorf("backup staging directory %s changed after its check", staging)
 	}
+	held, err := lock.Stat()
+	if err != nil {
+		return fmt.Errorf("check backup lock: %w", err)
+	}
+	named, err := os.Lstat(filepath.Join(staging, backupLockName))
+	if err != nil || !os.SameFile(held, named) {
+		return fmt.Errorf("backup lock held is not the one in %s", staging)
+	}
 	return nil
 }
 
 // lockBackupStaging takes the staging directory's lock, waiting while another
-// backup holds it, in this process or another, until ctx ends.
-func lockBackupStaging(ctx context.Context, staging string) (unlock func() error, err error) {
-	lock, err := openBackupLock(filepath.Join(staging, backupLockName))
+// backup holds it, in this process or another, until ctx ends. It returns the
+// held lock file for checkBackupStaging.
+func lockBackupStaging(ctx context.Context, staging string) (lock *os.File, unlock func() error, err error) {
+	lock, err = openBackupLock(filepath.Join(staging, backupLockName))
 	if err != nil {
-		return nil, fmt.Errorf("open backup lock: %w", err)
+		return nil, nil, fmt.Errorf("open backup lock: %w", err)
 	}
 	for {
 		locked, err := tryLockBackup(lock)
 		if err != nil {
 			lock.Close()
-			return nil, fmt.Errorf("lock backup staging directory: %w", err)
+			return nil, nil, fmt.Errorf("lock backup staging directory: %w", err)
 		}
 		if locked {
-			return func() error { return errors.Join(unlockBackup(lock), lock.Close()) }, nil
+			return lock, func() error { return errors.Join(unlockBackup(lock), lock.Close()) }, nil
 		}
 		if backupLockBusy != nil {
 			backupLockBusy(staging)
@@ -118,7 +132,7 @@ func lockBackupStaging(ctx context.Context, staging string) (unlock func() error
 		select {
 		case <-ctx.Done():
 			lock.Close()
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-time.After(backupLockPoll):
 		}
 	}

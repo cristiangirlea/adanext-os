@@ -409,9 +409,12 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 // left there. An error wrapping ErrPublishedWithWarning means the backup is
 // complete at destPath although a step after publishing it, or the cleanup
 // around it, failed; a retry would report an existing destination. On Windows a
-// published backup keeps the staging directory's owner-only ACL. On NFS flock
-// is per process, and some FUSE and SMB mounts refuse it: there a backup fails
-// rather than running unlocked.
+// published backup keeps the staging directory's owner-only ACL. On Unix a
+// destination directory another user could rename entries in, or one below
+// such a directory, is refused. On Linux NFS, flock becomes a per-process
+// POSIX lock, so two backups in one process do not exclude each other. Some
+// FUSE and SMB mounts refuse flock, and there a backup fails rather than
+// running unlocked.
 func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	if strings.HasPrefix(strings.ToLower(destPath), "file:") || !filepath.IsAbs(destPath) {
 		return errors.New("backup destination must be an absolute filesystem path, not a file: URI")
@@ -424,16 +427,22 @@ func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("check backup destination: %w", err)
 	}
+	if err := checkBackupDestination(filepath.Dir(destPath)); err != nil {
+		return err
+	}
 	staging, checked, err := prepareBackupStaging(filepath.Dir(destPath))
 	if err != nil {
 		return fmt.Errorf("prepare backup staging directory: %w", err)
 	}
-	unlock, err := lockBackupStaging(ctx, staging)
+	if beforeBackupLock != nil {
+		beforeBackupLock(staging)
+	}
+	lock, unlock, err := lockBackupStaging(ctx, staging)
 	if err != nil {
 		return err
 	}
 	defer func() { err = withCleanup(err, unlock(), "release backup lock") }()
-	if err := checkBackupStaging(staging, checked); err != nil {
+	if err := checkBackupStaging(staging, checked, lock); err != nil {
 		return err
 	}
 	sweepErr := sweepStaleBackupTemps(staging)

@@ -6,9 +6,54 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 )
+
+// checkBackupDestination refuses a destination directory that another user
+// could rename entries in, by owning it or one of its ancestors, or by being
+// able to write to one: SQLite writes the snapshot by path, so such a user
+// could swap the staging directory and receive the database. Both the path as
+// given and the path its links resolve to are checked, as OpenSSH's
+// StrictModes does.
+func checkBackupDestination(dir string) error {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("check backup destination directory: %w", err)
+	}
+	for _, start := range []string{dir, resolved} {
+		for p := filepath.Clean(start); ; p = filepath.Dir(p) {
+			info, err := os.Stat(p)
+			if err != nil {
+				return fmt.Errorf("check backup destination directory: %w", err)
+			}
+			st, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || !trustedBackupDirectory(st.Uid, st.Gid, info.Mode(), os.Geteuid(), os.Getegid()) {
+				return fmt.Errorf("backup destination directory %s: %s can be changed by another user", dir, p)
+			}
+			if filepath.Dir(p) == p {
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// trustedBackupDirectory reports whether only the user and root can rename
+// entries in a directory with this owner, group and mode: it is owned by one
+// of them and is sticky, or is not writable by others and group-writable only
+// for the user's primary group. In a sticky directory, such as /tmp, only an
+// entry's owner, the directory's owner and root can rename it.
+func trustedBackupDirectory(uid, gid uint32, mode os.FileMode, euid, egid int) bool {
+	if uid != uint32(euid) && uid != 0 {
+		return false
+	}
+	if mode&os.ModeSticky != 0 {
+		return true
+	}
+	return mode&0o002 == 0 && (mode&0o020 == 0 || gid == uint32(egid))
+}
 
 // openBackupLock opens or creates the lock file itself, never a symlink's target.
 func openBackupLock(path string) (*os.File, error) {

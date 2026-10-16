@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -55,6 +56,7 @@ func assertSQLiteFile(t *testing.T, path string) {
 // resetBackupSeams clears the backup test seams when the test ends.
 func resetBackupSeams(t *testing.T) {
 	t.Cleanup(func() {
+		beforeBackupLock = nil
 		afterBackupStaged = nil
 		backupLockBusy = nil
 		beforeStaleBackupRemoval = nil
@@ -215,7 +217,7 @@ func TestHelperHoldsTheBackupStagingLock(t *testing.T) {
 	if staging == "" {
 		return
 	}
-	unlock, err := lockBackupStaging(context.Background(), staging)
+	_, unlock, err := lockBackupStaging(context.Background(), staging)
 	if err != nil {
 		fmt.Println("error:", err)
 		os.Exit(1)
@@ -293,7 +295,7 @@ func TestABackupWaitingForTheLockStopsWithItsContext(t *testing.T) {
 	if err := s.Backup(ctx, filepath.Join(dir, "first.sqlite")); err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := lockBackupStaging(ctx, filepath.Join(dir, backupStagingName))
+	_, unlock, err := lockBackupStaging(ctx, filepath.Join(dir, backupStagingName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +368,7 @@ func TestBackupRefusesAStagingDirectorySwappedForALinkBeforeItsLock(t *testing.T
 		t.Fatal(err)
 	}
 	staging := filepath.Join(dir, backupStagingName)
-	unlock, err := lockBackupStaging(ctx, staging)
+	_, unlock, err := lockBackupStaging(ctx, staging)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +402,10 @@ func TestBackupRefusesAStagingDirectorySwappedForALinkBeforeItsLock(t *testing.T
 	dest := filepath.Join(dir, "second.sqlite")
 	err = s.Backup(ctx, dest)
 	if moveErr != nil {
-		t.Skipf("the staging directory cannot be moved while its lock is open: %v", moveErr)
+		if runtime.GOOS == "windows" {
+			t.Skipf("the staging directory cannot be moved while its lock is open: %v", moveErr)
+		}
+		t.Fatalf("move the staging directory: %v", moveErr)
 	}
 	if err == nil {
 		t.Fatal("backup through a staging directory swapped for a link succeeded")
@@ -411,6 +416,65 @@ func TestBackupRefusesAStagingDirectorySwappedForALinkBeforeItsLock(t *testing.T
 	entries, err := os.ReadDir(target)
 	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(stale) {
 		t.Fatalf("the link's target was written or swept: %v, %v", entries, err)
+	}
+}
+
+func TestBackupRefusesALockOpenedThroughALinkSwappedBackBeforeTheCheck(t *testing.T) {
+	s := openTestStore(t)
+	seed(t, s)
+	dir := t.TempDir()
+	if err := s.Backup(ctx, filepath.Join(dir, "first.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(dir, backupStagingName)
+	moved := filepath.Join(dir, "moved")
+	target := t.TempDir()
+	_, unlockTarget, err := lockBackupStaging(ctx, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			unlockTarget()
+		}
+	})
+	resetBackupSeams(t)
+	// The checked directory becomes a link before the lock opens, and comes
+	// back while the lock in the link's target is busy.
+	beforeBackupLock = func(string) {
+		if err := os.Rename(staging, moved); err != nil {
+			t.Fatal(err)
+		}
+		linkDirectory(t, target, staging)
+	}
+	backupLockBusy = func(string) {
+		if released {
+			return
+		}
+		if err := os.Remove(staging); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(moved, staging); err != nil {
+			t.Fatal(err)
+		}
+		released = true
+		if err := unlockTarget(); err != nil {
+			t.Error(err)
+		}
+	}
+	dest := filepath.Join(dir, "second.sqlite")
+	if err := s.Backup(ctx, dest); err == nil {
+		t.Fatal("backup holding a lock opened through a link succeeded")
+	}
+	if !released {
+		t.Fatal("the lock in the link's target was never found busy")
+	}
+	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination after the refusal: %v", err)
+	}
+	if got := stagingEntries(t, dir); len(got) != 1 || got[0] != backupLockName {
+		t.Fatalf("staging directory holds %v, want only the lock", got)
 	}
 }
 

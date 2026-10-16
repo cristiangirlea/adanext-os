@@ -88,6 +88,10 @@ func removeStaged(path string, seen stagedFile) error {
 	return nil
 }
 
+// checkBackupDestination accepts any directory on Windows: the held lock
+// handle pins the staging directory, so no one can rename it during a backup.
+func checkBackupDestination(string) error { return nil }
+
 // openBackupLock opens or creates the lock file itself, never a reparse
 // point's target.
 func openBackupLock(path string) (*os.File, error) {
