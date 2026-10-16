@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -13,7 +14,8 @@ import (
 // openShared opens a user's file for reading with FILE_SHARE_DELETE, so the
 // user's git can rename over it while Ada holds it. It opens a final reparse
 // point itself instead of its target, and refuses it, a remote path and any
-// handle that is not a regular file on disk.
+// handle that is not a regular file on disk; a cloud or dedup reparse point
+// is read as the file it is.
 func openShared(path string) (*os.File, error) {
 	if IsRemotePath(path) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: errRemote}
@@ -43,8 +45,12 @@ func openShared(path string) (*os.File, error) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		windows.CloseHandle(h)
-		return nil, &os.PathError{Op: "open", Path: path, Err: errLink}
+		var tag struct{ FileAttributes, ReparseTag uint32 } // FILE_ATTRIBUTE_TAG_INFO
+		err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&tag)), uint32(unsafe.Sizeof(tag)))
+		if err != nil || isNameSurrogate(tag.ReparseTag) {
+			windows.CloseHandle(h)
+			return nil, &os.PathError{Op: "open", Path: path, Err: errLink}
+		}
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
 		windows.CloseHandle(h)
@@ -52,3 +58,7 @@ func openShared(path string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(h), path), nil
 }
+
+// isNameSurrogate is a reparse tag that redirects to another name (a symlink
+// or junction), unlike a cloud or dedup file's.
+func isNameSurrogate(tag uint32) bool { return tag&0x20000000 != 0 }

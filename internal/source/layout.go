@@ -54,7 +54,18 @@ func readUnder(base, path string, limit int64) ([]byte, os.FileInfo, error) {
 	return readFile(path, limit)
 }
 
-func isLink(info os.FileInfo) bool { return info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 }
+// isLink is a symlink, or an irregular file (a junction on Windows) that
+// Readlink reads; a cloud or dedup reparse point is not one.
+func isLink(path string, info os.FileInfo) bool {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return true
+	}
+	if info.Mode()&os.ModeIrregular == 0 {
+		return false
+	}
+	_, err := os.Readlink(path)
+	return err == nil
+}
 
 // noLinks Lstats each component of path below base and refuses a link or
 // reparse point; a missing component is fs.ErrNotExist.
@@ -73,7 +84,7 @@ func noLinks(base, path string) error {
 		if err != nil {
 			return err
 		}
-		if isLink(info) {
+		if isLink(cur, info) {
 			return &os.PathError{Op: "open", Path: cur, Err: errLink}
 		}
 	}
@@ -81,7 +92,8 @@ func noLinks(base, path string) error {
 }
 
 // linkTarget makes a link's target absolute; ok is false for a remote,
-// rooted or drive-relative one.
+// rooted or drive-relative one. On Unix it keeps its `..`, which resolve
+// takes after the links before it; Windows normalises lexically.
 func linkTarget(link, target string) (string, bool) {
 	if runtime.GOOS == "windows" {
 		for _, prefix := range []string{`\\?\`, `\??\`} {
@@ -97,9 +109,12 @@ func linkTarget(link, target string) (string, bool) {
 		if filepath.VolumeName(target) != "" || strings.HasPrefix(target, `\`) || strings.HasPrefix(target, "/") {
 			return "", false
 		}
-		target = filepath.Join(filepath.Dir(link), target)
+		target = filepath.Dir(link) + string(filepath.Separator) + target
 	}
-	return filepath.Clean(target), true
+	if runtime.GOOS == "windows" {
+		target = filepath.Clean(target)
+	}
+	return target, true
 }
 
 func volumeRoot(p string) string { return filepath.VolumeName(p) + string(filepath.Separator) }
@@ -107,7 +122,7 @@ func volumeRoot(p string) string { return filepath.VolumeName(p) + string(filepa
 // resolve follows the links in p, under root, one component at a time with
 // Lstat and never through a remote target. ok is false at an unreadable
 // symlink, a remote or rooted target, a loop, a target outside root when
-// bounded, or any link at all when follow is false.
+// bounded (a `..` above it too), or any link at all when follow is false.
 func resolve(root, p string, bounded, follow bool) (string, bool) {
 	parts := func(root, p string) []string {
 		rel, err := filepath.Rel(root, p)
@@ -116,23 +131,32 @@ func resolve(root, p string, bounded, follow bool) (string, bool) {
 		}
 		return strings.Split(rel, string(filepath.Separator))
 	}
+	sep := string(filepath.Separator)
 	rest, cur := parts(root, p), root
 	for hops := 0; len(rest) > 0; {
-		next := filepath.Join(cur, rest[0])
+		part := rest[0]
 		rest = rest[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			// Taken from the resolved directory, as the kernel does.
+			if bounded && !within(root, filepath.Dir(cur)) {
+				return "", false
+			}
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, part)
 		info, err := os.Lstat(next)
 		if err != nil {
 			return filepath.Join(append([]string{next}, rest...)...), true
 		}
-		if !isLink(info) {
+		if !isLink(next, info) {
 			cur = next
 			continue
 		}
 		target, err := os.Readlink(next)
-		if err != nil && info.Mode()&os.ModeSymlink == 0 {
-			cur = next // a reparse point that is not a link
-			continue
-		}
 		if hops++; err != nil || !follow || hops > 40 {
 			return "", false
 		}
@@ -140,12 +164,19 @@ func resolve(root, p string, bounded, follow bool) (string, bool) {
 		if !ok {
 			return "", false
 		}
+		// The target is walked from its components before its first `..`.
+		c := strings.Split(abs, sep)
+		i := 0
+		for i < len(c) && c[i] != ".." {
+			i++
+		}
+		head := filepath.Clean(strings.Join(c[:i], sep) + sep)
 		if !bounded {
-			root = volumeRoot(abs)
-		} else if !within(root, abs) {
+			root = volumeRoot(head)
+		} else if !within(root, head) {
 			return "", false
 		}
-		rest, cur = append(parts(root, abs), rest...), root
+		rest, cur = append(append(parts(root, head), c[i:]...), rest...), root
 	}
 	return cur, true
 }
@@ -191,15 +222,22 @@ func readPointer(base, path string) (string, error) {
 	return strings.TrimRight(string(data), "\r\n"), nil
 }
 
-// resolvePointer makes a pointer absolute against base, refusing a remote one.
-func resolvePointer(base, value string) (string, *Blocker) {
+// resolvePointer makes a pointer absolute against base and resolves the links
+// of every component, refusing a remote one, so no later Lstat crosses a link
+// to a remote target. It returns the named path too.
+func resolvePointer(base, value string) (resolved, named string, b *Blocker) {
 	if IsRemotePath(value) {
-		return "", &Blocker{Code: BlockRemotePath, Paths: []string{value}}
+		return "", "", &Blocker{Code: BlockRemotePath, Paths: []string{value}}
 	}
 	if !filepath.IsAbs(value) {
 		value = filepath.Join(base, filepath.FromSlash(value))
 	}
-	return filepath.Clean(value), nil
+	named = filepath.Clean(value)
+	resolved, ok := localPath(named, true)
+	if !ok {
+		return "", "", &Blocker{Code: BlockRemotePath, Paths: []string{named}}
+	}
+	return resolved, named, nil
 }
 
 // readLayout finds the git directory of the work tree root and its common
@@ -225,7 +263,7 @@ func readLayout(root string) (layout, *Blocker) {
 			return l, &Blocker{Code: BlockNotRepository, Paths: []string{dotGit}}
 		}
 		var b *Blocker
-		if l.gitDir, b = resolvePointer(root, value); b != nil {
+		if l.gitDir, _, b = resolvePointer(root, value); b != nil {
 			return l, b
 		}
 	default:
@@ -237,7 +275,7 @@ func readLayout(root string) (layout, *Blocker) {
 	l.commonDir = l.gitDir
 	if value, err := readPointer(l.gitDir, filepath.Join(l.gitDir, "commondir")); err == nil {
 		var b *Blocker
-		if l.commonDir, b = resolvePointer(l.gitDir, value); b != nil {
+		if l.commonDir, _, b = resolvePointer(l.gitDir, value); b != nil {
 			return l, b
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -268,12 +306,13 @@ func (l *layout) readAlternates(objects string, depth int) *Blocker {
 			continue
 		}
 		line = strings.Trim(line, `"`)
-		alt, b := resolvePointer(objects, line)
+		alt, named, b := resolvePointer(objects, line)
 		if b != nil {
 			return b
 		}
-		if info, err := os.Lstat(alt); err == nil && isLink(info) {
-			return &Blocker{Code: BlockNotRepository, Paths: []string{alt}}
+		// An alternate that is itself a link is refused; the links above it are local.
+		if info, err := os.Lstat(named); err == nil && isLink(named, info) {
+			return &Blocker{Code: BlockNotRepository, Paths: []string{named}}
 		}
 		l.alternates = append(l.alternates, alt)
 		if b := l.readAlternates(alt, depth+1); b != nil {
@@ -289,7 +328,7 @@ func isGitDir(dir string) bool {
 		return false
 	}
 	for _, sub := range []string{"objects", "refs"} {
-		if info, err := os.Lstat(filepath.Join(dir, sub)); err != nil || !info.IsDir() || isLink(info) {
+		if info, err := os.Lstat(filepath.Join(dir, sub)); err != nil || !info.IsDir() || isLink(filepath.Join(dir, sub), info) {
 			return false
 		}
 	}
@@ -299,7 +338,7 @@ func isGitDir(dir string) bool {
 // linkedDir reports a git directory's own directory that is a link.
 func linkedDir(dir string, subs ...string) bool {
 	for _, sub := range subs {
-		if info, err := os.Lstat(filepath.Join(dir, sub)); err == nil && isLink(info) {
+		if info, err := os.Lstat(filepath.Join(dir, sub)); err == nil && isLink(filepath.Join(dir, sub), info) {
 			return true
 		}
 	}

@@ -62,7 +62,7 @@ func TestAPathIgnoredOnlyByTheGlobalExcludesFileIsIgnored(t *testing.T) {
 	}
 }
 
-func TestAGlobalExcludesFileThatIsALinkIsFollowedButARepositoryOneIsNot(t *testing.T) {
+func TestAnExcludesFileThatIsALinkIsFollowed(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("creating a symlink on Windows needs a privilege CI does not have")
@@ -86,8 +86,9 @@ func TestAGlobalExcludesFileThatIsALinkIsFollowedButARepositoryOneIsNot(t *testi
 	other := newRepo(t, nil)
 	write(t, filepath.Join(other, "secret.txt"), "s\n")
 	git(t, other, "config", "core.excludesFile", filepath.ToSlash(link))
-	if r := inspect(t, newInspector(t), other); !hasPath(r.Status.Untracked, "secret.txt") {
-		t.Fatalf("the repository config's linked excludes file was followed: untracked = %v", r.Status.Untracked)
+	// One the repository config names too, as through /home -> /var/home.
+	if r := inspect(t, newInspector(t), other); hasPath(r.Status.Untracked, "secret.txt") {
+		t.Fatalf("the repository config's linked excludes file was not followed: untracked = %v", r.Status.Untracked)
 	}
 }
 

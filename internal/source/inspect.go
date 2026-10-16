@@ -625,6 +625,9 @@ func (r *Inspection) checkLinks(root string, idx *index) map[string]bool {
 		for i := 1; i <= len(parts); i++ {
 			prefix := strings.Join(parts[:i], "/")
 			if checked[prefix] {
+				if links[prefix] {
+					break
+				}
 				continue
 			}
 			checked[prefix] = true
@@ -633,9 +636,9 @@ func (r *Inspection) checkLinks(root string, idx *index) map[string]bool {
 			if err != nil {
 				break
 			}
-			if isLink(info) {
+			if isLink(full, info) {
 				links[prefix] = true
-				if linkEscapes(root, full, info) {
+				if linkEscapes(root, full) {
 					escaping = append(escaping, prefix)
 				}
 				break
@@ -665,21 +668,8 @@ func underLink(links map[string]bool, p string) bool {
 
 // linkEscapes reports a link whose target leaves the work tree: a target
 // outside it is never resolved, and one inside is followed with Lstat.
-func linkEscapes(root, full string, info os.FileInfo) bool {
-	symlink := info.Mode()&os.ModeSymlink != 0
-	if !symlink && info.Mode()&os.ModeIrregular == 0 {
-		return false
-	}
-	target, err := os.Readlink(full)
-	if err != nil {
-		// A symlink we cannot read is refused; another reparse point is not a link.
-		return symlink
-	}
-	abs, ok := linkTarget(full, target)
-	if !ok || !within(root, abs) {
-		return true
-	}
-	_, ok = resolve(root, abs, true, true)
+func linkEscapes(root, full string) bool {
+	_, ok := resolve(root, full, true, true)
 	return !ok
 }
 

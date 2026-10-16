@@ -62,10 +62,8 @@ func writeMirror(mirror string, src mirrorSource) error {
 		if path == "" || IsRemotePath(path) {
 			continue
 		}
-		// Only a file the user's own config names is followed through its links.
-		_, fromRepo := src.repo.get(f.key)
 		dst := filepath.Join(mirror, f.name)
-		copied, err := copyUserFile(path, dst, !fromRepo)
+		copied, err := copyUserFile(path, dst)
 		if err != nil {
 			return err
 		}
@@ -99,7 +97,7 @@ func writeMirror(mirror string, src mirrorSource) error {
 			return err
 		}
 	}
-	if info, err := os.Lstat(filepath.Join(l.commonDir, "objects")); err != nil || !info.IsDir() || isLink(info) {
+	if info, err := os.Lstat(filepath.Join(l.commonDir, "objects")); err != nil || !info.IsDir() || isLink(filepath.Join(l.commonDir, "objects"), info) {
 		return errors.New("objects is not a directory")
 	}
 	objects := filepath.ToSlash(filepath.Join(l.commonDir, "objects"))
@@ -119,10 +117,10 @@ func writeMirror(mirror string, src mirrorSource) error {
 	return nil
 }
 
-// copyUserFile copies a regular file the user's config names, following its
-// local links when follow is set; a missing, linked or remote one is not copied.
-func copyUserFile(src, dst string, follow bool) (bool, error) {
-	resolved, ok := localPath(src, follow)
+// copyUserFile copies a regular file a config names, following its local
+// links; a missing, non-regular or remote one is not copied.
+func copyUserFile(src, dst string) (bool, error) {
+	resolved, ok := localPath(src, true)
 	if !ok {
 		return false, nil
 	}

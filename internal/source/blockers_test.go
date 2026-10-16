@@ -2,12 +2,16 @@ package source
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestEachBlockerIsReported(t *testing.T) {
@@ -244,13 +248,13 @@ func TestNothingIsReadThroughALinkInTheWorkTree(t *testing.T) {
 	}
 }
 
-// refused is an inspection that ends in a not_git_repository blocker or an
-// error naming a link.
+// refused is an inspection that ends in a not_git_repository blocker or a
+// link refused on open.
 func refused(t *testing.T, in *Inspector, path string) bool {
 	t.Helper()
 	r, err := in.Inspect(context.Background(), path)
 	_, blocked := blocker(r, BlockNotRepository)
-	return blocked || err != nil && strings.Contains(err.Error(), "link")
+	return blocked || errors.Is(err, errLink) || errors.Is(err, syscall.ELOOP)
 }
 
 // moveAndLink moves dir away and leaves a link to it in its place.
@@ -265,7 +269,7 @@ func moveAndLink(t *testing.T, dir string) {
 
 func TestLinksInTheGitDirectoryAreRefused(t *testing.T) {
 	t.Parallel()
-	for _, part := range []string{"refs", "objects", "refs/heads", "objects/info"} {
+	for _, part := range []string{"refs", "objects", "info", "refs/heads", "objects/info"} {
 		t.Run(part, func(t *testing.T) {
 			t.Parallel()
 			dir := newRepo(t, nil)
@@ -285,6 +289,62 @@ func TestLinksInTheGitDirectoryAreRefused(t *testing.T) {
 			t.Fatal("a linked alternate was followed")
 		}
 	})
+	for _, part := range []string{"refs", "info"} {
+		t.Run("a linked worktree's "+part, func(t *testing.T) {
+			t.Parallel()
+			dir := newRepo(t, nil)
+			wt := filepath.Join(tempDir(t), "wt")
+			git(t, dir, "worktree", "add", "-q", "-b", "feature", wt)
+			linked := filepath.Join(dir, ".git", "worktrees", "wt", part)
+			if err := os.RemoveAll(linked); err != nil {
+				t.Fatal(err)
+			}
+			makeLink(t, tempDir(t), linked)
+			if !refused(t, newInspector(t), wt) {
+				t.Fatalf("a linked worktree's %s was followed", part)
+			}
+		})
+	}
+}
+
+func TestChangedPathsUnderOneLinkReportOnlyThatLink(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"sub/a.txt": "a\n", "sub/b.txt": "b\n"})
+	outside, further := tempDir(t), tempDir(t)
+	// Links beneath the link are found only by looking through it.
+	makeLink(t, further, filepath.Join(outside, "a.txt"))
+	makeLink(t, further, filepath.Join(outside, "b.txt"))
+	if err := os.RemoveAll(filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	makeLink(t, outside, filepath.Join(dir, "sub"))
+	r := inspect(t, newInspector(t), dir)
+	if b, ok := blocker(r, BlockEscapingLink); !ok || strings.Join(b.Paths, ",") != "sub" {
+		t.Fatalf("blockers = %+v", r.Blockers)
+	}
+}
+
+// fileInfo is an os.FileInfo with only a mode.
+type fileInfo struct{ mode fs.FileMode }
+
+func (f fileInfo) Name() string       { return "f" }
+func (f fileInfo) Size() int64        { return 0 }
+func (f fileInfo) Mode() fs.FileMode  { return f.mode }
+func (f fileInfo) ModTime() time.Time { return time.Time{} }
+func (f fileInfo) IsDir() bool        { return false }
+func (f fileInfo) Sys() any           { return nil }
+
+func TestAnIrregularFileReadlinkCannotReadIsNotALink(t *testing.T) {
+	t.Parallel()
+	// A cloud or dedup reparse point is irregular, and Readlink fails on it.
+	file := filepath.Join(tempDir(t), "f")
+	write(t, file, "x\n")
+	if isLink(file, fileInfo{fs.ModeIrregular}) {
+		t.Fatal("an irregular file Readlink cannot read is a link")
+	}
+	if !isLink(file, fileInfo{fs.ModeSymlink}) {
+		t.Fatal("a symlink is not a link")
+	}
 }
 
 func TestAnOversizedConfigIsAnError(t *testing.T) {
@@ -400,6 +460,19 @@ func TestRemotePathsAreRefusedUnopened(t *testing.T) {
 					t.Fatalf("blockers = %+v", r.Blockers)
 				}
 			})
+		}
+	}
+}
+
+func TestIsRemotePathKnowsUNCAndDevicePaths(t *testing.T) {
+	t.Parallel()
+	for p, want := range map[string]bool{
+		`\\host\share\repo`: true, `//host/share/repo`: true, `\\?\C:\repo`: true, `//?/C:/repo`: true,
+		`\\.\pipe\x`: true, `\??\C:\repo`: true, `\??\UNC\host\share`: true,
+		`C:\repo`: false, `C:/repo`: false, `/home/repo`: false, `relative`: false, `\repo`: false, `/a//b`: false,
+	} {
+		if got := IsRemotePath(p); got != want {
+			t.Errorf("IsRemotePath(%q) = %v, want %v", p, got, want)
 		}
 	}
 }

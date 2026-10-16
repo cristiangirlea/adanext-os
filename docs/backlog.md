@@ -193,7 +193,8 @@ is M4.
   partial clone (`extensions.partialClone`: objects are missing); reftable or an unknown
   repository extension; a split index; sparse checkout (in config or as skip-worktree entries);
   a merge, rebase, cherry-pick, revert or bisect in progress, or unmerged entries (they cannot be
-  shown as a staged and an unstaged patch); submodules (any gitlink); Git LFS (a `filter=lfs`
+  shown as a staged and an unstaged patch); assume-unchanged entries (git skips those files, so
+  their edits would not show); submodules (any gitlink); Git LFS (a `filter=lfs`
   attribute in any `.gitattributes` in the tree or in `info/attributes`); and symlinks or
   reparse points (junctions) that escape the work tree.
   `POST /v1/projects/inspect` returns an inspection and stores nothing.

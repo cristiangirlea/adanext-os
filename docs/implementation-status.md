@@ -1115,9 +1115,10 @@ that the intermittent failures recorded above have been fixed.
   keeps none of the original's settings. Git older than 2.45.1 is refused at start-up, so
   `GIT_NO_LAZY_FETCH` and the fixes for CVE-2024-32004 and CVE-2024-32465 are always present.
   Amended in M3.1: the floor is the first release of each maintained line carrying the May 2024
-  clone fixes (2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4, 2.44.1, 2.45.1), since Debian and Ubuntu
-  ship patched older lines, and `core.longpaths` joined the mirror's data-only keys for Windows
-  paths over 260 characters.
+  clone fixes (2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4, 2.44.1, 2.45.1). It accepts upstream
+  maintenance releases only: a distribution backport that reports an older version number
+  (Ubuntu 24.04's patched 2.43.0) is refused. `core.longpaths` joined the mirror's data-only keys
+  for Windows paths over 260 characters.
   Two amendments to `docs/plan.md` section 3, Import: v1 blocks every submodule (the plan said
   "unresolved submodules") and every Git LFS path (the plan said "missing LFS objects") until a
   later milestone supports them (not yet in the backlog), because supporting them means running
@@ -1125,7 +1126,8 @@ that the intermittent failures recorded above have been fixed.
   "unsupported sparse-checkout cases"). Reason: a blocker the user can see is better than an
   import that quietly runs a transport or reads a partial work tree. M3.1 also blocks what a
   snapshot cannot represent: `core.bare` or `core.worktree` set, a partial clone, and a merge,
-  rebase, cherry-pick, revert or bisect in progress or unmerged entries. Of section 3's
+  rebase, cherry-pick, revert or bisect in progress or unmerged entries, and assume-unchanged
+  entries (git skips those files, so their edits would not show). Of section 3's
   "existing Ada tasks and verifiable Harness history", M3.2's import lists the existing Ada tasks
   for the source; Harness history is deferred to M6.
 
