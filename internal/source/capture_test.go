@@ -179,9 +179,6 @@ func TestCaptureTakesAnIntentToAddFileAsNewInTheUnstagedPatch(t *testing.T) {
 
 func TestCaptureWithAutocrlfHasNormalisedPatches(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS != "windows" {
-		t.Skip("core.autocrlf=true is the Windows default")
-	}
 	dir := newRepo(t, map[string]string{"lines.txt": "a\nb\n"})
 	head := git(t, dir, "rev-parse", "HEAD")
 	git(t, dir, "config", "core.autocrlf", "true")
@@ -366,6 +363,27 @@ func TestCaptureRefusesALinkSwappedInBetweenItsCheckAndItsOpen(t *testing.T) {
 	}
 	// The read reaches the outside copy; only the check after it sees the link.
 	if _, err := capture(in, dir, []string{"d/f.txt"}); pathCode(err) != PathInvalid {
+		t.Fatalf("capture = %v", err)
+	}
+}
+
+func TestCaptureRefusesAnotherFileRenamedOverTheReadPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("the open handle blocks the rename on Windows")
+	}
+	dir := newRepo(t, nil)
+	write(t, filepath.Join(dir, "f.txt"), "same\n")
+	other := filepath.Join(dir, "other.tmp")
+	in := newInspector(t)
+	in.afterRead = func() {
+		// The same content and mode in another file: only its identity differs.
+		write(t, other, "same\n")
+		if err := os.Rename(other, filepath.Join(dir, "f.txt")); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, err := capture(in, dir, []string{"f.txt"}); !errors.Is(err, ErrSourceChanged) {
 		t.Fatalf("capture = %v", err)
 	}
 }

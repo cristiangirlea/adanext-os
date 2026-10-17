@@ -521,6 +521,14 @@ func TestADiscardNeverRemovesContentASnapshotCommitsMeanwhile(t *testing.T) {
 		}()
 		select {
 		case <-lock.locking:
+			// The handler now waits at the lock this discard holds, so
+			// the wait runs out; a private executor lock lets it commit.
+			select {
+			case r := <-snapshot:
+				t.Errorf("the snapshot committed while the discard held the lock: %d %s", r.status, r.body)
+				snapshot <- r
+			case <-time.After(300 * time.Millisecond):
+			}
 		case r := <-snapshot:
 			snapshot <- r
 		}

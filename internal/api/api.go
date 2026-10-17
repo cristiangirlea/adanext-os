@@ -97,6 +97,7 @@ type Capturer interface {
 // Its lock is the store's lifecycle lock, shared with the executor.
 type ArtifactWriter interface {
 	Write(ctx context.Context, r io.Reader, limit int64) (artifact.Ref, error)
+	Remove(hash string) error
 	sync.Locker
 }
 

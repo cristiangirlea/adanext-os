@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -498,6 +499,69 @@ type countingWriter struct {
 func (c *countingWriter) Write(context.Context, io.Reader, int64) (artifact.Ref, error) {
 	c.writes.Add(1)
 	return artifact.Ref{}, errors.New("unexpected write")
+}
+
+func (c *countingWriter) Remove(string) error { return errors.New("unexpected remove") }
+
+// removingWriter records the blobs the handler removes.
+type removingWriter struct {
+	*artifact.Store
+	mu      sync.Mutex
+	removed []string
+}
+
+func (w *removingWriter) Remove(hash string) error {
+	w.mu.Lock()
+	w.removed = append(w.removed, hash)
+	w.mu.Unlock()
+	return w.Store.Remove(hash)
+}
+
+// hookedCapturer runs after once each capture returns.
+type hookedCapturer struct {
+	in    *countingInspector
+	after func()
+}
+
+func (c hookedCapturer) Capture(ctx context.Context, path string, sel source.Selection) (source.Capture, error) {
+	captured, err := c.in.Capture(ctx, path, sel)
+	if c.after != nil {
+		c.after()
+	}
+	return captured, err
+}
+
+func TestAFailedSnapshotRemovesTheBlobsOnlyItWrote(t *testing.T) {
+	writer := &removingWriter{}
+	capturer := &hookedCapturer{}
+	p := newProjectsFixture(t, func(e *Execution) { e.Capturer, e.Writer = capturer, writer })
+	writer.Store, capturer.in = p.artifacts, p.inspector
+	project := p.importRepo(t, "alice", "import-1", newRepo(t))
+	path := "/v1/projects/" + project.ID + "/snapshots"
+	status, data := p.call(t, "alice", "POST", path, "snap-1", map[string][]string{})
+	if status != 201 {
+		t.Fatalf("first snapshot = %d %s", status, data)
+	}
+	first := decodeJSON[snapshotResult](t, data)
+	// The member is removed during the second capture, so its record fails
+	// after the patches (committed by the first) and the new file are written.
+	capturer.after = func() {
+		if err := p.s.RemoveMember(context.Background(), project.ID, "alice"); err != nil {
+			t.Error(err)
+		}
+	}
+	if status, data := p.call(t, "alice", "POST", path, "snap-2", map[string][]string{"untracked": {"notes/n.bin"}}); status != 404 {
+		t.Fatalf("second snapshot = %d %s", status, data)
+	}
+	sum := sha256.Sum256([]byte("\x00\x01note\r\n"))
+	if want := []string{hex.EncodeToString(sum[:])}; !slices.Equal(writer.removed, want) {
+		t.Fatalf("removed %v, want %v", writer.removed, want)
+	}
+	if _, err := p.artifacts.Open(writer.removed[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the removed blob opens: %v", err)
+	}
+	p.content(t, first.Staged.Hash)
+	p.content(t, first.Unstaged.Hash)
 }
 
 func TestSnapshotCaptureRefusalsAnswerTheirCodeAndStoreNothing(t *testing.T) {

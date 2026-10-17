@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -304,16 +306,24 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 // storeSnapshot writes the capture's content and records the snapshot that
 // references it, holding the artifact lifecycle lock from the first write
 // until the transaction returns, so no discard can remove reused content
-// before the reference commits. Blobs a failed transaction leaves are
-// unreferenced, so no /v1 read serves them, and the next sweep removes them.
-func (h *handler) storeSnapshot(r *http.Request, user, k string, scope *store.Scope, snap store.Snapshot, c source.Capture) ([]byte, error) {
+// before the reference commits. When the snapshot fails it removes, still
+// under the lock, each blob it wrote that no committed record references.
+func (h *handler) storeSnapshot(r *http.Request, user, k string, scope *store.Scope, snap store.Snapshot, c source.Capture) (cached []byte, err error) {
 	h.exec.Writer.Lock()
 	defer h.exec.Writer.Unlock()
+	var written []string
+	defer func() {
+		if err != nil {
+			err = h.discardSnapshot(r.Context(), err, written)
+		}
+	}()
 	write := func(data []byte) (store.ArtifactRef, error) {
 		ref, err := h.exec.Writer.Write(r.Context(), bytes.NewReader(data), int64(len(data)))
+		if err == nil && !slices.Contains(written, ref.Hash) {
+			written = append(written, ref.Hash)
+		}
 		return store.ArtifactRef{Hash: ref.Hash, Size: ref.Size}, err
 	}
-	var err error
 	if snap.Staged, err = write(c.Staged); err == nil {
 		snap.Unstaged, err = write(c.Unstaged)
 	}
@@ -335,6 +345,26 @@ func (h *handler) storeSnapshot(r *http.Request, user, k string, scope *store.Sc
 		}
 		return 201, snapshotValue(recorded), nil
 	})
+}
+
+// discardSnapshot removes the written blobs no committed record references,
+// as the executor's discard does, and returns cause with any removal error.
+func (h *handler) discardSnapshot(ctx context.Context, cause error, written []string) error {
+	ctx = context.WithoutCancel(ctx)
+	for _, hash := range written {
+		referenced, err := h.store.ArtifactReferenced(ctx, hash)
+		if err != nil {
+			cause = errors.Join(cause, fmt.Errorf("artifact %s: %w", hash, err))
+			continue
+		}
+		if referenced {
+			continue
+		}
+		if err := h.exec.Writer.Remove(hash); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cause = errors.Join(cause, fmt.Errorf("remove artifact %s: %w", hash, err))
+		}
+	}
+	return cause
 }
 
 func (h *handler) getSnapshot(w http.ResponseWriter, r *http.Request) {

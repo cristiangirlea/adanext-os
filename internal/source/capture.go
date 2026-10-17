@@ -347,6 +347,9 @@ func (in *Inspector) readSelected(root, rel string) (File, error) {
 	if len(data) > maxFileSize {
 		return File{}, fmt.Errorf("%w: %s is over %d bytes", ErrTooLarge, rel, maxFileSize)
 	}
+	if in.afterRead != nil {
+		in.afterRead()
+	}
 	if err := noLinks(root, full); err != nil {
 		return refuse(err)
 	}
