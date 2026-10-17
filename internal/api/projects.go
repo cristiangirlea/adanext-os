@@ -306,13 +306,19 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 // storeSnapshot writes the capture's content and records the snapshot that
 // references it, holding the artifact lifecycle lock from the first write
 // until the transaction returns, so no discard can remove reused content
-// before the reference commits. When the snapshot fails it removes, still
-// under the lock, each blob it wrote that no committed record references.
+// before the reference commits. When the snapshot fails or panics it
+// removes, still under the lock, each blob it wrote that no committed record
+// references.
 func (h *handler) storeSnapshot(r *http.Request, user, k string, scope *store.Scope, snap store.Snapshot, c source.Capture) (cached []byte, err error) {
 	h.exec.Writer.Lock()
 	defer h.exec.Writer.Unlock()
 	var written []string
 	defer func() {
+		// A panic still removes what was written, then goes on.
+		if p := recover(); p != nil {
+			_ = h.discardSnapshot(r.Context(), fmt.Errorf("panic: %v", p), written)
+			panic(p)
+		}
 		if err != nil {
 			err = h.discardSnapshot(r.Context(), err, written)
 		}

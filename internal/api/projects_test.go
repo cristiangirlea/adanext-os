@@ -665,3 +665,74 @@ func TestASecondSnapshotWhileOneIsCapturingIsBusy(t *testing.T) {
 		t.Fatalf("a snapshot after the first ended = %d %s", status, data)
 	}
 }
+
+// hookedWriter runs after once each successful write returns.
+type hookedWriter struct {
+	removingWriter
+	writes int
+	after  func(int)
+}
+
+func (w *hookedWriter) Write(ctx context.Context, r io.Reader, limit int64) (artifact.Ref, error) {
+	ref, err := w.Store.Write(ctx, r, limit)
+	if err == nil {
+		w.writes++
+		w.after(w.writes)
+	}
+	return ref, err
+}
+
+// storeSnapshotDirect calls storeSnapshot outside the server, with ctx as
+// the request's context and two patches to write.
+func storeSnapshotDirect(t *testing.T, ctx context.Context, w *hookedWriter) (string, error) {
+	t.Helper()
+	artifacts, err := artifact.Open(canonicalTemp(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Store = artifacts
+	h := &handler{store: newFixture(t).s, exec: Execution{Writer: w}}
+	r := httptest.NewRequest("POST", "/", nil).WithContext(context.WithValue(ctx, bodyKey{}, []byte{}))
+	sum := sha256.Sum256([]byte("staged"))
+	_, err = h.storeSnapshot(r, "alice", "snap", nil, store.Snapshot{}, source.Capture{Staged: []byte("staged"), Unstaged: []byte("unstaged")})
+	return hex.EncodeToString(sum[:]), err
+}
+
+func TestASnapshotThatPanicsRemovesWhatItWroteAndPanicsOn(t *testing.T) {
+	w := &hookedWriter{after: func(n int) {
+		if n == 2 {
+			panic("second write")
+		}
+	}}
+	sum := sha256.Sum256([]byte("staged"))
+	first := hex.EncodeToString(sum[:])
+	defer func() {
+		if p := recover(); p != "second write" {
+			t.Fatalf("recovered %v", p)
+		}
+		if !slices.Contains(w.removed, first) {
+			t.Fatalf("removed %v, want %s among them", w.removed, first)
+		}
+		if _, err := w.Store.Open(first); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the first blob opens: %v", err)
+		}
+	}()
+	_, _ = storeSnapshotDirect(t, context.Background(), w)
+	t.Fatal("storeSnapshot returned")
+}
+
+func TestASnapshotWhoseClientLeavesRemovesWhatItWrote(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &hookedWriter{after: func(int) { cancel() }}
+	first, err := storeSnapshotDirect(t, ctx, w)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if want := []string{first}; !slices.Equal(w.removed, want) {
+		t.Fatalf("removed %v, want %v (err %v)", w.removed, want, err)
+	}
+	if _, err := w.Store.Open(first); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the first blob opens: %v", err)
+	}
+}
