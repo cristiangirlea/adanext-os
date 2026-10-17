@@ -9,7 +9,7 @@ are in `docs/backlog.md`.
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
-| M3 Project workspaces | in progress | Slices in `docs/backlog.md` (#78); M3.1 #81 | M3.2 import and snapshots |
+| M3 Project workspaces | in progress | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85 | M3.3 managed clone and task workspaces |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -360,6 +360,30 @@ textconv, external diff, ssh command or hook the repository, its submodules or t
 system config define runs; every original file is hashed before and after.
 
 Not verified: a repository in OneDrive with online-only metadata (#83); macOS.
+
+### M3.2 import and snapshots (2026-10-17, #84, PR #85)
+
+Migration 0005 (`project_sources`, `source_snapshots`, `snapshot_untracked`), `POST /v1/projects`,
+`POST /v1/projects/{id}/snapshots` and `GET /v1/projects/{id}/snapshots/{sid}`, as the M3.2
+entry of `docs/backlog.md` describes them, with #79's M3.2 decisions: a second import of a path
+answers 409 `already_imported` (the project's id and tasks for a member, nothing for others), and
+a nested repository is refused as a directory. Snapshot writes share the artifact lifecycle lock
+that now lives on `artifact.Store`, so the executor's discard and the start-up sweep cannot remove
+a blob a snapshot is committing; a failed snapshot removes the blobs only it wrote. One capture
+runs at a time (429 `capture_busy`). A snapshot holds that lock while it writes, so event appends
+wait for it. Implementation and fix rounds ran as Claude Opus runs through hrn
+(`20261017-003314-18e186`, `-051104-ecce19`, `-061251-c3bcb6`/`-063427-e448c1`); the independent
+reviews, each also the security read, are on the pull request.
+
+Evidence at `3ef98fa`: `.hrn/check.sh` passed, that is `bash scripts/check.sh` on Windows (all
+steps including the seven Playwright tests; `-race` left to Linux) and `go vet`, `go test` and
+`go test -race` for every package in `golang:1.26` in Docker. The core test applies the staged
+and unstaged patches to a clone of the base commit and writes the untracked files, and gets the
+original's work tree byte for byte; every original file is hashed before and after.
+
+Not verified: Windows file symlinks (junctions cover Windows), macOS, a real patch over 64 MiB.
+Later: opening each path component through its parent's handle (M3.3), import authorization for
+more users (M4b), artifact origins when content repeats (#89).
 
 ## Decisions log
 
