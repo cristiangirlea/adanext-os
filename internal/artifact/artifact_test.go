@@ -8,7 +8,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -587,5 +589,58 @@ func TestRemoveDeletesAPublishedBlobAndRefusesABadHash(t *testing.T) {
 		if err := s.Remove(bad); !errors.Is(err, ErrInvalidHash) {
 			t.Fatalf("remove %q: %v", bad, err)
 		}
+	}
+}
+
+func TestBlobsListsOnlyPublishedBlobs(t *testing.T) {
+	s := testStore(t)
+	var want []string
+	for _, content := range []string{"first blob", "second blob"} {
+		ref, err := s.Write(context.Background(), strings.NewReader(content), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, ref.Hash)
+	}
+	slices.Sort(want)
+	if err := os.WriteFile(filepath.Join(s.dir, "tmp", "artifact-123"), []byte("being written"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.dir, want[0][:2], "notes"), []byte("not a blob"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	misplaced := strings.Repeat("0", 64)
+	if want[0][:2] == "00" {
+		misplaced = strings.Repeat("f", 64)
+	}
+	if err := os.WriteFile(filepath.Join(s.dir, want[0][:2], misplaced), []byte("wrong fan-out"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(s.dir, want[0][:2], want[0][:2]+strings.Repeat("1", 62)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(s.dir, "zz"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	linked := "ee" + strings.Repeat("e", 62)
+	if err := os.WriteFile(filepath.Join(outside, linked), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(s.dir, "ee")
+	if err := os.Symlink(outside, link); err != nil {
+		if runtime.GOOS != "windows" {
+			t.Fatal(err)
+		}
+		if output, err := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
+			t.Fatalf("create junction: %v: %s", err, output)
+		}
+	}
+	got, err := s.Blobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("blobs = %v, want %v", got, want)
 	}
 }

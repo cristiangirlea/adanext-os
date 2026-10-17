@@ -12,12 +12,14 @@ import (
 
 func assertNoBackupTemps(t *testing.T, dir string) {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(dir, ".adanext-backup-*.tmp"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(matches) != 0 {
-		t.Fatalf("backup temporary files remain: %v", matches)
+	for _, where := range []string{dir, filepath.Join(dir, backupStagingName)} {
+		matches, err := filepath.Glob(filepath.Join(where, ".adanext-backup-*.tmp"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 0 {
+			t.Fatalf("backup temporary files remain: %v", matches)
+		}
 	}
 }
 

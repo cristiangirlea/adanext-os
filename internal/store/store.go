@@ -402,20 +402,61 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 
 // Backup uses SQLite's live, consistent snapshot, syncs it, and publishes it
 // without replacing a destination. destPath must be an absolute filesystem path,
-// not a file: URI, and must not already exist. An error wrapping
-// ErrPublishedWithWarning means the backup is complete at destPath although a
-// step after publishing it failed; a retry would report an existing
-// destination.
+// not a file: URI, must not already exist and must not lie inside a backup
+// staging directory. The snapshot is written in the private staging directory
+// next to destPath, under its lock, which serialises backups into one directory
+// across stores and processes and lets each sweep the temporaries a crashed one
+// left there. An error wrapping ErrPublishedWithWarning means the backup is
+// complete at destPath although a step after publishing it, or the cleanup
+// around it, failed; a retry would report an existing destination. On Windows a
+// published backup keeps the staging directory's owner-only ACL, and a
+// destination reached through a junction is not supported. On Unix the
+// destination's directory is resolved once and the backup works only there; a
+// directory another user could rename entries in, or one below such a
+// directory, is refused. Permission bits do not show POSIX or macOS ACLs, so a
+// directory whose ACL lets another user write to it is not detected. On Linux
+// NFS, flock becomes a per-process POSIX lock, so two backups in one process do
+// not exclude each other. Some FUSE and SMB mounts refuse flock, and there a
+// backup fails rather than running unlocked.
 func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	if strings.HasPrefix(strings.ToLower(destPath), "file:") || !filepath.IsAbs(destPath) {
 		return errors.New("backup destination must be an absolute filesystem path, not a file: URI")
+	}
+	if insideBackupStaging(destPath) {
+		return errors.New("backup destination is inside a backup staging directory")
 	}
 	if _, err := os.Lstat(destPath); err == nil {
 		return fmt.Errorf("backup destination exists: %w", os.ErrExist)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("check backup destination: %w", err)
 	}
-	file, err := os.CreateTemp(filepath.Dir(destPath), backupTempPattern)
+	dir, err := checkBackupDestination(filepath.Dir(destPath))
+	if err != nil {
+		return err
+	}
+	destPath = filepath.Join(dir, filepath.Base(destPath))
+	// A link on the given path can still lead into a staging directory.
+	if insideBackupStaging(destPath) {
+		return errors.New("backup destination is inside a backup staging directory")
+	}
+	staging, checked, err := prepareBackupStaging(dir)
+	if err != nil {
+		return fmt.Errorf("prepare backup staging directory: %w", err)
+	}
+	if beforeBackupLock != nil {
+		beforeBackupLock(staging)
+	}
+	lock, unlock, err := lockBackupStaging(ctx, staging)
+	if err != nil {
+		return err
+	}
+	defer func() { err = withCleanup(err, unlock(), "release backup lock") }()
+	if err := checkBackupStaging(staging, checked, lock); err != nil {
+		return err
+	}
+	sweepErr := sweepStaleBackupTemps(staging)
+	defer func() { err = withCleanup(err, sweepErr, "sweep stale backup temporaries") }()
+	file, err := os.CreateTemp(staging, backupTempPattern)
 	if err != nil {
 		return fmt.Errorf("create backup temporary file: %w", err)
 	}
@@ -427,6 +468,9 @@ func (s *Store) Backup(ctx context.Context, destPath string) (err error) {
 	}()
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close backup temporary file: %w", err)
+	}
+	if afterBackupStaged != nil {
+		afterBackupStaged(tmpPath)
 	}
 	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmpPath); err != nil {
 		return fmt.Errorf("vacuum backup: %w", err)

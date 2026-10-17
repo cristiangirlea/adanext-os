@@ -28,6 +28,7 @@ import (
 type ArtifactWriter interface {
 	Write(context.Context, io.Reader, int64) (artifact.Ref, error)
 	Remove(hash string) error
+	Blobs() ([]string, error)
 }
 type Notifier interface{ Notify(string) }
 
@@ -927,6 +928,41 @@ func (e *Executor) artifactLifecycle(fn func() error) error {
 	e.artifactMu.Lock()
 	defer e.artifactMu.Unlock()
 	return fn()
+}
+
+// RemoveUnreferencedArtifacts removes the published blobs no committed record
+// references: what a crash between a blob's publish and its commit, or a
+// rolled-back in-transaction write, left behind. It holds artifactMu, so no
+// writer is between its publish and its commit, and blobs still being written
+// are never listed. It reports how many it removed.
+func (e *Executor) RemoveUnreferencedArtifacts(ctx context.Context) (removed int, err error) {
+	if e.cfg.Artifacts == nil {
+		return 0, nil
+	}
+	err = e.artifactLifecycle(func() error {
+		hashes, err := e.cfg.Artifacts.Blobs()
+		if err != nil {
+			return err
+		}
+		var failed error
+		for _, hash := range hashes {
+			referenced, err := e.cfg.Store.ArtifactReferenced(ctx, hash)
+			if err != nil {
+				return errors.Join(failed, fmt.Errorf("artifact %s: %w", hash, err))
+			}
+			if referenced {
+				continue
+			}
+			if err := e.cfg.Artifacts.Remove(hash); err != nil && !errors.Is(err, os.ErrNotExist) {
+				// One blob held open (busy on Windows) must not keep the rest.
+				failed = errors.Join(failed, fmt.Errorf("remove artifact %s: %w", hash, err))
+				continue
+			}
+			removed++
+		}
+		return failed
+	})
+	return removed, err
 }
 
 // boundEvent returns the event as it is stored: unchanged when its encoding fits
