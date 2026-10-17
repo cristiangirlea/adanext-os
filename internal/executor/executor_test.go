@@ -832,17 +832,16 @@ func TestOrderlyStopCancelsARunningAttempt(t *testing.T) {
 func TestACancelWhileTheEngineIsBeingAcceptedReachesTheEngineAtOnce(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "cancel")
 	e.cfg.CancelGrace = naturalExitGrace
-	seen := make(chan struct{})
-	e.beforeCancel = func() { close(seen) }
+	checked := make(chan struct{})
+	e.afterCancelCheck = func() { close(checked) }
 	var canceled time.Time
 	// The cancel arrives once the attempt is stored running and before the
-	// executor accepts the engine's events; the pause lets the cancel handling
-	// find the engine not yet accepted.
+	// executor accepts the engine's events; waiting for the cancel handling's
+	// first check means it has found the engine not yet accepted.
 	e.afterRunning = func() {
 		canceled = time.Now()
 		e.CancelTask("task")
-		<-seen
-		time.Sleep(50 * time.Millisecond)
+		<-checked
 	}
 	e.LaunchAttempt("attempt")
 	a := waitAttempt(t, s, "canceled")

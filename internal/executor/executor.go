@@ -50,17 +50,18 @@ type active struct {
 	once          sync.Once
 }
 type Executor struct {
-	cfg            Config
-	mu             sync.Mutex
-	active         map[string]*active
-	stopped        bool
-	wg             sync.WaitGroup
-	beforeAccepted func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
-	afterAppend    func()                          // Set only by tests to simulate slow event storage.
-	beforeClaim    func(attemptID string)          // Test seam before the launch claim, for the cancel race.
-	beforeCancel   func()                          // Test seam that pauses the cancel handling of a run.
-	afterRunning   func()                          // Test seam between storing the attempt running and accepting its events.
-	beforeRemove   func(hash string)               // Test seam between discard's reference check and its removal.
+	cfg              Config
+	mu               sync.Mutex
+	active           map[string]*active
+	stopped          bool
+	wg               sync.WaitGroup
+	beforeAccepted   func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
+	afterAppend      func()                          // Set only by tests to simulate slow event storage.
+	beforeClaim      func(attemptID string)          // Test seam before the launch claim, for the cancel race.
+	beforeCancel     func()                          // Test seam that pauses the cancel handling of a run.
+	afterCancelCheck func()                          // Test seam after the cancel handling first checks whether the engine is accepted.
+	afterRunning     func()                          // Test seam between storing the attempt running and accepting its events.
+	beforeRemove     func(hash string)               // Test seam between discard's reference check and its removal.
 	// artifactMu serialises the lifecycle of every artifact a writer stores
 	// outside a transaction: from its Write, which may reuse content already
 	// on disk, through the commit that references it or the discard that
@@ -546,6 +547,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 				_ = write(map[string]any{"type": "cancel", "attempt_id": a.ID})
 				sent = true
 			default:
+			}
+			if e.afterCancelCheck != nil {
+				e.afterCancelCheck()
 			}
 			startShutdown()
 			select {
