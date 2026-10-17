@@ -324,3 +324,136 @@ func TestAFailedResultRemovesItsFinalAndEventBlobsAndKeepsSharedContent(t *testi
 		}
 	}
 }
+
+func TestTheSweepRemovesAnOrphanFromACrashAndKeepsAReferencedBlob(t *testing.T) {
+	e, s, dir, _ := testExecutor(t, "happy")
+	ctx := context.Background()
+	a, err := s.AttemptByID(ctx, "attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := oversizePayload("k")
+	if err := e.append(a, "event", kept, ""); err != nil {
+		t.Fatal(err)
+	}
+	// A crash between the publish and the commit leaves the blob and no row.
+	orphan := oversizePayload("c")
+	if _, err := e.cfg.Artifacts.Write(ctx, bytes.NewReader(orphan), int64(len(orphan))); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := e.RemoveUnreferencedArtifacts(ctx)
+	if err != nil || removed != 1 {
+		t.Fatalf("removed %d: %v", removed, err)
+	}
+	if _, err := os.Stat(blobPath(dir, orphan)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the orphan remains: %v", err)
+	}
+	if content, err := os.ReadFile(blobPath(dir, kept)); err != nil || !bytes.Equal(content, kept) {
+		t.Fatalf("the referenced blob: %d bytes, %v", len(content), err)
+	}
+}
+
+// pausedReader yields its first chunk, then closes paused and waits for
+// release before it yields the rest. Only the reading goroutine touches chunks
+// and waited.
+type pausedReader struct {
+	chunks  [][]byte
+	paused  chan struct{}
+	release chan struct{}
+	waited  bool
+}
+
+func (r *pausedReader) Read(p []byte) (int, error) {
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	if len(r.chunks) == 1 && !r.waited {
+		r.waited = true
+		close(r.paused)
+		<-r.release
+	}
+	n := copy(p, r.chunks[0])
+	if r.chunks[0] = r.chunks[0][n:]; len(r.chunks[0]) == 0 {
+		r.chunks = r.chunks[1:]
+	}
+	return n, nil
+}
+
+func TestTheSweepNeverTouchesABlobBeingWritten(t *testing.T) {
+	e, _, dir, _ := testExecutor(t, "happy")
+	ctx := context.Background()
+	content := oversizePayload("w")
+	reader := &pausedReader{chunks: [][]byte{content[:1024], content[1024:]}, paused: make(chan struct{}), release: make(chan struct{})}
+	type written struct {
+		ref artifact.Ref
+		err error
+	}
+	done := make(chan written, 1)
+	go func() {
+		ref, err := e.cfg.Artifacts.Write(ctx, reader, int64(len(content)))
+		done <- written{ref, err}
+	}()
+	<-reader.paused
+	removed, err := e.RemoveUnreferencedArtifacts(ctx)
+	if err != nil || removed != 0 {
+		t.Fatalf("removed %d: %v", removed, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "artifacts", "tmp"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("the temporary being written: %v, %v", entries, err)
+	}
+	close(reader.release)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("the write after the sweep: %v", result.err)
+	}
+	if got, err := os.ReadFile(blobPath(dir, content)); err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("the blob written across the sweep: %d bytes, %v", len(got), err)
+	}
+}
+
+func TestTheSweepWaitsForAWriterHoldingTheLifecycleLock(t *testing.T) {
+	e, s, dir, _ := testExecutor(t, "happy")
+	ctx := context.Background()
+	a, err := s.AttemptByID(ctx, "attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := oversizePayload("l")
+	type swept struct {
+		removed int
+		err     error
+	}
+	sweepDone := make(chan swept, 1)
+	err = e.artifactLifecycle(func() error {
+		ref, err := e.cfg.Artifacts.Write(ctx, bytes.NewReader(content), int64(len(content)))
+		if err != nil {
+			return err
+		}
+		go func() {
+			removed, err := e.RemoveUnreferencedArtifacts(ctx)
+			sweepDone <- swept{removed, err}
+		}()
+		// Under the lock the sweep cannot finish before the commit, so the
+		// wait runs out; without it the sweep removes the uncommitted blob.
+		select {
+		case result := <-sweepDone:
+			t.Errorf("the sweep finished while a writer held the lock: %+v", result)
+			sweepDone <- result
+		case <-time.After(300 * time.Millisecond):
+		}
+		return e.owned(a.ID, func(tx *store.Tx) error {
+			return tx.ReferenceArtifact(ctx, ref.Hash, ref.Size, "attempt:attempt:event:1")
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := <-sweepDone
+	if result.err != nil || result.removed != 0 {
+		t.Fatalf("removed %d: %v", result.removed, result.err)
+	}
+	if got, err := os.ReadFile(blobPath(dir, content)); err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("the committed blob: %d bytes, %v", len(got), err)
+	}
+}

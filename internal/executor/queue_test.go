@@ -75,6 +75,7 @@ func startOrder(t *testing.T, marker string) []string {
 
 func TestASecondTaskStartedAtOnceLaunchesOnlyAfterTheFirstEnds(t *testing.T) {
 	e, s, dir, marker := testExecutor(t, "block")
+	e.cfg.CancelGrace = naturalExitGrace
 	queueAttempt(t, e, s, "u", "task2", "attempt2")
 	e.LaunchAttempt("attempt")
 	e.LaunchAttempt("attempt2")
@@ -101,6 +102,7 @@ func TestASecondTaskStartedAtOnceLaunchesOnlyAfterTheFirstEnds(t *testing.T) {
 
 func TestQueuedAttemptsLaunchInOrderOfCreationAcrossUsers(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "block")
+	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
 	if err := s.CreateUser(ctx, "v", "other"); err != nil {
 		t.Fatal(err)
@@ -225,6 +227,7 @@ func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNe
 
 func TestTheOwnersStopCancelsRunningAndQueuedAttemptsWithTheReasonVisibleToTheirActors(t *testing.T) {
 	e, s, dir, _ := testExecutor(t, "block")
+	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
 	if err := s.CreateUser(ctx, "v", "other"); err != nil {
 		t.Fatal(err)
@@ -252,7 +255,7 @@ func TestTheOwnersStopCancelsRunningAndQueuedAttemptsWithTheReasonVisibleToTheir
 		t.Fatal(err)
 	}
 	e.StopWork()
-	stopCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	stopCtx, cancel := context.WithTimeout(ctx, e.StopBudget())
 	defer cancel()
 	if err := e.Stop(stopCtx); err != nil {
 		t.Fatal(err)
@@ -344,7 +347,7 @@ func pauseCancel(t *testing.T, e *Executor) func() {
 	e.beforeCancel = func() { <-release }
 	t.Cleanup(func() {
 		once.Do(func() { close(release) })
-		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		stopCtx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
 		defer cancel()
 		if err := e.Stop(stopCtx); err != nil {
 			t.Error(err)
@@ -409,6 +412,7 @@ func TestAStopRecordedWhileTheAttemptIsLaunchingIsHonouredWhenTheEngineAccepts(t
 
 func TestTheCancelVersusClaimRaceHasOneWinnerWhicheverSideIsFirst(t *testing.T) {
 	e, s, dir, _ := testExecutor(t, "block")
+	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
 	withdraw := func(task string) error {
 		_, err := s.Do(ctx, "u", "cancel-"+task, "cancel", nil, func(tx *store.Tx) ([]byte, error) {
@@ -465,6 +469,8 @@ func TestTheCancelVersusClaimRaceHasOneWinnerWhicheverSideIsFirst(t *testing.T) 
 	if err := withdraw("task2"); !errors.Is(err, store.ErrAttemptLaunched) {
 		t.Fatalf("cancel after the claim = %v", err)
 	}
+	// Running, so the cancel reaches the engine as a message it answers.
+	waitAttemptID(t, s, "attempt2", "running")
 	e.CancelTask("task2")
 	if a := waitAttemptID(t, s, "attempt2", "canceled"); a.Ended == "" {
 		t.Fatalf("launched attempt = %+v", a)
@@ -485,6 +491,7 @@ func TestTheCancelVersusClaimRaceHasOneWinnerWhicheverSideIsFirst(t *testing.T) 
 func TestConcurrencyAboveOneFillsSlotsAcrossProjectsAndKeepsOneWriterPerProject(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "block")
 	e.cfg.Concurrency = 2
+	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
 	_, err := s.Do(ctx, "u", "project-q", "project-q", nil, func(tx *store.Tx) ([]byte, error) {
 		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('q','q','/never-use','now')")

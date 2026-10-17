@@ -24,7 +24,7 @@ func refuseSymlink(path string) error {
 		return err
 	}
 	if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-		return fmt.Errorf("artifact directory %s is not a regular directory", path)
+		return fmt.Errorf("%s is not a regular directory", path)
 	}
 	return nil
 }
@@ -68,7 +68,7 @@ func makePrivateDirectoryForSID(path string, user *windows.SID) error {
 		return &os.PathError{Op: "stat", Path: path, Err: err}
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("artifact directory %s is not a regular directory", path)
+		return fmt.Errorf("%s is not a regular directory", path)
 	}
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -79,7 +79,7 @@ func makePrivateDirectoryForSID(path string, user *windows.SID) error {
 		return &os.PathError{Op: "read owner", Path: path, Err: err}
 	}
 	if !owner.Equals(user) {
-		return fmt.Errorf("artifact directory %s is not owned by the current user", path)
+		return fmt.Errorf("directory %s is not owned by the current user", path)
 	}
 	if hasOwnerOnlyDACL(sd, user) {
 		return nil

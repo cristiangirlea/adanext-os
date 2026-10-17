@@ -160,6 +160,11 @@ func removeStaleTemps(dir string, remove func(string) error) (skipped int, first
 	return skipped, first
 }
 
+// PrivateDirectory creates path and its missing parents, or takes the
+// directory already there, and makes it reachable by the current user only. A
+// symlink, a junction or a directory another user owns is refused.
+func PrivateDirectory(path string) error { return privateDirectory(osFS{}, path) }
+
 func privateDirectory(fs filesystem, path string) error {
 	if err := refuseSymlink(path); err != nil {
 		return err
@@ -379,6 +384,35 @@ func (s *Store) Remove(hashString string) error {
 		return ErrInvalidHash
 	}
 	return classify(s.fs.remove(filepath.Join(s.dir, hashString[:2], hashString)))
+}
+
+// Blobs lists the hashes of the published blobs, in order. A blob still being
+// written lives in tmp/ and is never listed; an entry that is not a regular
+// file named by a hash under its own fan-out directory is not a blob.
+func (s *Store) Blobs() ([]string, error) {
+	fanouts, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("list artifacts: %w", err)
+	}
+	var hashes []string
+	for _, fanout := range fanouts {
+		// A linked fan-out (a symlink, or a junction that also says directory)
+		// is not followed.
+		name := fanout.Name()
+		if !fanout.IsDir() || fanout.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 || len(name) != 2 || !validHash(strings.Repeat(name, 32)) {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(s.dir, name))
+		if err != nil {
+			return nil, fmt.Errorf("list artifacts: %w", err)
+		}
+		for _, entry := range entries {
+			if entry.Type().IsRegular() && validHash(entry.Name()) && strings.HasPrefix(entry.Name(), name) {
+				hashes = append(hashes, entry.Name())
+			}
+		}
+	}
+	return hashes, nil
 }
 
 func validHash(value string) bool {

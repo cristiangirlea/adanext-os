@@ -209,6 +209,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintln(stderr, "adad: stop executor:", err)
 			}
 		}()
+		// Before serving, so no launch can start a writer. A failure only
+		// costs disk space, since no API path reaches an unreferenced blob.
+		// Only the executor leaves orphans, so without an engine there is no sweep.
+		if _, err := local.RemoveUnreferencedArtifacts(ctx); err != nil {
+			fmt.Fprintln(stderr, "adad: remove unreferenced artifacts:", err)
+		}
 	}
 	server := &http.Server{Handler: api.New(s, hub, func(*http.Request) (string, error) { return ownerAccount, nil }, execution), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
 	server.RegisterOnShutdown(hub.Close)

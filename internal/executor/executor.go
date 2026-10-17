@@ -28,6 +28,7 @@ import (
 type ArtifactWriter interface {
 	Write(context.Context, io.Reader, int64) (artifact.Ref, error)
 	Remove(hash string) error
+	Blobs() ([]string, error)
 }
 type Notifier interface{ Notify(string) }
 
@@ -50,16 +51,18 @@ type active struct {
 	once          sync.Once
 }
 type Executor struct {
-	cfg            Config
-	mu             sync.Mutex
-	active         map[string]*active
-	stopped        bool
-	wg             sync.WaitGroup
-	beforeAccepted func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
-	afterAppend    func()                          // Set only by tests to simulate slow event storage.
-	beforeClaim    func(attemptID string)          // Test seam before the launch claim, for the cancel race.
-	beforeCancel   func()                          // Test seam that pauses the cancel handling of a run.
-	beforeRemove   func(hash string)               // Test seam between discard's reference check and its removal.
+	cfg              Config
+	mu               sync.Mutex
+	active           map[string]*active
+	stopped          bool
+	wg               sync.WaitGroup
+	beforeAccepted   func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
+	afterAppend      func()                          // Set only by tests to simulate slow event storage.
+	beforeClaim      func(attemptID string)          // Test seam before the launch claim, for the cancel race.
+	beforeCancel     func()                          // Test seam that pauses the cancel handling of a run.
+	afterCancelCheck func()                          // Test seam after the cancel handling first checks whether the engine is accepted.
+	afterRunning     func()                          // Test seam between storing the attempt running and accepting its events.
+	beforeRemove     func(hash string)               // Test seam between discard's reference check and its removal.
 	// artifactMu serialises the lifecycle of every artifact a writer stores
 	// outside a transaction: from its Write, which may reuse content already
 	// on disk, through the commit that references it or the discard that
@@ -538,16 +541,26 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			if e.beforeCancel != nil {
 				e.beforeCancel()
 			}
+			sent := false
 			select {
 			case <-accepted:
 				_ = e.requestCancel(a)
 				_ = write(map[string]any{"type": "cancel", "attempt_id": a.ID})
+				sent = true
 			default:
+			}
+			if e.afterCancelCheck != nil {
+				e.afterCancelCheck()
 			}
 			startShutdown()
 			select {
 			case <-accepted:
-				_ = e.requestCancel(a)
+				// A cancel that came before the engine was accepted is sent
+				// now, not left to the close timer.
+				if !sent {
+					_ = e.requestCancel(a)
+					_ = write(map[string]any{"type": "cancel", "attempt_id": a.ID})
+				}
 			case <-done:
 			}
 		case <-done:
@@ -733,6 +746,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		abort(err)
 		return
 	}
+	if e.afterRunning != nil {
+		e.afterRunning()
+	}
 	close(accepted)
 	var fatalCause error
 	for {
@@ -912,6 +928,41 @@ func (e *Executor) artifactLifecycle(fn func() error) error {
 	e.artifactMu.Lock()
 	defer e.artifactMu.Unlock()
 	return fn()
+}
+
+// RemoveUnreferencedArtifacts removes the published blobs no committed record
+// references: what a crash between a blob's publish and its commit, or a
+// rolled-back in-transaction write, left behind. It holds artifactMu, so no
+// writer is between its publish and its commit, and blobs still being written
+// are never listed. It reports how many it removed.
+func (e *Executor) RemoveUnreferencedArtifacts(ctx context.Context) (removed int, err error) {
+	if e.cfg.Artifacts == nil {
+		return 0, nil
+	}
+	err = e.artifactLifecycle(func() error {
+		hashes, err := e.cfg.Artifacts.Blobs()
+		if err != nil {
+			return err
+		}
+		var failed error
+		for _, hash := range hashes {
+			referenced, err := e.cfg.Store.ArtifactReferenced(ctx, hash)
+			if err != nil {
+				return errors.Join(failed, fmt.Errorf("artifact %s: %w", hash, err))
+			}
+			if referenced {
+				continue
+			}
+			if err := e.cfg.Artifacts.Remove(hash); err != nil && !errors.Is(err, os.ErrNotExist) {
+				// One blob held open (busy on Windows) must not keep the rest.
+				failed = errors.Join(failed, fmt.Errorf("remove artifact %s: %w", hash, err))
+				continue
+			}
+			removed++
+		}
+		return failed
+	})
+	return removed, err
 }
 
 // boundEvent returns the event as it is stored: unchanged when its encoding fits

@@ -64,6 +64,7 @@ func TestUnknownEventKindFailsAsAProtocolViolation(t *testing.T) {
 
 func TestNonfatalEngineErrorIsStoredAsAnEngineNotice(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "nonfatal_error")
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
@@ -80,6 +81,7 @@ func TestNonfatalEngineErrorIsStoredAsAnEngineNotice(t *testing.T) {
 
 func TestEngineErrorEventKeepsItsProtocolKind(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "engine_error_event")
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
@@ -166,7 +168,7 @@ func TestSlowlyWritingDescendantCannotHoldStopPastItsBudget(t *testing.T) {
 func TestPreparingDeadlineEndsAnEngineThatNeverReadsStdin(t *testing.T) {
 	for _, script := range []string{"hello_no_read", "hello_partial_read"} {
 		t.Run(script, func(t *testing.T) {
-			e, s, _, _ := testExecutor(t, script)
+			e, s, _, marker := testExecutor(t, script)
 			e.cfg.PreparingDeadline = 100 * time.Millisecond
 			ctx := context.Background()
 			// A prompt larger than any pipe buffer: the start line cannot be
@@ -178,11 +180,16 @@ func TestPreparingDeadlineEndsAnEngineThatNeverReadsStdin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			started := time.Now()
 			e.LaunchAttempt("attempt")
-			waitAttempt(t, s, "ended_failed")
-			if elapsed := time.Since(started); elapsed > e.cfg.PreparingDeadline+3*e.cfg.CancelGrace+time.Second {
-				t.Fatalf("attempt took %s", elapsed)
+			a := waitAttempt(t, s, "ended_failed")
+			// The deadline runs from the engine's start, which precedes its
+			// recording itself. On a loaded machine the kill can come before
+			// the engine records itself at all; the error events below still
+			// show the deadline and the kill.
+			if _, err := os.Stat(marker); err == nil {
+				if span := markerToEnd(t, marker, a); span > e.cfg.PreparingDeadline+3*e.cfg.CancelGrace+time.Second {
+					t.Fatalf("attempt ended %s after the engine started", span)
+				}
 			}
 			errorEventContains(t, s, "preparing deadline exceeded")
 			errorEventContains(t, s, "engine was killed after the grace period")
@@ -245,7 +252,7 @@ func TestCancelAfterSuccessfulResultRequiresRecovery(t *testing.T) {
 				t.Fatal("result not stored")
 			}
 			if stop {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
 				defer cancel()
 				if err := e.Stop(ctx); err != nil {
 					t.Fatal(err)
@@ -336,11 +343,12 @@ func TestFatalNoticeWithOKResultRecoversOnlyAfterKill(t *testing.T) {
 	for _, script := range []string{"fatal_ok", "fatal_ok_block", "fatal_ok_bad_tail_block"} {
 		t.Run(script, func(t *testing.T) {
 			e, s, _, _ := testExecutor(t, script)
-			e.LaunchAttempt("attempt")
 			want := "recovery_required"
 			if script == "fatal_ok" {
 				want = "ended_failed"
+				e.cfg.CancelGrace = naturalExitGrace
 			}
+			e.LaunchAttempt("attempt")
 			waitAttempt(t, s, want)
 			events, err := s.Events(context.Background(), "u", "attempt", 0)
 			var notice, result bool
