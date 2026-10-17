@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -63,23 +64,7 @@ func TestCaptureReproducesStagedUnstagedAndSelectedUntrackedWork(t *testing.T) {
 	}
 
 	// Applied to a clone of the base, the snapshot gives the original's work tree and index.
-	clone := tempDir(t)
-	git(t, clone, "clone", "-q", "--no-hardlinks", dir, ".")
-	git(t, clone, "checkout", "-q", "--detach", head)
-	patches := tempDir(t)
-	for name, data := range map[string][]byte{"staged.patch": c.Staged, "unstaged.patch": c.Unstaged} {
-		if err := os.WriteFile(filepath.Join(patches, name), data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	git(t, clone, "apply", "--index", filepath.Join(patches, "staged.patch"))
-	git(t, clone, "apply", filepath.Join(patches, "unstaged.patch"))
-	for _, f := range c.Untracked {
-		if f.Mode != "100644" && f.Mode != "100755" {
-			t.Errorf("%s: mode %q", f.Path, f.Mode)
-		}
-		write(t, filepath.Join(clone, filepath.FromSlash(f.Path)), string(f.Content))
-	}
+	clone := reproduce(t, dir, head, c)
 	for _, p := range []string{"text.txt", "bin.dat", "crlf.txt", "gone.txt", "new.txt", "u/bin.raw", "u/crlf.txt"} {
 		want, wantErr := os.ReadFile(filepath.Join(dir, filepath.FromSlash(p)))
 		got, gotErr := os.ReadFile(filepath.Join(clone, filepath.FromSlash(p)))
@@ -92,6 +77,135 @@ func TestCaptureReproducesStagedUnstagedAndSelectedUntrackedWork(t *testing.T) {
 	}
 	if want, got := git(t, dir, "ls-files", "-s"), git(t, clone, "ls-files", "-s"); want != got {
 		t.Errorf("index:\noriginal\n%s\nreproduced\n%s", want, got)
+	}
+}
+
+// reproduce applies a capture to a clone of dir at head: the staged patch to
+// the index and work tree, the unstaged one to the work tree, and the files.
+func reproduce(t *testing.T, dir, head string, c Capture, config ...string) string {
+	t.Helper()
+	clone := tempDir(t)
+	git(t, clone, append(append([]string{"clone", "-q", "--no-hardlinks", "--no-checkout"}, config...), dir, ".")...)
+	git(t, clone, "checkout", "-q", "--detach", head)
+	patches := tempDir(t)
+	for _, p := range []struct {
+		name string
+		data []byte
+		args []string
+	}{{"staged.patch", c.Staged, []string{"--index"}}, {"unstaged.patch", c.Unstaged, nil}} {
+		if len(p.data) == 0 {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(patches, p.name), p.data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git(t, clone, append(append([]string{"apply"}, p.args...), filepath.Join(patches, p.name))...)
+	}
+	for _, f := range c.Untracked {
+		if f.Mode != "100644" && f.Mode != "100755" {
+			t.Errorf("%s: mode %q", f.Path, f.Mode)
+		}
+		write(t, filepath.Join(clone, filepath.FromSlash(f.Path)), string(f.Content))
+	}
+	return clone
+}
+
+func TestCaptureReproducesAStagedRename(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"a.txt": "one\ntwo\nthree\n"})
+	head := git(t, dir, "rev-parse", "HEAD")
+	git(t, dir, "mv", "a.txt", "b.txt")
+	c, err := capture(newInspector(t), dir, nil)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if !bytes.Contains(c.Staged, []byte("rename from a.txt\nrename to b.txt")) || len(c.Unstaged) != 0 {
+		t.Fatalf("staged %q, unstaged %q", c.Staged, c.Unstaged)
+	}
+	clone := reproduce(t, dir, head, c)
+	if want, got := git(t, dir, "ls-files", "-s"), git(t, clone, "ls-files", "-s"); want != got {
+		t.Errorf("index:\noriginal\n%s\nreproduced\n%s", want, got)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "a.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the renamed file is still there: %v", err)
+	}
+}
+
+func TestCaptureReproducesATrackedModeChange(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows files carry no executable bit")
+	}
+	dir := newRepo(t, map[string]string{"run.sh": "#!/bin/sh\n"})
+	head := git(t, dir, "rev-parse", "HEAD")
+	if err := os.Chmod(filepath.Join(dir, "run.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c, err := capture(newInspector(t), dir, nil)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if !bytes.Contains(c.Unstaged, []byte("old mode 100644\nnew mode 100755")) || len(c.Staged) != 0 {
+		t.Fatalf("staged %q, unstaged %q", c.Staged, c.Unstaged)
+	}
+	info, err := os.Stat(filepath.Join(reproduce(t, dir, head, c), "run.sh"))
+	if err != nil || info.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("reproduced mode %v: %v", info.Mode(), err)
+	}
+}
+
+func TestCaptureTakesAnIntentToAddFileAsNewInTheUnstagedPatch(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	head := git(t, dir, "rev-parse", "HEAD")
+	write(t, filepath.Join(dir, "later.txt"), "later\n")
+	git(t, dir, "add", "-N", "later.txt")
+	c, err := capture(newInspector(t), dir, nil)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if len(c.Staged) != 0 || !bytes.Contains(c.Unstaged, []byte("new file mode 100644")) || !bytes.Contains(c.Unstaged, []byte("+later")) {
+		t.Fatalf("staged %q, unstaged %q", c.Staged, c.Unstaged)
+	}
+	// The file is reproduced; its intent-to-add index entry is not.
+	clone := reproduce(t, dir, head, c)
+	if got, err := os.ReadFile(filepath.Join(clone, "later.txt")); err != nil || string(got) != "later\n" {
+		t.Fatalf("reproduced %q: %v", got, err)
+	}
+	if listed := git(t, clone, "ls-files", "later.txt"); listed != "" {
+		t.Fatalf("the reproduced index lists %q", listed)
+	}
+}
+
+func TestCaptureWithAutocrlfHasNormalisedPatches(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("core.autocrlf=true is the Windows default")
+	}
+	dir := newRepo(t, map[string]string{"lines.txt": "a\nb\n"})
+	head := git(t, dir, "rev-parse", "HEAD")
+	git(t, dir, "config", "core.autocrlf", "true")
+	write(t, filepath.Join(dir, "lines.txt"), "a\r\nb\r\nc\r\n")
+	c, err := capture(newInspector(t), dir, nil)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if bytes.Contains(c.Unstaged, []byte("\r")) || !bytes.Contains(c.Unstaged, []byte("+c\n")) || bytes.Contains(c.Unstaged, []byte("-a")) {
+		t.Fatalf("unstaged %q", c.Unstaged)
+	}
+	clone := reproduce(t, dir, head, c, "-c", "core.autocrlf=true")
+	if got, err := os.ReadFile(filepath.Join(clone, "lines.txt")); err != nil || string(got) != "a\r\nb\r\nc\r\n" {
+		t.Fatalf("reproduced %q: %v", got, err)
+	}
+}
+
+func TestCaptureRefusesABlockerThatAppearsDuringCapture(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	in := newInspector(t)
+	in.beforeRecheck = func() { write(t, filepath.Join(dir, ".git", "MERGE_HEAD"), git(t, dir, "rev-parse", "HEAD")+"\n") }
+	if _, err := capture(in, dir, nil); !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("capture = %v", err)
 	}
 }
 
@@ -237,6 +351,41 @@ func TestCaptureRefusesALinkSwappedInAfterInspection(t *testing.T) {
 	}
 }
 
+func TestCaptureRefusesALinkSwappedInBetweenItsCheckAndItsOpen(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	write(t, filepath.Join(dir, "d", "f.txt"), "inside\n")
+	outside := tempDir(t)
+	write(t, filepath.Join(outside, "f.txt"), "inside\n")
+	in := newInspector(t)
+	in.beforeOpen = func() {
+		if err := os.RemoveAll(filepath.Join(dir, "d")); err != nil {
+			t.Error(err)
+		}
+		makeLink(t, outside, filepath.Join(dir, "d"))
+	}
+	// The read reaches the outside copy; only the check after it sees the link.
+	if _, err := capture(in, dir, []string{"d/f.txt"}); pathCode(err) != PathInvalid {
+		t.Fatalf("capture = %v", err)
+	}
+}
+
+func TestCaptureRefusesADirectoryReplacedByAFileAsChanged(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	write(t, filepath.Join(dir, "d", "f.txt"), "inside\n")
+	in := newInspector(t)
+	in.afterInspect = func() {
+		if err := os.RemoveAll(filepath.Join(dir, "d")); err != nil {
+			t.Error(err)
+		}
+		write(t, filepath.Join(dir, "d"), "now a file\n")
+	}
+	if _, err := capture(in, dir, []string{"d/f.txt"}); !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("capture = %v", err)
+	}
+}
+
 func TestCaptureRefusesAFileReplacedByADirectoryAfterInspection(t *testing.T) {
 	t.Parallel()
 	dir := newRepo(t, nil)
@@ -260,7 +409,8 @@ func TestCaptureRefusesCredentialLookingPathsUnlessIncluded(t *testing.T) {
 	sensitive := []string{
 		".env", ".env.local", "config/.ENV.production", "tls/server.pem", "server.key", "id_rsa", "id_rsa.pub",
 		".npmrc", ".netrc", "_netrc", ".pypirc", "cert.p12", "cert.PFX", "vault.kdbx", ".aws/config",
-		"home/.ssh/known_hosts", "credentials", "gcloud/credentials.json",
+		"home/.ssh/known_hosts", "credentials", "gcloud/credentials.json", ".git-credentials", "id_ed25519",
+		"id_ed25519.pub", "id_ecdsa", "id_dsa",
 	}
 	dir := newRepo(t, nil)
 	for _, p := range sensitive {
@@ -329,5 +479,39 @@ func TestGitOutputOverItsCapIsTooLarge(t *testing.T) {
 	}
 	if out, err := in.Git.runCapped(context.Background(), "", "", 1<<10, "version"); err != nil || !bytes.HasPrefix(out, []byte("git version")) {
 		t.Fatalf("run = %q, %v", out, err)
+	}
+}
+
+func TestBadPathRefusesAGitDirectoryAndItsShortName(t *testing.T) {
+	t.Parallel()
+	for _, p := range []string{".git", ".GIT/config", "a/.Git/hooks/x", "GIT~1/config", "a/git~12/x", "Git~3"} {
+		if badPath(p) == "" {
+			t.Errorf("%q is accepted", p)
+		}
+	}
+	for _, p := range []string{".gitignore", "a/.github/x", "git~", "git~a", "xgit~1", "git~1x", ".git.txt"} {
+		if reason := badPath(p); reason != "" {
+			t.Errorf("%q: %s", p, reason)
+		}
+	}
+}
+
+func TestIgnoredFilesAreListedWithinTheCap(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{".gitignore": "node_modules/\n"})
+	for i := range 20 {
+		write(t, filepath.Join(dir, "node_modules", fmt.Sprintf("module-%02d.js", i)), "x\n")
+	}
+	in := newInspector(t)
+	mirror := tempDir(t)
+	if _, err := in.inspect(context.Background(), dir, mirror); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.ignored(context.Background(), mirror, dir, []string{"node_modules"}, 64); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("ignored over the cap = %v", err)
+	}
+	found, err := in.ignored(context.Background(), mirror, dir, []string{"node_modules/module-03.js"}, 1<<10)
+	if err != nil || !found["node_modules/module-03.js"] {
+		t.Fatalf("ignored = %v, %v", found, err)
 	}
 }

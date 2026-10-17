@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -489,7 +490,10 @@ func (f fakeCapturer) Capture(context.Context, string, source.Selection) (source
 	return source.Capture{}, f.err
 }
 
-type countingWriter struct{ writes atomic.Int32 }
+type countingWriter struct {
+	sync.Mutex
+	writes atomic.Int32
+}
 
 func (c *countingWriter) Write(context.Context, io.Reader, int64) (artifact.Ref, error) {
 	c.writes.Add(1)
@@ -558,5 +562,42 @@ func TestSnapshotOfAnotherRepositoryAtTheSourcePathIsRefused(t *testing.T) {
 	status, data := p.call(t, "alice", "POST", "/v1/projects/"+project.ID+"/snapshots", "snap", map[string][]string{})
 	if status != 409 || !strings.Contains(string(data), `"source_changed"`) {
 		t.Fatalf("snapshot = %d %s", status, data)
+	}
+}
+
+// heldCapturer holds its first capture until released; each capture is refused.
+type heldCapturer struct {
+	calls            atomic.Int32
+	entered, release chan struct{}
+}
+
+func (c *heldCapturer) Capture(context.Context, string, source.Selection) (source.Capture, error) {
+	if c.calls.Add(1) == 1 {
+		close(c.entered)
+		<-c.release
+	}
+	return source.Capture{}, source.ErrSourceChanged
+}
+
+func TestASecondSnapshotWhileOneIsCapturingIsBusy(t *testing.T) {
+	held := &heldCapturer{entered: make(chan struct{}), release: make(chan struct{})}
+	p := newProjectsFixture(t, func(e *Execution) { e.Capturer = held })
+	project := p.importRepo(t, "alice", "import-1", newRepo(t))
+	path := "/v1/projects/" + project.ID + "/snapshots"
+	first := make(chan int, 1)
+	go func() {
+		status, _ := p.call(t, "alice", "POST", path, "snap-1", map[string][]string{})
+		first <- status
+	}()
+	<-held.entered
+	if status, data := p.call(t, "alice", "POST", path, "snap-2", map[string][]string{}); status != 429 || !strings.Contains(string(data), `"error":"capture_busy"`) {
+		t.Errorf("a snapshot while another captures = %d %s", status, data)
+	}
+	close(held.release)
+	if status := <-first; status != 409 {
+		t.Fatalf("the first snapshot = %d", status)
+	}
+	if status, data := p.call(t, "alice", "POST", path, "snap-3", map[string][]string{}); status != 409 || !strings.Contains(string(data), `"source_changed"`) {
+		t.Fatalf("a snapshot after the first ended = %d %s", status, data)
 	}
 }

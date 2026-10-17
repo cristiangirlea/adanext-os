@@ -105,8 +105,9 @@ type Inspector struct {
 	Git        *Git
 	MirrorRoot string
 	Config     ConfigFiles
-	// Test seams in Capture: after its first inspection, and before the second.
-	afterInspect, beforeRecheck func()
+	// Test seams in Capture: after its first inspection, before the second,
+	// and in readSelected between the link check and the open.
+	afterInspect, beforeRecheck, beforeOpen func()
 }
 
 // Inspect reads the repository whose work tree root is path. Blockers are

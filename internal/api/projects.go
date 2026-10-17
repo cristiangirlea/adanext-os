@@ -272,6 +272,12 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, errorBody{"artifacts_unavailable", "the artifact store is not open"})
 		return
 	}
+	// One capture at a time: each holds its patches and files in memory until stored.
+	if !h.capturing.CompareAndSwap(false, true) {
+		writeJSON(w, 429, errorBody{"capture_busy", "another snapshot is being taken; try again"})
+		return
+	}
+	defer h.capturing.Store(false)
 	c, err := h.exec.Capturer.Capture(r.Context(), src.Path, sel)
 	if err != nil {
 		captureError(w, err)
@@ -287,14 +293,27 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	// Content is written before the transaction that references it. Blobs a
-	// failed transaction leaves are unreferenced, so no /v1 read serves them;
-	// they are not removed here, since the executor may be referencing the
-	// same content under its own lock.
+	cached, err := h.storeSnapshot(r, user, k, scope, snap, c)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeCached(w, cached)
+}
+
+// storeSnapshot writes the capture's content and records the snapshot that
+// references it, holding the artifact lifecycle lock from the first write
+// until the transaction returns, so no discard can remove reused content
+// before the reference commits. Blobs a failed transaction leaves are
+// unreferenced, so no /v1 read serves them, and the next sweep removes them.
+func (h *handler) storeSnapshot(r *http.Request, user, k string, scope *store.Scope, snap store.Snapshot, c source.Capture) ([]byte, error) {
+	h.exec.Writer.Lock()
+	defer h.exec.Writer.Unlock()
 	write := func(data []byte) (store.ArtifactRef, error) {
 		ref, err := h.exec.Writer.Write(r.Context(), bytes.NewReader(data), int64(len(data)))
 		return store.ArtifactRef{Hash: ref.Hash, Size: ref.Size}, err
 	}
+	var err error
 	if snap.Staged, err = write(c.Staged); err == nil {
 		snap.Unstaged, err = write(c.Unstaged)
 	}
@@ -307,10 +326,9 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		snap.Untracked = append(snap.Untracked, store.SnapshotFile{Path: f.Path, Mode: f.Mode, Artifact: ref})
 	}
 	if err != nil {
-		writeInternalError(w, fmt.Errorf("snapshot artifact: %w", err))
-		return
+		return nil, fmt.Errorf("snapshot artifact: %w", err)
 	}
-	h.mutate(w, r, user, k, scope, "", func(tx *store.Tx) (int, any, error) {
+	return h.commit(r, user, k, scope, "", func(tx *store.Tx) (int, any, error) {
 		recorded, err := tx.RecordSnapshot(r.Context(), snap)
 		if err != nil {
 			return 0, nil, err

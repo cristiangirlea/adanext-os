@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,7 +37,23 @@ type Store struct {
 	fs           filesystem
 	staleSkipped int
 	staleErr     error
+	lifecycle    sync.Mutex
 }
+
+// Lock takes the store's lifecycle lock, which every writer that stores
+// outside a transaction holds from its first Write, which may reuse content
+// already on disk, through the commit that references it or the discard that
+// removes it. Invariant: while a writer holds the lock, no other writer can
+// reuse a blob it may still discard, so a committed reference never points at
+// content a failed writer removed afterwards, and a discard's or sweep's
+// reference check cannot be overtaken by a commit. A writer takes the lock
+// before its transaction opens and releases it after the transaction returns,
+// never inside it, since a writer holding the lock may be waiting on the
+// database.
+func (s *Store) Lock() { s.lifecycle.Lock() }
+
+// Unlock releases the lifecycle lock.
+func (s *Store) Unlock() { s.lifecycle.Unlock() }
 
 type file interface {
 	io.Writer

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/artifact"
@@ -50,8 +51,9 @@ type handler struct {
 	// shared from its transaction through the scheduler handoff, the stop
 	// exclusively from before its transaction through the executor handoff.
 	admission         sync.RWMutex
-	stopping          bool   // Set under admission by a stop that committed; starts are then refused.
-	beforeStopHandoff func() // Test seam between the stop's commit and the executor handoff.
+	stopping          bool        // Set under admission by a stop that committed; starts are then refused.
+	beforeStopHandoff func()      // Test seam between the stop's commit and the executor handoff.
+	capturing         atomic.Bool // Held by the one snapshot capturing and storing at a time.
 }
 
 // AttemptRunner is the narrow API-to-executor notification boundary.
@@ -92,8 +94,10 @@ type Capturer interface {
 }
 
 // ArtifactWriter stores content by its hash; *artifact.Store satisfies it.
+// Its lock is the store's lifecycle lock, shared with the executor.
 type ArtifactWriter interface {
 	Write(ctx context.Context, r io.Reader, limit int64) (artifact.Ref, error)
+	sync.Locker
 }
 
 type Execution struct {
@@ -338,8 +342,18 @@ type cachedResponse struct {
 }
 
 func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, revision string, fn func(*store.Tx) (int, any, error)) bool {
+	cached, err := h.commit(r, user, k, scope, revision, fn)
+	if err != nil {
+		storeError(w, err)
+		return false
+	}
+	return writeCached(w, cached)
+}
+
+// commit is mutate's transaction, which returns the response to write.
+func (h *handler) commit(r *http.Request, user, k string, scope *store.Scope, revision string, fn func(*store.Tx) (int, any, error)) ([]byte, error) {
 	body := r.Context().Value(bodyKey{}).([]byte)
-	cached, err := h.store.Do(r.Context(), user, k, hash(r, body, revision), scope, func(tx *store.Tx) ([]byte, error) {
+	return h.store.Do(r.Context(), user, k, hash(r, body, revision), scope, func(tx *store.Tx) ([]byte, error) {
 		status, value, err := fn(tx)
 		if err != nil {
 			return nil, err
@@ -350,11 +364,6 @@ func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string,
 		}
 		return json.Marshal(cachedResponse{status, payload})
 	})
-	if err != nil {
-		storeError(w, err)
-		return false
-	}
-	return writeCached(w, cached)
 }
 
 func writeCached(w http.ResponseWriter, cached []byte) bool {

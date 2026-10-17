@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // Refusal codes for a selected untracked path.
@@ -114,7 +115,7 @@ func (in *Inspector) Capture(ctx context.Context, path string, sel Selection) (C
 	}
 	total := int64(len(c.Staged) + len(c.Unstaged))
 	for _, p := range selected {
-		f, err := readSelected(root, p)
+		f, err := in.readSelected(root, p)
 		if err != nil {
 			return Capture{}, err
 		}
@@ -173,7 +174,7 @@ func (in *Inspector) checkSelection(ctx context.Context, mirror, root string, un
 			unlisted = append(unlisted, p)
 		}
 	}
-	ignored, err := in.ignored(ctx, mirror, root, unlisted)
+	ignored, err := in.ignored(ctx, mirror, root, unlisted, maxPatchSize)
 	if err != nil {
 		return nil, err
 	}
@@ -196,8 +197,9 @@ func (in *Inspector) checkSelection(ctx context.Context, mirror, root string, un
 }
 
 // ignored asks git, through the mirror's excludes, which of paths are
-// existing ignored untracked files; pathspecs are literal and batched.
-func (in *Inspector) ignored(ctx context.Context, mirror, root string, paths []string) (map[string]bool, error) {
+// existing ignored untracked files; pathspecs are literal and batched, and
+// each listing is capped at limit bytes.
+func (in *Inspector) ignored(ctx context.Context, mirror, root string, paths []string, limit int) (map[string]bool, error) {
 	found := map[string]bool{}
 	for len(paths) > 0 {
 		args := []string{"status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignored=traditional", "--no-renames", "--"}
@@ -207,7 +209,7 @@ func (in *Inspector) ignored(ctx context.Context, mirror, root string, paths []s
 			size += len(paths[0]) + 11
 			paths = paths[1:]
 		}
-		out, err := in.Git.run(ctx, mirror, root, args...)
+		out, err := in.Git.runCapped(ctx, mirror, root, limit, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -235,7 +237,8 @@ func init() {
 // badPath is why p cannot name a work-tree file on every system Ada runs
 // on, or "" when it can: git's untracked paths are slash-separated and
 // relative, and Windows reads a stream, a drive, a device name or a trailing
-// dot or space as something else.
+// dot or space as something else. A .git component, or git~N (its Windows
+// short name), would name a git directory.
 func badPath(p string) string {
 	switch {
 	case p == "":
@@ -260,12 +263,21 @@ func badPath(p string) string {
 		case strings.HasSuffix(part, ".") || strings.HasSuffix(part, " "):
 			return "a component ending in a dot or a space"
 		}
+		if lower := strings.ToLower(part); lower == ".git" || shortGitName(lower) {
+			return "a .git directory or its short name"
+		}
 		stem, _, _ := strings.Cut(part, ".")
 		if reserved[strings.ToLower(strings.TrimRight(stem, " "))] {
 			return "a Windows device name"
 		}
 	}
 	return ""
+}
+
+// shortGitName is git~N, the 8.3 short name Windows can give .git.
+func shortGitName(lower string) bool {
+	n, ok := strings.CutPrefix(lower, "git~")
+	return ok && n != "" && strings.Trim(n, "0123456789") == ""
 }
 
 // sensitive reports a path that looks like a credential by its name or by
@@ -279,7 +291,7 @@ func sensitive(p string) bool {
 	}
 	base := parts[len(parts)-1]
 	switch base {
-	case ".npmrc", ".netrc", "_netrc", ".pypirc", "credentials":
+	case ".npmrc", ".netrc", "_netrc", ".pypirc", "credentials", ".git-credentials":
 		return true
 	}
 	for _, ext := range []string{".pem", ".key", ".p12", ".pfx", ".kdbx"} {
@@ -287,14 +299,19 @@ func sensitive(p string) bool {
 			return true
 		}
 	}
-	return strings.HasPrefix(base, ".env") || strings.HasPrefix(base, "id_rsa") || strings.HasPrefix(base, "credentials.")
+	for _, prefix := range []string{".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials."} {
+		if strings.HasPrefix(base, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // readSelected reads a selected file under root with no link or redirecting
 // reparse point on its path, as a regular file within the size cap, and
 // checks after the read that the path still leads, link-free, to the file
 // read.
-func readSelected(root, rel string) (File, error) {
+func (in *Inspector) readSelected(root, rel string) (File, error) {
 	full := filepath.Join(root, filepath.FromSlash(rel))
 	refuse := func(err error) (File, error) {
 		switch {
@@ -302,13 +319,17 @@ func readSelected(root, rel string) (File, error) {
 			return File{}, &PathError{Code: PathInvalid, Path: rel, Reason: "a link or junction on its path"}
 		case errors.Is(err, errNotRegular):
 			return File{}, &PathError{Code: PathInvalid, Path: rel, Reason: "not a regular file"}
-		case errors.Is(err, fs.ErrNotExist):
+		case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+			// Gone, or a directory on its path is now a file.
 			return File{}, ErrSourceChanged
 		}
 		return File{}, err
 	}
 	if err := noLinks(root, full); err != nil {
 		return refuse(err)
+	}
+	if in.beforeOpen != nil {
+		in.beforeOpen()
 	}
 	f, err := openFile(full)
 	if err != nil {
