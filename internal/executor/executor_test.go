@@ -496,6 +496,31 @@ func testExecutor(t *testing.T, script string) (*Executor, *store.Store, string,
 	return e, s, dir, marker
 }
 
+// naturalExitGrace is the CancelGrace for a test whose engine exits by itself
+// after its result or a cancel. There the grace only sets when the executor
+// would kill the engine, which the test never means to reach: it is long
+// enough that a loaded machine's slow exit does not reach it either, and an
+// engine that exits costs none of it.
+const naturalExitGrace = 2 * time.Second
+
+// markerToEnd is how long after the marker's last write the attempt recorded
+// its end. That write is the engine, or the descendant it starts, recording
+// itself, so the span leaves out the launch before it (the engine's hash, the
+// process start) and the polling after the end: what is left is what the
+// executor's deadlines bound.
+func markerToEnd(t *testing.T, marker string, a store.Attempt) time.Duration {
+	t.Helper()
+	info, err := os.Stat(marker)
+	if err != nil {
+		t.Fatalf("the engine never recorded itself: %v", err)
+	}
+	ended, err := time.Parse(time.RFC3339Nano, a.Ended)
+	if err != nil {
+		t.Fatalf("attempt end %q: %v", a.Ended, err)
+	}
+	return ended.Sub(info.ModTime())
+}
+
 func waitAttempt(t *testing.T, s *store.Store, want string) store.Attempt {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
@@ -518,6 +543,7 @@ func waitAttempt(t *testing.T, s *store.Store, want string) store.Attempt {
 
 func TestHappyEngineRunRecordsOrderedEventsAndVerifiesTask(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
 	notifications := &notificationCounter{}
 	e.cfg.Hub = notifications
 	e.LaunchAttempt("attempt")
@@ -546,7 +572,7 @@ func TestHappyEngineRunRecordsOrderedEventsAndVerifiesTask(t *testing.T) {
 func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		e, s, _, _ := testExecutor(t, "delayed_exit")
-		e.cfg.CancelGrace = 200 * time.Millisecond
+		e.cfg.CancelGrace = naturalExitGrace
 		e.LaunchAttempt("attempt")
 		waitAttempt(t, s, "ended_ok")
 	}
@@ -623,6 +649,7 @@ func TestBrokenProtocolStreamsFailWithAnErrorEvent(t *testing.T) {
 
 func TestLargeFinalIsStoredAsAReferencedArtifact(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "big")
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	events, _ := s.Events(context.Background(), "u", "attempt", 0)
@@ -740,13 +767,15 @@ func TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine(t *testing.T) {
 	for _, script := range []string{"cancel", "ignore_cancel"} {
 		t.Run(script, func(t *testing.T) {
 			e, s, _, _ := testExecutor(t, script)
-			e.LaunchAttempt("attempt")
-			waitAttempt(t, s, "running")
-			e.CancelTask("task")
 			want := "canceled"
 			if script == "ignore_cancel" {
 				want = "recovery_required"
+			} else {
+				e.cfg.CancelGrace = naturalExitGrace
 			}
+			e.LaunchAttempt("attempt")
+			waitAttempt(t, s, "running")
+			e.CancelTask("task")
 			waitAttempt(t, s, want)
 			task, _ := s.Task(context.Background(), "u", "task")
 			if string(task.State) != want {
@@ -771,9 +800,10 @@ func TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine(t *testing.T) {
 
 func TestOrderlyStopCancelsARunningAttempt(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "cancel")
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "running")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
 	defer cancel()
 	if err := e.Stop(ctx); err != nil {
 		t.Fatal(err)
@@ -792,7 +822,7 @@ func TestStopBeforeAcceptanceInterruptsThePreparingTask(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "slow_accept")
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "launching")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
 	defer cancel()
 	if err := e.Stop(ctx); err != nil {
 		t.Fatal(err)
@@ -858,11 +888,12 @@ func TestStartOptionsFollowHello(t *testing.T) {
 		t.Run(tc.script+"_"+tc.field, func(t *testing.T) {
 			e, s, _, marker := testExecutor(t, tc.script)
 			setAttemptOptions(t, s, tc.model, tc.effort)
-			e.LaunchAttempt("attempt")
 			want := "ended_failed"
 			if tc.accepted {
 				want = "ended_ok"
+				e.cfg.CancelGrace = naturalExitGrace
 			}
+			e.LaunchAttempt("attempt")
 			waitAttempt(t, s, want)
 			lines := markerLines(t, marker)
 			var start string
@@ -962,6 +993,7 @@ func TestFatalErrorAndResultAreBothStored(t *testing.T) {
 func TestEngineEnvironmentIsAllowListed(t *testing.T) {
 	t.Setenv("SECRET_TEST_VAR", "must-not-leak")
 	e, s, _, marker := testExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	for _, line := range markerLines(t, marker) {
@@ -981,6 +1013,7 @@ func TestStderrIsCappedAndPrivate(t *testing.T) {
 		t.Skip("Unix mode bits")
 	}
 	e, s, dir, _ := testExecutor(t, "stderr_cap")
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	info, err := os.Stat(filepath.Join(dir, "attempts", "attempt", "engine.stderr"))
@@ -995,11 +1028,13 @@ func TestStderrIsCappedAndPrivate(t *testing.T) {
 func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "child_stdout")
 	cleanupGrandchild(t, marker)
-	started := time.Now()
 	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "ended_ok")
-	if elapsed := time.Since(started); elapsed > 3*time.Second {
-		t.Fatalf("executor waited %s for descendant stdout", elapsed)
+	a := waitAttempt(t, s, "ended_ok")
+	waitGrandchildMarker(t, marker)
+	// The descendant holds stdout for two seconds after recording itself; the
+	// attempt ends a grace period after the engine's exit instead.
+	if span := markerToEnd(t, marker, a); span > 3*e.cfg.CancelGrace+time.Second {
+		t.Fatalf("executor waited %s for descendant stdout", span)
 	}
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
 	if err != nil {
@@ -1052,12 +1087,13 @@ func TestExitedEngineWithDescendantStdoutEndsPromptly(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "exit_with_child_stdout")
 	cleanupGrandchild(t, marker)
 	e.cfg.CancelGrace = 200 * time.Millisecond
-	started := time.Now()
 	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "ended_failed")
+	a := waitAttempt(t, s, "ended_failed")
 	waitGrandchildMarker(t, marker)
-	if elapsed := time.Since(started); elapsed > 3*e.cfg.CancelGrace+time.Second {
-		t.Fatalf("attempt took %s", elapsed)
+	// The engine exits once the descendant has recorded itself, and the
+	// descendant holds stdout for two seconds more.
+	if span := markerToEnd(t, marker, a); span > 3*e.cfg.CancelGrace+time.Second {
+		t.Fatalf("attempt ended %s after the descendant started", span)
 	}
 	errorEventContains(t, s, "engine exited without result")
 }
@@ -1154,11 +1190,12 @@ func TestEOFRecordsOneMissingResultCause(t *testing.T) {
 
 func TestConcurrentLaunchOfSameAttemptStartsOnce(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
 	other := New(e.cfg)
 	go e.LaunchAttempt("attempt")
 	go other.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
 	defer cancel()
 	if err := e.Stop(ctx); err != nil {
 		t.Fatal(err)
