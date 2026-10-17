@@ -829,6 +829,33 @@ func TestOrderlyStopCancelsARunningAttempt(t *testing.T) {
 	cancelReached(t, marker)
 }
 
+func TestACancelWhileTheEngineIsBeingAcceptedReachesTheEngineAtOnce(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "cancel")
+	e.cfg.CancelGrace = naturalExitGrace
+	seen := make(chan struct{})
+	e.beforeCancel = func() { close(seen) }
+	var canceled time.Time
+	// The cancel arrives once the attempt is stored running and before the
+	// executor accepts the engine's events; the pause lets the cancel handling
+	// find the engine not yet accepted.
+	e.afterRunning = func() {
+		canceled = time.Now()
+		e.CancelTask("task")
+		<-seen
+		time.Sleep(50 * time.Millisecond)
+	}
+	e.LaunchAttempt("attempt")
+	a := waitAttempt(t, s, "canceled")
+	cancelReached(t, marker)
+	ended, err := time.Parse(time.RFC3339Nano, a.Ended)
+	if err != nil {
+		t.Fatalf("attempt end %q: %v", a.Ended, err)
+	}
+	if span := ended.Sub(canceled); span >= naturalExitGrace {
+		t.Fatalf("the attempt ended %s after its cancel", span)
+	}
+}
+
 // cancelReached checks that the engine read a cancel message, not only a
 // closed stdin, which the fake engine also answers with "canceled".
 func cancelReached(t *testing.T, marker string) {
