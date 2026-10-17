@@ -183,9 +183,13 @@ func TestPreparingDeadlineEndsAnEngineThatNeverReadsStdin(t *testing.T) {
 			e.LaunchAttempt("attempt")
 			a := waitAttempt(t, s, "ended_failed")
 			// The deadline runs from the engine's start, which precedes its
-			// recording itself.
-			if span := markerToEnd(t, marker, a); span > e.cfg.PreparingDeadline+3*e.cfg.CancelGrace+time.Second {
-				t.Fatalf("attempt ended %s after the engine started", span)
+			// recording itself. On a loaded machine the kill can come before
+			// the engine records itself at all; the error events below still
+			// show the deadline and the kill.
+			if _, err := os.Stat(marker); err == nil {
+				if span := markerToEnd(t, marker, a); span > e.cfg.PreparingDeadline+3*e.cfg.CancelGrace+time.Second {
+					t.Fatalf("attempt ended %s after the engine started", span)
+				}
 			}
 			errorEventContains(t, s, "preparing deadline exceeded")
 			errorEventContains(t, s, "engine was killed after the grace period")

@@ -265,6 +265,9 @@ func TestHelperFakeEngine(t *testing.T) {
 			Type string `json:"type"`
 		}
 		_ = json.NewDecoder(os.Stdin).Decode(&cancel)
+		// "cancel:cancel" only when the message arrived; a closed stdin
+		// leaves "cancel:".
+		mark("cancel:" + cancel.Type)
 		line(3, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "canceled"}})
 		os.Exit(0)
 	}
@@ -376,7 +379,7 @@ func TestHelperFakeEngine(t *testing.T) {
 			os.Exit(3)
 		}
 		// Wait until the child has written its identity before the parent exits.
-		for i := 0; i < 100; i++ {
+		for i := 0; i < 2000; i++ {
 			if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
 				break
 			}
@@ -571,10 +574,16 @@ func TestHappyEngineRunRecordsOrderedEventsAndVerifiesTask(t *testing.T) {
 
 func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
 	for i := 0; i < 50; i++ {
-		e, s, _, _ := testExecutor(t, "delayed_exit")
+		e, s, _, marker := testExecutor(t, "delayed_exit")
 		e.cfg.CancelGrace = naturalExitGrace
 		e.LaunchAttempt("attempt")
-		waitAttempt(t, s, "ended_ok")
+		a := waitAttempt(t, s, "ended_ok")
+		// The marker's last write is the start line, just before the result:
+		// an executor that waited for its timers instead of the exit would
+		// end a whole grace period later.
+		if span := markerToEnd(t, marker, a); span >= naturalExitGrace {
+			t.Fatalf("run %d ended %s after its result", i, span)
+		}
 	}
 }
 
@@ -766,7 +775,7 @@ func TestArtifactFileSystemDiskFullFailsTaskAndStopsEngine(t *testing.T) {
 func TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine(t *testing.T) {
 	for _, script := range []string{"cancel", "ignore_cancel"} {
 		t.Run(script, func(t *testing.T) {
-			e, s, _, _ := testExecutor(t, script)
+			e, s, _, marker := testExecutor(t, script)
 			want := "canceled"
 			if script == "ignore_cancel" {
 				want = "recovery_required"
@@ -793,13 +802,14 @@ func TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine(t *testing.T) {
 						t.Fatalf("clean cancellation recorded error: %+v", event)
 					}
 				}
+				cancelReached(t, marker)
 			}
 		})
 	}
 }
 
 func TestOrderlyStopCancelsARunningAttempt(t *testing.T) {
-	e, s, _, _ := testExecutor(t, "cancel")
+	e, s, _, marker := testExecutor(t, "cancel")
 	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "running")
@@ -816,6 +826,19 @@ func TestOrderlyStopCancelsARunningAttempt(t *testing.T) {
 	if err != nil || task.State != store.Canceled {
 		t.Fatalf("task = %+v: %v", task, err)
 	}
+	cancelReached(t, marker)
+}
+
+// cancelReached checks that the engine read a cancel message, not only a
+// closed stdin, which the fake engine also answers with "canceled".
+func cancelReached(t *testing.T, marker string) {
+	t.Helper()
+	for _, line := range markerLines(t, marker) {
+		if line == "cancel:cancel" {
+			return
+		}
+	}
+	t.Fatalf("the engine never received the cancel message: %q", markerLines(t, marker))
 }
 
 func TestStopBeforeAcceptanceInterruptsThePreparingTask(t *testing.T) {
