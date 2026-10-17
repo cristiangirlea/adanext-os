@@ -175,7 +175,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	stop := &coordinatorStop{requested: make(chan struct{})}
-	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Owner: ownerAccount, Stopper: stop}
+	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Writer: artifacts, Owner: ownerAccount, Stopper: stop}
 	// Without a usable git adad still serves; only inspection answers git_unavailable.
 	mirrors := filepath.Join(*stateDir, "inspect")
 	_ = os.RemoveAll(mirrors) // mirrors an earlier coordinator did not finish removing
@@ -183,7 +183,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "adad: inspection unavailable:", err)
 		execution.GitUnavailable = err.Error()
 	} else {
-		execution.Inspector = &source.Inspector{Git: git, MirrorRoot: mirrors, Config: source.DefaultConfigFiles(git.Path)}
+		inspector := &source.Inspector{Git: git, MirrorRoot: mirrors, Config: source.DefaultConfigFiles(git.Path)}
+		execution.Inspector, execution.Capturer = inspector, inspector
 	}
 	var local *executor.Executor
 	var stopOnce sync.Once
@@ -210,7 +211,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}()
 		// Before serving, so no launch can start a writer. A failure only
 		// costs disk space, since no API path reaches an unreferenced blob.
-		// Only the executor leaves orphans, so without an engine there is no sweep.
+		// Without an engine there is no sweep: a snapshot's orphans wait for a start with one.
 		if _, err := local.RemoveUnreferencedArtifacts(ctx); err != nil {
 			fmt.Fprintln(stderr, "adad: remove unreferenced artifacts:", err)
 		}

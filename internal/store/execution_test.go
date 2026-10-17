@@ -27,7 +27,10 @@ func TestVersionThreeAttemptMigratesForwardWithEmptyMode(t *testing.T) {
 	path := s.path
 	execute(t, s, "ALTER TABLE attempts DROP COLUMN mode")
 	execute(t, s, "DROP TABLE coordinator")
-	execute(t, s, "DELETE FROM schema_migrations WHERE version=4")
+	execute(t, s, "DROP TABLE snapshot_untracked")
+	execute(t, s, "DROP TABLE source_snapshots")
+	execute(t, s, "DROP TABLE project_sources")
+	execute(t, s, "DELETE FROM schema_migrations WHERE version>=4")
 	execute(t, s, "PRAGMA user_version=3")
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -113,7 +116,7 @@ func TestVersionFourAddsModeAndCoordinatorWithoutChangingOldAttempt(t *testing.T
 	s := openTestStore(t)
 	seed(t, s)
 	var version int
-	if err := s.db.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil || version != 4 {
+	if err := s.db.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil || version != 5 {
 		t.Fatalf("version = %d: %v", version, err)
 	}
 	var mode string

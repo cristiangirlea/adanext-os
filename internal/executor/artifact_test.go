@@ -21,6 +21,7 @@ import (
 
 	"github.com/cristiangirlea/ada-os/internal/api"
 	"github.com/cristiangirlea/ada-os/internal/artifact"
+	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
 
@@ -455,5 +456,91 @@ func TestTheSweepWaitsForAWriterHoldingTheLifecycleLock(t *testing.T) {
 	}
 	if got, err := os.ReadFile(blobPath(dir, content)); err != nil || !bytes.Equal(got, content) {
 		t.Fatalf("the committed blob: %d bytes, %v", len(got), err)
+	}
+}
+
+// signalLock tells the test when the snapshot handler takes the lifecycle lock.
+type signalLock struct {
+	*artifact.Store
+	locking chan struct{}
+}
+
+func (l signalLock) Lock() {
+	close(l.locking)
+	l.Store.Lock()
+}
+
+// sameContent captures one untracked file holding the given content.
+type sameContent struct {
+	src     store.ProjectSource
+	content []byte
+}
+
+func (c sameContent) Capture(context.Context, string, source.Selection) (source.Capture, error) {
+	identity := source.Identity{Path: c.src.Path, CommonDir: c.src.CommonDir}
+	return source.Capture{Inspection: source.Inspection{Identity: identity, Fingerprint: c.src.Fingerprint}, Untracked: []source.File{{Path: "same.json", Mode: "100644", Content: c.content}}}, nil
+}
+
+func TestADiscardNeverRemovesContentASnapshotCommitsMeanwhile(t *testing.T) {
+	e, s, dir, _ := testExecutor(t, "happy")
+	ctx := context.Background()
+	shared := oversizePayload("s")
+	var src store.ProjectSource
+	_, err := s.Do(ctx, "u", "import", "import", nil, func(tx *store.Tx) ([]byte, error) {
+		var err error
+		src, err = tx.ImportProject(ctx, "imported", "imported", store.ProjectSource{Path: "/repo", CommonDir: "/repo/.git", Fingerprint: "f"})
+		return []byte("ok"), err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := signalLock{e.cfg.Artifacts.(*artifact.Store), make(chan struct{})}
+	server := httptest.NewServer(api.New(s, api.NewHub(), func(*http.Request) (string, error) { return "u", nil }, api.Execution{Capturer: sameContent{src, shared}, Writer: lock}))
+	defer server.Close()
+	type response struct {
+		status int
+		body   []byte
+		err    error
+	}
+	snapshot := make(chan response, 1)
+	e.beforeRemove = func(string) {
+		// A snapshot stores the same content while this discard stands
+		// between its reference check and its removal: it waits at the
+		// shared lock, or without one commits before the removal.
+		go func() {
+			req, _ := http.NewRequest("POST", server.URL+"/v1/projects/imported/snapshots", strings.NewReader(`{"untracked":["same.json"]}`))
+			req.Header.Set("Idempotency-Key", "snap")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				snapshot <- response{err: err}
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			snapshot <- response{resp.StatusCode, body, err}
+		}()
+		select {
+		case <-lock.locking:
+			// The handler now waits at the lock this discard holds, so
+			// the wait runs out; a private executor lock lets it commit.
+			select {
+			case r := <-snapshot:
+				t.Errorf("the snapshot committed while the discard held the lock: %d %s", r.status, r.body)
+				snapshot <- r
+			case <-time.After(300 * time.Millisecond):
+			}
+		case r := <-snapshot:
+			snapshot <- r
+		}
+	}
+	if err := e.append(store.Attempt{ID: "missing"}, "event", shared, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("append to a missing attempt: %v", err)
+	}
+	r := <-snapshot
+	if r.err != nil || r.status != 201 {
+		t.Fatalf("snapshot = %d %s: %v", r.status, r.body, r.err)
+	}
+	if content, err := os.ReadFile(blobPath(dir, shared)); err != nil || !bytes.Equal(content, shared) {
+		t.Fatalf("the blob the snapshot references: %d bytes, %v", len(content), err)
 	}
 }

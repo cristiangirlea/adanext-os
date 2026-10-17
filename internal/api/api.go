@@ -16,8 +16,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/cristiangirlea/ada-os/internal/artifact"
 	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
@@ -49,8 +51,9 @@ type handler struct {
 	// shared from its transaction through the scheduler handoff, the stop
 	// exclusively from before its transaction through the executor handoff.
 	admission         sync.RWMutex
-	stopping          bool   // Set under admission by a stop that committed; starts are then refused.
-	beforeStopHandoff func() // Test seam between the stop's commit and the executor handoff.
+	stopping          bool        // Set under admission by a stop that committed; starts are then refused.
+	beforeStopHandoff func()      // Test seam between the stop's commit and the executor handoff.
+	capturing         atomic.Bool // Held by the one snapshot capturing and storing at a time.
 }
 
 // AttemptRunner is the narrow API-to-executor notification boundary.
@@ -84,6 +87,20 @@ type Inspector interface {
 	Inspect(ctx context.Context, path string) (source.Inspection, error)
 }
 
+// Capturer snapshots a repository's work between two equal fingerprints;
+// *source.Inspector satisfies it.
+type Capturer interface {
+	Capture(ctx context.Context, path string, sel source.Selection) (source.Capture, error)
+}
+
+// ArtifactWriter stores content by its hash; *artifact.Store satisfies it.
+// Its lock is the store's lifecycle lock, shared with the executor.
+type ArtifactWriter interface {
+	Write(ctx context.Context, r io.Reader, limit int64) (artifact.Ref, error)
+	Remove(hash string) error
+	sync.Locker
+}
+
 type Execution struct {
 	EngineSHA256 string
 	Generation   int64
@@ -93,6 +110,8 @@ type Execution struct {
 	Owner        string             // The coordinator's owner account, the only one that may stop it.
 	Stopper      Stopper            // nil when there is no coordinator lifecycle to stop (tests).
 	Inspector    Inspector          // nil when git is missing or too old
+	Capturer     Capturer           // nil with Inspector
+	Writer       ArtifactWriter     // stores snapshot content; nil until the artifact store opens
 	// GitUnavailable is why Inspector is nil, the message of git_unavailable.
 	GitUnavailable string
 }
@@ -111,6 +130,9 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
 	mux.HandleFunc("POST /v1/projects/inspect", h.inspect)
+	mux.HandleFunc("POST /v1/projects", h.importProject)
+	mux.HandleFunc("POST /v1/projects/{id}/snapshots", h.snapshot)
+	mux.HandleFunc("GET /v1/projects/{id}/snapshots/{sid}", h.getSnapshot)
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
 	mux.HandleFunc("GET /v1/attempts/{id}/artifacts/{hash}", h.artifact)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +214,10 @@ func writeInternalError(w http.ResponseWriter, err error) {
 	}{"internal", "internal error", id})
 }
 func storeError(w http.ResponseWriter, err error) {
+	if e, ok := errors.AsType[*store.AlreadyImportedError](err); ok {
+		writeAlreadyImported(w, e)
+		return
+	}
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrNotMember):
 		writeError(w, 404, "not_found")
@@ -317,8 +343,18 @@ type cachedResponse struct {
 }
 
 func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, revision string, fn func(*store.Tx) (int, any, error)) bool {
+	cached, err := h.commit(r, user, k, scope, revision, fn)
+	if err != nil {
+		storeError(w, err)
+		return false
+	}
+	return writeCached(w, cached)
+}
+
+// commit is mutate's transaction, which returns the response to write.
+func (h *handler) commit(r *http.Request, user, k string, scope *store.Scope, revision string, fn func(*store.Tx) (int, any, error)) ([]byte, error) {
 	body := r.Context().Value(bodyKey{}).([]byte)
-	cached, err := h.store.Do(r.Context(), user, k, hash(r, body, revision), scope, func(tx *store.Tx) ([]byte, error) {
+	return h.store.Do(r.Context(), user, k, hash(r, body, revision), scope, func(tx *store.Tx) ([]byte, error) {
 		status, value, err := fn(tx)
 		if err != nil {
 			return nil, err
@@ -329,10 +365,9 @@ func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string,
 		}
 		return json.Marshal(cachedResponse{status, payload})
 	})
-	if err != nil {
-		storeError(w, err)
-		return false
-	}
+}
+
+func writeCached(w http.ResponseWriter, cached []byte) bool {
 	var result cachedResponse
 	if err := json.Unmarshal(cached, &result); err != nil {
 		writeInternalError(w, err)
@@ -345,6 +380,27 @@ func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string,
 }
 
 type bodyKey struct{}
+
+// errNotReplayed rolls back replayed's probe: the key holds no response yet.
+var errNotReplayed = errors.New("not a replay")
+
+// replayed answers a request whose key already holds a response, after the
+// membership check when scope is set, before the handler does slow work
+// outside the transaction; it reports whether it answered. mutate still
+// decides: a request that raced this one to the key gets its response there.
+func (h *handler) replayed(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope) bool {
+	body := r.Context().Value(bodyKey{}).([]byte)
+	cached, err := h.store.Do(r.Context(), user, k, hash(r, body, ""), scope, func(*store.Tx) ([]byte, error) { return nil, errNotReplayed })
+	if errors.Is(err, errNotReplayed) {
+		return false
+	}
+	if err != nil {
+		storeError(w, err)
+		return true
+	}
+	writeCached(w, cached)
+	return true
+}
 
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.actor(w, r)
@@ -1176,6 +1232,23 @@ func (h *handler) artifact(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// validRepoPath is an absolute local path. A UNC or device path is refused
+// before anything touches it: opening one sends credentials over SMB.
+func validRepoPath(p string) bool {
+	return !source.IsRemotePath(p) && filepath.IsAbs(p) && !strings.ContainsRune(p, 0)
+}
+
+func (h *handler) gitUnavailable(w http.ResponseWriter) {
+	reason := h.exec.GitUnavailable
+	if reason == "" {
+		reason = "git unavailable"
+	}
+	writeJSON(w, 503, struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}{"git_unavailable", reason})
+}
+
 // inspect stores nothing, so the idempotency rules of mutating requests do not apply.
 func (h *handler) inspect(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.actor(w, r); !ok {
@@ -1188,20 +1261,12 @@ func (h *handler) inspect(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Path string `json:"path"`
 	}
-	// A UNC or device path is refused before anything touches it: opening one sends credentials over SMB.
-	if err := decode(body, &input); err != nil || source.IsRemotePath(input.Path) || !filepath.IsAbs(input.Path) || strings.ContainsRune(input.Path, 0) {
+	if err := decode(body, &input); err != nil || !validRepoPath(input.Path) {
 		writeError(w, 400, "bad_request")
 		return
 	}
 	if h.exec.Inspector == nil {
-		reason := h.exec.GitUnavailable
-		if reason == "" {
-			reason = "git unavailable"
-		}
-		writeJSON(w, 503, struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-		}{"git_unavailable", reason})
+		h.gitUnavailable(w)
 		return
 	}
 	result, err := h.exec.Inspector.Inspect(r.Context(), input.Path)

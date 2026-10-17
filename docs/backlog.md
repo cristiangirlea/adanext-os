@@ -212,7 +212,7 @@ is M4.
   when a `git status` in the original rewrites only stat data. On Windows CI: with
   `core.autocrlf=true` and `core.filemode=false`, a clean checkout inspects clean and a one-line
   edit gives a one-line patch; the user's git can replace its index while Ada holds it open.
-- [ ] **M3.2 Import and snapshots.** Migration 0005: the project's source identity (canonical
+- [x] **M3.2 Import and snapshots** (#84: #85, 2026-10-17). Migration 0005: the project's source identity (canonical
   path, git common directory, the identity's fingerprint at import) and `source_snapshots`
   (project, base commit, fingerprint, staged patch artifact, unstaged patch artifact, untracked
   files as a list of path, mode and artifact, `created_by`, created). `POST /v1/projects`

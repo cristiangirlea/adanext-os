@@ -29,6 +29,7 @@ type ArtifactWriter interface {
 	Write(context.Context, io.Reader, int64) (artifact.Ref, error)
 	Remove(hash string) error
 	Blobs() ([]string, error)
+	sync.Locker // The artifact lifecycle lock, shared with every other writer (artifact.Store.Lock).
 }
 type Notifier interface{ Notify(string) }
 
@@ -63,22 +64,6 @@ type Executor struct {
 	afterCancelCheck func()                          // Test seam after the cancel handling first checks whether the engine is accepted.
 	afterRunning     func()                          // Test seam between storing the attempt running and accepting its events.
 	beforeRemove     func(hash string)               // Test seam between discard's reference check and its removal.
-	// artifactMu serialises the lifecycle of every artifact a writer stores
-	// outside a transaction: from its Write, which may reuse content already
-	// on disk, through the commit that references it or the discard that
-	// removes it. Invariant: while a writer holds the lock, no other writer
-	// can reuse a blob it may still discard, so a committed reference never
-	// points at content a failed writer removed afterwards, and discard's
-	// reference check cannot be overtaken by a commit. The in-transaction form
-	// (appendBoundedEvent) writes under the same rule: a caller whose payload
-	// is fixed and small never reaches the artifact store and runs without the
-	// lock; a caller whose payload may exceed the event limit (failFinal, whose
-	// cause the engine or its exit status can enlarge) takes the lock before
-	// its transaction opens and releases it after the transaction returns,
-	// never inside it, since a writer holding the lock may be waiting on the
-	// database. Config.Concurrency defaults to one attempt, so the lock is
-	// rarely contended; it exists for correctness.
-	artifactMu sync.Mutex
 }
 
 func New(cfg Config) *Executor {
@@ -922,19 +907,29 @@ func (e *Executor) append(a store.Attempt, kind string, payload []byte, session 
 	return nil
 }
 
-// artifactLifecycle runs fn under artifactMu: fn writes artifacts, runs the
-// transaction that references them and discards them when it fails.
+// artifactLifecycle runs fn under the artifact lifecycle lock
+// (artifact.Store.Lock), which the snapshot handler shares: fn writes
+// artifacts, runs the transaction that references them and discards them when
+// it fails. Without an artifact store nothing is written, so nothing is locked.
+// The in-transaction form (appendBoundedEvent) follows the same rule: a caller
+// whose payload is fixed and small never reaches the store and runs without
+// the lock; one whose payload may exceed the event limit (failFinal) takes it
+// before its transaction opens. Config.Concurrency defaults to one attempt,
+// so the lock is rarely contended; it exists for correctness.
 func (e *Executor) artifactLifecycle(fn func() error) error {
-	e.artifactMu.Lock()
-	defer e.artifactMu.Unlock()
+	if e.cfg.Artifacts != nil {
+		e.cfg.Artifacts.Lock()
+		defer e.cfg.Artifacts.Unlock()
+	}
 	return fn()
 }
 
 // RemoveUnreferencedArtifacts removes the published blobs no committed record
 // references: what a crash between a blob's publish and its commit, or a
-// rolled-back in-transaction write, left behind. It holds artifactMu, so no
-// writer is between its publish and its commit, and blobs still being written
-// are never listed. It reports how many it removed.
+// rolled-back in-transaction write, left behind. It holds the lifecycle lock,
+// so no writer, the snapshot handler included, is between its publish and its
+// commit, and blobs still being written are never listed. It reports how many
+// it removed.
 func (e *Executor) RemoveUnreferencedArtifacts(ctx context.Context) (removed int, err error) {
 	if e.cfg.Artifacts == nil {
 		return 0, nil
@@ -1002,8 +997,8 @@ func (e *Executor) appendBoundEvent(tx *store.Tx, event store.Event, ref artifac
 // appendBoundedEvent is the in-transaction form for the recovery and failure
 // paths, where the artifact is a safety net: a transaction that fails after it
 // cannot remove what was written. A caller with a fixed, small payload runs
-// without artifactMu; a caller whose payload can exceed the event limit holds
-// it around the whole transaction (see the lock's invariant).
+// without the lifecycle lock; a caller whose payload can exceed the event
+// limit holds it around the whole transaction (see artifact.Store.Lock).
 func (e *Executor) appendBoundedEvent(tx *store.Tx, event store.Event) error {
 	event, ref, err := e.boundEvent(event)
 	if err != nil {
@@ -1049,7 +1044,7 @@ func (e *Executor) result(a store.Attempt, m message, line []byte) error {
 }
 
 // storeResult writes the result's artifacts and records the result event in
-// one transaction; the caller holds artifactMu.
+// one transaction; the caller holds the lifecycle lock.
 func (e *Executor) storeResult(a store.Attempt, m message, line []byte) error {
 	var final artifact.Ref
 	if len(m.Result.Final) > 64<<10 {
