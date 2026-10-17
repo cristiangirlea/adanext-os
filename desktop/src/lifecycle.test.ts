@@ -55,7 +55,10 @@ describe("coordinator lifecycle", () => {
     const neverReady = io([]);
     let launched = false;
     neverReady.probe = async () => { if (!launched) { launched = true; return false; } throw timedOut(); };
-    await expect(findOrStart(config, "/pipe", neverReady, 1000)).rejects.toThrow("timed out waiting for adad to start");
+    const failure = await findOrStart(config, "/pipe", neverReady, 1000).catch((error: Error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("timed out waiting for adad to start: the endpoint accepted connections but did not answer");
+    expect(((failure as Error).cause as NodeJS.ErrnoException).code).toBe("ETIMEDOUT");
     expect(neverReady.spawn).toHaveBeenCalledOnce();
   });
   it("waits for disappearance without starting anything and bounds the wait", async () => {
