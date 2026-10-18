@@ -1172,6 +1172,17 @@ more users (M4b), artifact origins when content repeats (#89).
   "existing Ada tasks and verifiable Harness history", M3.2's import lists the existing Ada tasks
   for the source; Harness history is deferred to M6.
 
+- **2026-10-18, editor integration: VS Code first, JetBrains later.** The owner asked for Ada
+  inside an editor and chose VS Code first, then JetBrains. It needs no new design: `adad` is
+  already a local service with a versioned API on a per-user endpoint, and the #5 decision put
+  the UI behind `AdaClient`, so a VS Code extension is one more client and its webview a third
+  adapter. The extension's Node side holds the token, as Electron's main process does, and the
+  webview gets typed calls only. Ada still never touches the user's checkout: the editor shows
+  and reviews Ada's results, and the user brings a branch in. The desktop app stays, since it
+  runs Ada with no editor open and owns "Quit Ada and stop work". It lands as M4c, after M4,
+  because before M4 there is no real workflow, diff or review to show; the branch hand-off joins
+  M7. JetBrains (Kotlin, its own pipe or socket client and handshake) is a later slice.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
