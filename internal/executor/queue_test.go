@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func queueAttemptIn(t *testing.T, e *Executor, s *store.Store, user, project, ta
 
 func waitAttemptID(t *testing.T, s *store.Store, id string, want ...string) store.Attempt {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(30 * time.Second) // a liveness bound; the tests check their own timing
 	for {
 		a, err := s.AttemptByID(context.Background(), id)
 		if err != nil {
@@ -137,6 +138,10 @@ func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNe
 	for i := 0; i < 12; i++ {
 		task, attempt := fmt.Sprintf("race-task-%d", i), fmt.Sprintf("race-%d", i)
 		queueAttempt(t, e, s, "u", task, attempt)
+		queued, err := s.Task(ctx, "u", task)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var wg sync.WaitGroup
 		wg.Add(2)
 		var cancelErr error
@@ -150,13 +155,15 @@ func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNe
 			// The claim needs a queue read and a goroutine before its write;
 			// a wider jitter here lets either side win.
 			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+			if i%4 == 3 {
+				// One iteration in four the launch is past its accept first, so
+				// the revision read before it is stale.
+				waitRunning(ctx, s, attempt)
+			}
 			// What the API's cancel does for a preparing task: withdraw it in
 			// the store, and when the launch claim won, tell the executor.
-			_, cancelErr = s.Do(ctx, "u", "cancel-"+attempt, "cancel", nil, func(tx *store.Tx) ([]byte, error) {
-				_, err := tx.CancelQueued(ctx, task, 2, "withdrawn by u")
-				return []byte("ok"), err
-			})
-			if errors.Is(cancelErr, store.ErrAttemptLaunched) {
+			cancelErr = cancelQueued(ctx, s, task, queued.Revision)
+			if claimWon(cancelErr) {
 				e.CancelTask(task)
 			}
 		}()
@@ -192,7 +199,7 @@ func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNe
 			if err != nil || len(events) != 1 || events[0].Kind != "cancel" {
 				t.Fatalf("iteration %d: withdrawn attempt events = %+v: %v", i, events, err)
 			}
-		} else if errors.Is(cancelErr, store.ErrAttemptLaunched) {
+		} else if claimWon(cancelErr) {
 			launched++
 			// The claim won: the attempt ends through the running cancel path,
 			// and no withdrawal is recorded.
@@ -211,6 +218,9 @@ func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNe
 			}
 		} else {
 			t.Fatalf("iteration %d: cancel = %v", i, cancelErr)
+		}
+		if i%4 == 3 && cancelErr == nil {
+			t.Fatalf("iteration %d: withdrawn after the accept", i)
 		}
 		task2, err := s.Task(ctx, "u", task)
 		if err != nil {
@@ -410,16 +420,49 @@ func TestAStopRecordedWhileTheAttemptIsLaunchingIsHonouredWhenTheEngineAccepts(t
 	release()
 }
 
+// cancelQueued is the API's withdrawal of a preparing task at the revision it
+// read. A launch that moved the task since makes that revision stale, so the
+// cancel re-reads the task and retries at its current revision, a few times.
+func cancelQueued(ctx context.Context, s *store.Store, task string, revision int64) error {
+	for retries := 0; ; retries++ {
+		_, err := s.Do(ctx, "u", "cancel-"+task, "cancel", nil, func(tx *store.Tx) ([]byte, error) {
+			_, err := tx.CancelQueued(ctx, task, revision, "withdrawn by u")
+			return []byte("ok"), err
+		})
+		if !errors.Is(err, store.ErrStaleRevision) || retries == 3 {
+			return err
+		}
+		current, err := s.Task(ctx, "u", task)
+		if err != nil {
+			return err
+		}
+		revision = current.Revision
+	}
+}
+
+// claimWon reports a cancel that found the launch claim first: the attempt
+// had left the queue, or the launch had moved the task past preparing.
+func claimWon(err error) bool {
+	return errors.Is(err, store.ErrAttemptLaunched) || errors.Is(err, store.ErrInvalidTransition)
+}
+
+// waitRunning waits, without failing from another goroutine, until the launch
+// has stored the attempt running and so moved its task's revision.
+func waitRunning(ctx context.Context, s *store.Store, attempt string) {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if a, err := s.AttemptByID(ctx, attempt); err == nil && a.State == "running" {
+			return
+		}
+	}
+}
+
 func TestTheCancelVersusClaimRaceHasOneWinnerWhicheverSideIsFirst(t *testing.T) {
 	e, s, dir, _ := testExecutor(t, "block")
 	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
+	// Each cancel uses the revision the task had when queued.
 	withdraw := func(task string) error {
-		_, err := s.Do(ctx, "u", "cancel-"+task, "cancel", nil, func(tx *store.Tx) ([]byte, error) {
-			_, err := tx.CancelQueued(ctx, task, 2, "withdrawn by u")
-			return []byte("ok"), err
-		})
-		return err
+		return cancelQueued(ctx, s, task, 2)
 	}
 	// The cancel first: the claim finds the attempt withdrawn and launches nothing.
 	claiming := make(chan struct{})
@@ -429,6 +472,17 @@ func TestTheCancelVersusClaimRaceHasOneWinnerWhicheverSideIsFirst(t *testing.T) 
 			close(claiming)
 			<-proceed
 		}
+	}
+	// The second attempt waits at its accept, so it is claimed but still
+	// launching when its cancel reads the queue.
+	accepting := make(chan struct{})
+	accept := make(chan struct{})
+	var acceptOnce sync.Once
+	e.beforeAccepted = func(*time.Timer, *atomic.Bool) {
+		acceptOnce.Do(func() {
+			close(accepting)
+			<-accept
+		})
 	}
 	e.LaunchAttempt("attempt")
 	<-claiming
@@ -465,23 +519,41 @@ func TestTheCancelVersusClaimRaceHasOneWinnerWhicheverSideIsFirst(t *testing.T) 
 	// ends it through the running path with no withdrawal recorded.
 	queueAttempt(t, e, s, "u", "task2", "attempt2")
 	e.LaunchAttempt("attempt2")
-	waitAttemptID(t, s, "attempt2", "launching", "running")
+	<-accepting
+	waitAttemptID(t, s, "attempt2", "launching")
 	if err := withdraw("task2"); !errors.Is(err, store.ErrAttemptLaunched) {
 		t.Fatalf("cancel after the claim = %v", err)
 	}
+	close(accept)
+	endsThroughTheRunningPath(t, e, s, dir, "task2", "attempt2")
+	// The claim and the accept first: the revision the cancel read is stale,
+	// and the cancel at the current one finds the task past preparing.
+	queueAttempt(t, e, s, "u", "task3", "attempt3")
+	e.LaunchAttempt("attempt3")
+	waitAttemptID(t, s, "attempt3", "running")
+	if err := withdraw("task3"); !errors.Is(err, store.ErrInvalidTransition) {
+		t.Fatalf("cancel after the accept = %v", err)
+	}
+	endsThroughTheRunningPath(t, e, s, dir, "task3", "attempt3")
+}
+
+// endsThroughTheRunningPath cancels a launched attempt and checks it ends
+// canceled after it ran, with no withdrawal recorded.
+func endsThroughTheRunningPath(t *testing.T, e *Executor, s *store.Store, dir, task, attempt string) {
+	t.Helper()
 	// Running, so the cancel reaches the engine as a message it answers.
-	waitAttemptID(t, s, "attempt2", "running")
-	e.CancelTask("task2")
-	if a := waitAttemptID(t, s, "attempt2", "canceled"); a.Ended == "" {
+	waitAttemptID(t, s, attempt, "running")
+	e.CancelTask(task)
+	if a := waitAttemptID(t, s, attempt, "canceled"); a.Ended == "" {
 		t.Fatalf("launched attempt = %+v", a)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "attempts", "attempt2")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "attempts", attempt)); err != nil {
 		t.Fatalf("launched attempt has no scratch directory: %v", err)
 	}
-	if task, err := s.Task(ctx, "u", "task2"); err != nil || task.State != store.Canceled {
-		t.Fatalf("launched task = %+v: %v", task, err)
+	if got, err := s.Task(context.Background(), "u", task); err != nil || got.State != store.Canceled {
+		t.Fatalf("launched task = %+v: %v", got, err)
 	}
-	for _, kind := range eventKinds(t, s, "attempt2") {
+	for _, kind := range eventKinds(t, s, attempt) {
 		if kind == "cancel" {
 			t.Fatal("the launched attempt was also withdrawn")
 		}

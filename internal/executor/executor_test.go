@@ -526,7 +526,8 @@ func markerToEnd(t *testing.T, marker string, a store.Attempt) time.Duration {
 
 func waitAttempt(t *testing.T, s *store.Store, want string) store.Attempt {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
+	// A liveness bound for a loaded machine; the tests assert their own timing.
+	deadline := time.After(30 * time.Second)
 	for {
 		a, err := s.AttemptByID(context.Background(), "attempt")
 		if err != nil {
