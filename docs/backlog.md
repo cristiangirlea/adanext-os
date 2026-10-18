@@ -275,6 +275,19 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
 - **M3 Project workspaces:** broken into slices; see "M3 Project workspaces" above.
 - **M4 First local workflow:** desktop import, task, edit, checks, diff and review on Windows and
   Ubuntu with a real backend.
+- **M4c Editor integration, VS Code first:** an extension that is one more client of `adad`.
+  The desktop's Node modules (find-or-start, handshake, event-stream client) move to a package
+  both use; the extension finds `adad` from the installed desktop app or a setting, starts it if
+  needed and never stops it. Its Node side alone holds the endpoint token and checks every
+  message's shape before forwarding, as the bridge does; its webview loads the shared UI through
+  a third `AdaClient` adapter, with a content security policy, `localResourceRoots` limited to
+  the UI bundle and no remote code; authorization stays `adad`'s. Scope: import the open folder
+  (in a multi-root workspace, the one chosen), start, follow and cancel tasks, the task state in
+  the status bar, and a task's changes in the editor's own diff view, read from Ada's artifacts,
+  not the checkout. Taking the result as a branch arrives with M7's branch export. It never
+  edits the checkout itself. Tests: the adapter with Vitest, and the extension against a real
+  `adad` and the fake engine in VS Code's extension test host (xvfb on Linux CI, one worker).
+  JetBrains follows later as its own slice (#92), a Kotlin client of the same API.
 - **M4b Web access:** the TLS listener and its setting, local accounts and sessions, per-user
   project visibility and permission routing, credential profiles whose selection fails closed and
   an execution boundary that keeps other profiles and `adad`'s secrets out of a task's reach, the
