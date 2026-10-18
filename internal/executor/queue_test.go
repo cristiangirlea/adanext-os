@@ -145,6 +145,7 @@ func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNe
 		var wg sync.WaitGroup
 		wg.Add(2)
 		var cancelErr error
+		sawRunning := true
 		go func() {
 			defer wg.Done()
 			time.Sleep(time.Duration(rand.Intn(3)) * time.Millisecond)
@@ -158,7 +159,7 @@ func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNe
 			if i%4 == 3 {
 				// One iteration in four the launch is past its accept first, so
 				// the revision read before it is stale.
-				waitRunning(ctx, s, attempt)
+				sawRunning = waitRunning(ctx, s, attempt)
 			}
 			// What the API's cancel does for a preparing task: withdraw it in
 			// the store, and when the launch claim won, tell the executor.
@@ -168,6 +169,9 @@ func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNe
 			}
 		}()
 		wg.Wait()
+		if !sawRunning {
+			t.Fatalf("iteration %d: the forced-stale attempt never reached running", i)
+		}
 		events, err := s.Events(ctx, "u", attempt, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -447,13 +451,15 @@ func claimWon(err error) bool {
 }
 
 // waitRunning waits, without failing from another goroutine, until the launch
-// has stored the attempt running and so moved its task's revision.
-func waitRunning(ctx context.Context, s *store.Store, attempt string) {
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+// has stored the attempt running and so moved its task's revision, and reports
+// whether it saw that.
+func waitRunning(ctx context.Context, s *store.Store, attempt string) bool {
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 		if a, err := s.AttemptByID(ctx, attempt); err == nil && a.State == "running" {
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func TestTheCancelVersusClaimRaceHasOneWinnerWhicheverSideIsFirst(t *testing.T) {
