@@ -1179,7 +1179,8 @@ more users (M4b), artifact origins when content repeats (#89).
   adapter. The extension's Node side holds the token, as Electron's main process does, and the
   webview gets typed calls only. Ada still never touches the user's checkout: the editor shows
   and reviews Ada's results, and the user brings a branch in. The desktop app stays, since it
-  runs Ada with no editor open and owns "Quit Ada and stop work". It lands as M4c, after M4,
+  runs Ada with no editor open and owns "Quit Ada and stop work"; the extension starts `adad`
+  if needed but never stops it, and closing VS Code leaves it running. It lands as M4c, after M4,
   because before M4 there is no real workflow, diff or review to show; the branch hand-off joins
   M7. JetBrains (Kotlin, its own pipe or socket client and handshake) is a later slice.
 
