@@ -49,6 +49,7 @@ type Manifest struct {
 	Path       string `json:"path"`
 	Executor   string `json:"executor"`
 	Policy     string `json:"policy"`
+	Head       string `json:"head"`
 }
 
 // Encode is the manifest as stored beside the worktree.
@@ -76,7 +77,9 @@ type Workspaces struct {
 	Root      string
 	mu        sync.Mutex
 	locks     map[string]*sync.Mutex
-	afterSync func(cloned bool) // Test seam: each sync, telling a clone from a fetch.
+	// AfterSync is a test seam run after each sync under the project's lock,
+	// telling a clone from a fetch.
+	AfterSync func(ctx context.Context, cloned bool)
 }
 
 func (w *Workspaces) repo(project string) string {
@@ -133,7 +136,7 @@ func alphanumericByte(c byte) bool {
 // attempt's worktree on it, commits the snapshot's changes there as one
 // commit, and writes the manifest into the worktree's git directory. m names
 // the project, task, attempt, snapshot, base commit, executor and policy; the
-// returned manifest adds the version, branch and path.
+// returned manifest adds the version, branch, path and prepared HEAD commit.
 func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, changes Changes) (Manifest, error) {
 	for _, id := range []string{m.Project, m.Task, m.Attempt} {
 		if !safeName(id) {
@@ -147,7 +150,7 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 		return Manifest{}, fmt.Errorf("base commit %q is not an object ID", m.BaseCommit)
 	}
 	defer w.lock(m.Project)()
-	if err := w.sync(ctx, m.Project, source); err != nil {
+	if err := w.sync(ctx, m.Project, source, m.BaseCommit); err != nil {
 		return Manifest{}, fmt.Errorf("update the clone: %w", err)
 	}
 	g, repo := w.Inspector.Git, w.repo(m.Project)
@@ -172,6 +175,11 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 	if err := w.commitChanges(ctx, admin, m.Path, changes); err != nil {
 		return Manifest{}, err
 	}
+	head, branch, err := resolveHead(layout{gitDir: admin, commonDir: repo}, len(m.BaseCommit)/2)
+	if err != nil || branch != m.Branch {
+		return Manifest{}, fmt.Errorf("the worktree's HEAD is not on %s: %q, %v", m.Branch, branch, err)
+	}
+	m.Head = head
 	if err := os.WriteFile(filepath.Join(admin, manifestFile), m.Encode(), 0o600); err != nil {
 		return Manifest{}, err
 	}
@@ -181,8 +189,10 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 // sync clones the project's repository from a freshly built mirror the first
 // time, then fetches from one, and gives the clone Ada's config. Neither call
 // reads the original's config, and --no-local makes pack-objects copy what
-// the mirror reaches through alternates into the clone's own pack.
-func (w *Workspaces) sync(ctx context.Context, project, source string) error {
+// the mirror reaches through alternates into the clone's own pack. The mirror
+// names base as refs/ada/base, so the clone gets it however the original's
+// refs have moved since the snapshot.
+func (w *Workspaces) sync(ctx context.Context, project, source, base string) error {
 	in := w.Inspector
 	dir := filepath.Join(w.Root, project)
 	for _, d := range []string{dir, in.MirrorRoot} {
@@ -201,6 +211,12 @@ func (w *Workspaces) sync(ctx context.Context, project, source string) error {
 	}
 	if src == nil {
 		return &BlockedError{Blockers: r.Blockers}
+	}
+	if err := os.MkdirAll(filepath.Join(mirror, "refs", "ada"), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(mirror, "refs", "ada", "base"), []byte(base+"\n"), 0o600); err != nil {
+		return err
 	}
 	transport := []string{"protocol.file.allow=always", "transfer.bundleURI=false"}
 	repo := w.repo(project)
@@ -233,30 +249,64 @@ func (w *Workspaces) sync(ctx context.Context, project, source string) error {
 			os.RemoveAll(tmp)
 			return err
 		}
-	} else if err := w.writeConfig(repo, mirror, *src); err != nil {
-		return err
+	} else {
+		if err := removeLocks(repo); err != nil {
+			return err
+		}
+		if err := w.writeConfig(repo, mirror, *src); err != nil {
+			return err
+		}
 	}
-	// refs/ada/head carries a detached HEAD no branch reaches; ada/* are Ada's own branches.
-	args := []string{"fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-auto-gc", "--no-recurse-submodules", "--", mirror,
-		"+refs/heads/*:refs/heads/*", "^refs/heads/ada/*", "+refs/tags/*:refs/tags/*"}
+	// refs/ada/head carries a detached HEAD no branch reaches; ada/* are Ada's
+	// own branches, which --prune leaves alone. --prune clears a deleted branch
+	// before a branch under its name arrives; --update-shallow takes new
+	// shallow roots of a shallow original.
+	args := []string{"fetch", "-q", "--prune", "--update-shallow", "--no-tags", "--no-write-fetch-head", "--no-auto-gc", "--no-recurse-submodules", "--", mirror,
+		"+refs/heads/*:refs/heads/*", "^refs/heads/ada/*", "+refs/tags/*:refs/tags/*", "+refs/ada/base:refs/ada/base"}
 	if src.head != "" {
 		args = append(args, "+refs/ada/head:refs/ada/head")
 	}
 	if _, err := output(in.Git.commandWith(ctx, transport, repo, "", args...), "fetch"); err != nil {
 		return err
 	}
-	if w.afterSync != nil {
-		w.afterSync(cloned)
+	if w.AfterSync != nil {
+		w.AfterSync(ctx, cloned)
+	}
+	return nil
+}
+
+// removeLocks removes the lock files a killed clone or fetch left in the
+// clone. It runs under the project's lock, where no other git writes the
+// clone: one attempt per project is active, and adad is a singleton.
+func removeLocks(repo string) error {
+	stale, err := filepath.Glob(filepath.Join(repo, "*.lock"))
+	if err != nil {
+		return err
+	}
+	err = filepath.WalkDir(filepath.Join(repo, "refs"), func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() && strings.HasSuffix(path, ".lock") {
+			stale = append(stale, path)
+		}
+		return err
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, l := range stale {
+		if err := os.Remove(l); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
 }
 
 // writeConfig replaces the clone's config with Ada's, hooks pointed at Ada's
-// empty directory and fsmonitor off for any git that runs in a worktree, and
-// copies the mirror's excludes and attributes.
+// empty directory and fsmonitor off for any git that runs in a worktree, no
+// automatic gc or maintenance (either would detach from Ada's supervision),
+// and copies the mirror's excludes and attributes.
 func (w *Workspaces) writeConfig(repo, mirror string, src mirrorSource) error {
 	hooks := "hooksPath = " + quoteConfig(filepath.ToSlash(w.Inspector.Git.hooks))
-	if err := writeAdaConfig(repo, src, true, hooks, "fsmonitor = false"); err != nil {
+	if err := writeAdaConfig(repo, src, true, "[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n", hooks, "fsmonitor = false"); err != nil {
 		return err
 	}
 	for _, name := range []string{"exclude", "attributes"} {
@@ -376,14 +426,12 @@ func pointsTo(worktree, admin string) bool {
 }
 
 // Check compares an attempt's worktree, and the manifest copy in its git
-// directory, with m as the workspace row holds it with hash. It only reads:
-// a mismatch is a *MismatchError, and nothing is rebuilt.
+// directory, with m as the workspace row holds it with hash, and the
+// worktree's branch and HEAD with the prepared ones. The row records no head:
+// when m has none, the copy's is used, bound by the hash. It only reads: a
+// mismatch is a *MismatchError, and nothing is rebuilt.
 func (w *Workspaces) Check(m Manifest, hash string) error {
-	data := m.Encode()
-	sum := sha256.Sum256(data)
 	switch {
-	case hex.EncodeToString(sum[:]) != hash:
-		return mismatch("the workspace row does not match its manifest hash")
 	case m.Version != ManifestVersion:
 		return mismatch("manifest version %d", m.Version)
 	case !safeName(m.Project) || !safeName(m.Attempt) || m.Path != w.WorktreePath(m.Project, m.Attempt):
@@ -401,8 +449,23 @@ func (w *Workspaces) Check(m Manifest, hash string) error {
 	if err != nil {
 		return mismatch("the manifest copy is missing")
 	}
+	if m.Head == "" {
+		var copied Manifest
+		if err := json.Unmarshal(stored, &copied); err != nil {
+			return mismatch("the manifest copy cannot be read")
+		}
+		m.Head = copied.Head
+	}
+	data := m.Encode()
+	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != hash {
+		return mismatch("the workspace row does not match its manifest hash")
+	}
 	if !bytes.Equal(stored, data) {
 		return mismatch("the manifest copy differs from the workspace row")
+	}
+	head, branch, err := resolveHead(layout{gitDir: admin, commonDir: w.repo(m.Project)}, len(m.BaseCommit)/2)
+	if err != nil || branch != m.Branch || head != m.Head {
+		return mismatch("the worktree is not on %s at its prepared commit", m.Branch)
 	}
 	return nil
 }

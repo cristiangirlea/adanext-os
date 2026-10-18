@@ -119,6 +119,7 @@ func TestCloneFetchAndWorktreeRunNothingTheOriginalConfigures(t *testing.T) {
 		"bundle.version":                 "1",
 		"bundle.mode":                    "all",
 		"bundle.ada.uri":                 "ssh://example.invalid/ada.bundle",
+		"uploadpack.hideRefs":            "refs/heads", // honoured only if upload-pack reads the original's config
 		"core.hooksPath":                 shPath(filepath.Join(dir, ".git", "hooks")),
 	} {
 		git(t, dir, "config", key, value)
@@ -140,6 +141,9 @@ func TestCloneFetchAndWorktreeRunNothingTheOriginalConfigures(t *testing.T) {
 		t.Fatalf("Ada ran commands the repository configures: %v", got)
 	}
 	sameTree(t, before, hashTree(t, dir))
+	if got := git(t, w.repo("p"), "rev-parse", "refs/heads/main"); got != git(t, dir, "rev-parse", "main") {
+		t.Fatalf("the clone's main = %q", got)
+	}
 	for _, m := range []Manifest{first, second} {
 		if got, err := os.ReadFile(filepath.Join(m.Path, "file.txt")); err != nil || string(got) != "tracked\nedited\n" {
 			t.Fatalf("%s: file.txt = %q, %v", m.Attempt, got, err)
@@ -310,7 +314,7 @@ func TestTwoConcurrentPreparesInOneProjectCloneOnce(t *testing.T) {
 	w := newWorkspaces(t)
 	var mu sync.Mutex
 	clones, syncs := 0, 0
-	w.afterSync = func(cloned bool) {
+	w.AfterSync = func(_ context.Context, cloned bool) {
 		mu.Lock()
 		defer mu.Unlock()
 		syncs++
@@ -403,5 +407,164 @@ func TestAFetchMovesTheUsersBranchesAndLeavesAdasOwn(t *testing.T) {
 	}
 	if got := git(t, second.Path, "rev-parse", "HEAD"); got != c.Inspection.Identity.Head {
 		t.Fatalf("second worktree HEAD = %s", got)
+	}
+}
+
+func TestTheBaseSurvivesAMovedHeadBeforeTheFirstPrepare(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name         string
+		before, move func(t *testing.T, dir string)
+	}{
+		{"a detached commit, then a checkout of main", func(t *testing.T, dir string) {
+			git(t, dir, "checkout", "-q", "--detach")
+			git(t, dir, "commit", "-q", "--allow-empty", "-m", "detached")
+		}, func(t *testing.T, dir string) { git(t, dir, "checkout", "-q", "main") }},
+		{"a commit on main, then amended", func(*testing.T, string) {}, func(t *testing.T, dir string) {
+			git(t, dir, "commit", "-q", "--amend", "--allow-empty", "-m", "amended")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := newRepo(t, nil)
+			c.before(t, dir)
+			w := newWorkspaces(t)
+			snap := mustCapture(t, w.Inspector, dir)
+			c.move(t, dir)
+			if git(t, dir, "for-each-ref", "--contains", snap.Inspection.Identity.Head) != "" {
+				t.Fatal("a ref still reaches the base")
+			}
+			m := mustPrepare(t, w, dir, snap, "1")
+			if got := git(t, m.Path, "rev-parse", "HEAD"); got != snap.Inspection.Identity.Head {
+				t.Fatalf("HEAD = %s, want the base %s", got, snap.Inspection.Identity.Head)
+			}
+		})
+	}
+}
+
+func TestABranchReplacedByADirectoryOfTheSameNameStillFetches(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	git(t, dir, "branch", "feature")
+	w := newWorkspaces(t)
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	git(t, dir, "branch", "-D", "feature")
+	git(t, dir, "branch", "feature/x")
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "2")
+	repo := w.repo("p")
+	if got := git(t, repo, "for-each-ref", "--format=%(refname)", "refs/heads"); got != "refs/heads/ada/t1\nrefs/heads/ada/t2\nrefs/heads/feature/x\nrefs/heads/main" {
+		t.Fatalf("the clone's branches:\n%s", got)
+	}
+}
+
+func TestStaleLockFilesInTheCloneAreRemovedBeforeAFetch(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	repo := w.repo("p")
+	locks := []string{filepath.Join(repo, "refs", "heads", "main.lock"), filepath.Join(repo, "packed-refs.lock")}
+	for _, l := range locks {
+		write(t, l, "")
+	}
+	git(t, dir, "commit", "-q", "--allow-empty", "-m", "moved on")
+	c := mustCapture(t, w.Inspector, dir)
+	mustPrepare(t, w, dir, c, "2")
+	if got := git(t, repo, "rev-parse", "refs/heads/main"); got != c.Inspection.Identity.Head {
+		t.Fatalf("main = %s, want %s", got, c.Inspection.Identity.Head)
+	}
+	for _, l := range locks {
+		if _, err := os.Lstat(l); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: %v", l, err)
+		}
+	}
+}
+
+func TestTheImportedChangesCommitReproducesTheSnapshotUnderAutocrlf(t *testing.T) {
+	t.Parallel()
+	dir := tempDir(t)
+	git(t, dir, "init", "-q")
+	git(t, dir, "config", "core.autocrlf", "true")
+	write(t, filepath.Join(dir, "text.txt"), "one\r\ntwo\r\n")
+	write(t, filepath.Join(dir, "bin.dat"), "\x00\x01\r\n\x00")
+	git(t, dir, "add", "-A")
+	git(t, dir, "commit", "-q", "-m", "first")
+	write(t, filepath.Join(dir, "text.txt"), "one\r\ntwo\r\nstaged\r\n")
+	write(t, filepath.Join(dir, "new.txt"), "new\r\nfile\r\n")
+	git(t, dir, "add", "text.txt", "new.txt")
+	write(t, filepath.Join(dir, "text.txt"), "one\r\ntwo\r\nstaged\r\nunstaged\r\n")
+	write(t, filepath.Join(dir, "bin.dat"), "\x00\x02\r\n\x00")
+	write(t, filepath.Join(dir, "u", "crlf.txt"), "x\r\ny\r\n")
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir, "u/crlf.txt"), "1")
+	for _, p := range []string{"text.txt", "bin.dat", "new.txt", "u/crlf.txt"} {
+		want, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(p)))
+		if got, err := os.ReadFile(filepath.Join(m.Path, filepath.FromSlash(p))); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: worktree %q, original %q, %v", p, got, want, err)
+		}
+	}
+	if got := git(t, m.Path, "status", "--porcelain"); got != "" {
+		t.Fatalf("the worktree is not clean:\n%s", got)
+	}
+}
+
+func TestAShallowOriginalThatGainsAShallowRootStillFetches(t *testing.T) {
+	t.Parallel()
+	upstream := newRepo(t, nil)
+	git(t, upstream, "commit", "-q", "--allow-empty", "-m", "second")
+	git(t, upstream, "branch", "other", "HEAD~1")
+	git(t, upstream, "checkout", "-q", "other")
+	git(t, upstream, "commit", "-q", "--allow-empty", "-m", "other")
+	git(t, upstream, "checkout", "-q", "main")
+	dir := filepath.Join(tempDir(t), "shallow")
+	git(t, upstream, "clone", "-q", "--depth", "1", fileURL(upstream), dir)
+	w := newWorkspaces(t)
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	git(t, dir, "fetch", "-q", "--depth", "1", "origin", "other:other")
+	c := mustCapture(t, w.Inspector, dir)
+	mustPrepare(t, w, dir, c, "2")
+	if got, want := git(t, w.repo("p"), "rev-parse", "refs/heads/other"), git(t, dir, "rev-parse", "other"); got != want {
+		t.Fatalf("other = %s, want %s", got, want)
+	}
+}
+
+func TestTheCloneRunsNoAutomaticGcOrMaintenance(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
+		if got, _ := fixtureGit(w.repo("p"), "config", "--get", key); strings.TrimSpace(string(got)) != want {
+			t.Errorf("%s = %q, want %s", key, got, want)
+		}
+	}
+}
+
+func TestCheckFindsAMovedOrDetachedBranchAndAReplacedImport(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		move func(t *testing.T, worktree string)
+	}{
+		{"the branch moved back to the base", func(t *testing.T, wt string) { git(t, wt, "reset", "-q", "--soft", "HEAD~1") }},
+		{"the imported commit replaced", func(t *testing.T, wt string) { git(t, wt, "commit", "-q", "--amend", "-m", "replaced") }},
+		{"the worktree detached", func(t *testing.T, wt string) { git(t, wt, "checkout", "-q", "--detach") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := newRepo(t, nil)
+			write(t, filepath.Join(dir, "README.md"), "edited\n")
+			w := newWorkspaces(t)
+			m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+			if head := git(t, m.Path, "rev-parse", "HEAD"); m.Head != head || head == m.BaseCommit {
+				t.Fatalf("manifest head %q, worktree HEAD %s, base %s", m.Head, head, m.BaseCommit)
+			}
+			c.move(t, m.Path)
+			row := m
+			row.Head = "" // the row records no head: the copy's, bound by the hash, is used
+			if _, ok := errors.AsType[*MismatchError](w.Check(row, m.Hash())); !ok {
+				t.Fatal("Check passed a worktree that left its prepared commit")
+			}
+		})
 	}
 }

@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
@@ -225,6 +227,12 @@ func TestAMismatchedWorkspaceGoesToRecoveryRequiredAndIsNotRebuilt(t *testing.T)
 				t.Fatal(err)
 			}
 		}, func(*testing.T, string, string) {}},
+		{"the task's branch, moved back to the base", func(t *testing.T, _ *store.Store, _, worktree string) {
+			fixtureGit(t, worktree, "reset", "-q", "--soft", "HEAD~1")
+		}, func(*testing.T, string, string) {}},
+		{"the imported commit, replaced", func(t *testing.T, _ *store.Store, _, worktree string) {
+			fixtureGit(t, worktree, "commit", "-q", "--amend", "-m", "replaced")
+		}, func(*testing.T, string, string) {}},
 		{"the worktree, deleted", func(t *testing.T, _ *store.Store, _, worktree string) {
 			if err := os.RemoveAll(worktree); err != nil {
 				t.Fatal(err)
@@ -253,6 +261,60 @@ func TestAMismatchedWorkspaceGoesToRecoveryRequiredAndIsNotRebuilt(t *testing.T)
 				t.Fatalf("the engine started: %v", err)
 			}
 			c.after(t, manifest, worktree)
+		})
+	}
+}
+
+func TestACancelOrStopDuringPreparationFailsTheAttemptAndFreesTheProject(t *testing.T) {
+	for _, c := range []struct {
+		name, state string
+		end         func(e *Executor)
+	}{
+		{"cancel", "ended_failed", func(e *Executor) { e.CancelTask("task") }},
+		{"stop", "recovery_required", func(e *Executor) { e.StopWork() }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, s, marker, repo, _ := workspaceExecutor(t, "happy")
+			inside, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			e.cfg.Workspaces.AfterSync = func(ctx context.Context, _ bool) {
+				once.Do(func() {
+					close(inside)
+					<-ctx.Done() // held until the preparation's context ends
+					<-release
+				})
+			}
+			e.LaunchAttempt("attempt")
+			select {
+			case <-inside:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the preparation never synced")
+			}
+			c.end(e)
+			close(release)
+			waitAttempt(t, s, c.state)
+			if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the engine started: %v", err)
+			}
+			events, err := s.Events(context.Background(), "u", "attempt", 0)
+			if err != nil || len(events) == 0 || !bytes.Contains(events[len(events)-1].Payload, []byte("context canceled")) {
+				t.Fatalf("events = %+v, %v", events, err)
+			}
+			// The project's lock was released: another preparation goes through.
+			base := fixtureGit(t, repo, "rev-parse", "HEAD")
+			done := make(chan error, 1)
+			go func() {
+				_, err := e.cfg.Workspaces.Prepare(context.Background(), repo, source.Manifest{Project: "p", Task: "t2", Attempt: "a2", Snapshot: "s2", BaseCommit: base, Executor: "local", Policy: "auto"}, source.Changes{})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("a later prepare: %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("the project's lock is still held")
+			}
 		})
 	}
 }

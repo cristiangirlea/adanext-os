@@ -46,7 +46,7 @@ func writeMirror(mirror string, src mirrorSource) error {
 		}
 	}
 	l := src.layout
-	if err := writeAdaConfig(mirror, src, false); err != nil {
+	if err := writeAdaConfig(mirror, src, false, ""); err != nil {
 		return err
 	}
 	if copied, err := copyRepoFile(l.gitDir, filepath.Join(l.gitDir, "HEAD"), filepath.Join(mirror, "HEAD")); err != nil || !copied {
@@ -102,8 +102,9 @@ func writeMirror(mirror string, src mirrorSource) error {
 
 // writeAdaConfig writes the config of Ada's git directory dir: the format
 // version and object format, the data-only keys, and copies of the user's
-// excludes and attributes files; core holds further [core] lines.
-func writeAdaConfig(dir string, src mirrorSource, bare bool, core ...string) error {
+// excludes and attributes files; core holds further [core] lines, and
+// sections further sections.
+func writeAdaConfig(dir string, src mirrorSource, bare bool, sections string, core ...string) error {
 	var cfg strings.Builder
 	version, _ := src.repo.get("core.repositoryformatversion")
 	if version == "" {
@@ -141,6 +142,7 @@ func writeAdaConfig(dir string, src mirrorSource, bare bool, core ...string) err
 	if format, ok := src.repo.get("extensions.objectformat"); ok {
 		cfg.WriteString("[extensions]\n\tobjectformat = " + quoteConfig(format) + "\n")
 	}
+	cfg.WriteString(sections)
 	return os.WriteFile(filepath.Join(dir, "config"), []byte(cfg.String()), 0o600)
 }
 
