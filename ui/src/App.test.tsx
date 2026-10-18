@@ -201,6 +201,65 @@ describe("App", () => {
     expect(screen.getByRole("alert").textContent).toContain("req-42");
   });
 
+  it("keeps at most four task reads in flight however many tasks are active, and reads them all", async () => {
+    vi.useFakeTimers();
+    try {
+      const ids = Array.from({ length: 10 }, (_, i) => `t${i}`);
+      const client = new FakeClient(ids.map((id) => makeTask({ id, state: "running", revision: 2 })));
+      client.hold = true;
+      render(<App client={client} />);
+      await flush();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(client.inFlight).toBe(4);
+      const read = new Set<string>();
+      for (let round = 0; round < 10 && read.size < ids.length; round++) {
+        await act(async () => {
+          client.release();
+          await Promise.resolve();
+        });
+        await flush();
+        for (const call of client.calls) if (call.startsWith("getTask:")) read.add(call.slice("getTask:".length));
+      }
+      expect(read).toEqual(new Set(ids));
+      expect(client.maxInFlight).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads a task once more after triggers that arrive during its read, and only once", async () => {
+    const client = new FakeClient([makeTask({ id: "t1", state: "running", revision: 2, attempt: { id: "a1", state: "running" } })]);
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("objective t1"));
+    await flush();
+    client.hold = true;
+    const reads = () => client.calls.filter((call) => call === "getTask:t1").length;
+    const push = client.listeners.get("a1")!;
+    act(() => push({ type: "event", event: { seq: 1, kind: "progress", payload: {} } }));
+    expect(reads()).toBe(1);
+    // The executor moves on while that read is out; its answer carries the earlier snapshot.
+    client.tasks = [makeTask({ id: "t1", state: "verifying", revision: 5, attempt: { id: "a1", state: "running" } })];
+    act(() => {
+      push({ type: "event", event: { seq: 2, kind: "progress", payload: {} } });
+      push({ type: "event", event: { seq: 3, kind: "result", payload: {} } });
+    });
+    expect(reads()).toBe(1);
+    await act(async () => {
+      client.release();
+    });
+    await flush();
+    expect(reads()).toBe(2);
+    await act(async () => {
+      client.release();
+    });
+    await flush();
+    expect(screen.getByText(/revision 5/)).toBeTruthy();
+    expect(reads()).toBe(2);
+  });
+
   it("creates a task and lists it", async () => {
     const client = new FakeClient();
     render(<App client={client} />);

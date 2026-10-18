@@ -60,6 +60,10 @@ func openLockDir(path string) (*lockDir, error) {
 	if err == nil {
 		err = checkStateDirInfo(path, info)
 	}
+	// Clients read the token only from a 0700 directory: tighten the checked one by descriptor.
+	if err == nil && info.Mode().Perm() != 0700 {
+		err = unix.Fchmod(fd, 0700)
+	}
 	if err != nil {
 		dir.Close()
 		return nil, err

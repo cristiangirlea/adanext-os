@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -18,11 +17,8 @@ import (
 
 func init() {
 	if log := os.Getenv("ADA_DETACH_HELPER_LOG"); log != "" {
-		output, err := os.OpenFile(log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			os.Exit(3)
-		}
-		fmt.Fprintf(output, "helper pid=%d args=%v\n", os.Getpid(), os.Args[1:])
+		output := openDetachHelper(log)
+		logDetachHelper(output)
 		os.Exit(run(context.Background(), os.Args[1:], output, output))
 	}
 }
@@ -49,7 +45,8 @@ func TestCoordinatorKeepsNothingTheLauncherInherited(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer channel.Close()
-	cmd := exec.Command(os.Args[0], "-detach", "-state-dir", dir, "-name", name)
+	// A trailing "--" must not turn the re-exec's -detach=false into an argument.
+	cmd := exec.Command(os.Args[0], "-detach", "-state-dir", dir, "-name", name, "--")
 	cmd.Env = append(os.Environ(), "ADA_DETACH_HELPER_LOG="+log)
 	// fd 3 in the launcher, without close-on-exec, as Electron's are.
 	cmd.ExtraFiles = []*os.File{inherited}
@@ -106,6 +103,45 @@ func TestCoordinatorKeepsNothingTheLauncherInherited(t *testing.T) {
 		content, _ := os.ReadFile(log)
 		t.Fatalf("the launcher's channel stayed open while the coordinator served\n%s", content)
 	}
+	assertServedFromTheRoot(t, log)
+}
+
+// FreeBSD without fdescfs lists only 0-2 in /dev/fd: such a listing is not complete.
+func TestAListingWithNothingAboveStderrAlsoRunsTheLimitSweep(t *testing.T) {
+	listing := t.TempDir()
+	for _, name := range []string{"0", "1", "2"} {
+		if err := os.WriteFile(filepath.Join(listing, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var marked []int
+	markInheritedOnExec(listing, func() bool { return false }, func(fd int) { marked = append(marked, fd) })
+	if len(marked) < 61 || marked[0] != 3 || !slices.Contains(marked, 63) {
+		t.Fatalf("marked %d descriptors from %v", len(marked), marked[:min(len(marked), 5)])
+	}
+}
+
+func TestAListingAboveStderrMarksExactlyWhatItLists(t *testing.T) {
+	listing := t.TempDir()
+	for _, name := range []string{"0", "1", "2", "7", "40"} {
+		if err := os.WriteFile(filepath.Join(listing, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var marked []int
+	markInheritedOnExec(listing, func() bool { return false }, func(fd int) { marked = append(marked, fd) })
+	slices.Sort(marked)
+	if !slices.Equal(marked, []int{7, 40}) {
+		t.Fatalf("marked %v", marked)
+	}
+}
+
+func TestCloseRangeSucceedingNeedsNoListingOrSweep(t *testing.T) {
+	marked := 0
+	markInheritedOnExec(t.TempDir(), func() bool { return true }, func(int) { marked++ })
+	if marked != 0 {
+		t.Fatalf("marked %d descriptors after close_range", marked)
+	}
 }
 
 func TestDetachRunsTheCoordinatorInANewSessionWithNullStdio(t *testing.T) {
@@ -120,6 +156,9 @@ func TestDetachRunsTheCoordinatorInANewSessionWithNullStdio(t *testing.T) {
 		}
 		if !slices.Contains(cmd.Args, "-detach=false") {
 			t.Fatal("the re-exec would detach again", cmd.Args)
+		}
+		if cmd.Dir != "/" {
+			t.Fatalf("the coordinator would keep the launcher's directory: %q", cmd.Dir)
 		}
 		return nil
 	})

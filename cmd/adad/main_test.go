@@ -58,6 +58,13 @@ func init() {
 		Type string `json:"type"`
 	}
 	if err := json.NewDecoder(os.Stdin).Decode(&next); err == nil && next.Type == "cancel" {
+		// A test that needs the stop to take a while holds the cancel's result.
+		os.WriteFile(filepath.Join(base, "cancel.marker"), nil, 0600)
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(filepath.Join(base, "hold-cancel")); err != nil {
+				break
+			}
+		}
 		line(3, "result", map[string]any{"attempt_id": start.AttemptID, "run_id": "block-run", "result": map[string]any{"status": "canceled"}})
 		os.Exit(0)
 	}
@@ -1120,5 +1127,137 @@ func TestStartUpRemovesAnOrphanedBlobAndKeepsReferencedAndUnfinishedOnes(t *test
 	}
 	if got, err := os.ReadFile(unfinished); err != nil || string(got) != "half a blob" {
 		t.Fatalf("the unfinished write: %q, %v", got, err)
+	}
+}
+
+// The endpoint stays up while a signal-driven stop cancels running work; a start
+// in that time must be refused, as it is during the owner's stop.
+func TestAStartDuringASignalDrivenStopIsRefused(t *testing.T) {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	s, err := store.Open(ctx, filepath.Join(dir, "adanext.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.CreateUser(ctx, "local", "Local"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Do(ctx, "local", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','p','/never-use','now'),('q','q','/never-use-either','now')")
+		return []byte("ok"), err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for task, project := range map[string]string{"running": "p", "late": "q"} {
+		if err := s.AddMember(ctx, project, "local", "owner"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateTask(ctx, "local", task, project, "objective", "criteria"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Transition(ctx, "local", task, store.Draft, store.Ready, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	name := testEndpointName(t)
+	signal, stop := context.WithCancel(ctx)
+	defer stop()
+	var output bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- run(signal, []string{"-state-dir", dir, "-name", name, "-engine", os.Args[0], "-engine-sha256", hex.EncodeToString(digest[:])}, &output, &output)
+	}()
+	cfg := ipc.Config{StateDir: dir, Name: name}
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return ipc.Dial(ctx, cfg) }}}
+	defer client.CloseIdleConnections()
+	start := func(task, key string) (int, []byte, error) {
+		req, err := http.NewRequest("POST", "http://ipc/v1/tasks/"+task+"/start", strings.NewReader(`{"backend":"codex","mode":"auto"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Idempotency-Key", key)
+		req.Header.Set("If-Match", "1")
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		return resp.StatusCode, body, err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var body []byte
+	for {
+		code, b, err := start("running", "start-running")
+		if err == nil && code == 200 {
+			body = b
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("start = %d %s %v", code, b, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var started struct {
+		AttemptID string `json:"attempt_id"`
+	}
+	if err := json.Unmarshal(body, &started); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(dir, "attempts", started.AttemptID)
+	for {
+		task, err := s.Task(ctx, "local", "running")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.State == store.Running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task = %+v", task)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The engine holds its cancel's result, so the stop keeps the endpoint up.
+	if err := os.WriteFile(filepath.Join(base, "hold-cancel"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	for {
+		if _, err := os.Stat(filepath.Join(base, "cancel.marker")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the signal did not cancel the running attempt")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	code, refused, err := start("late", "start-late")
+	os.Remove(filepath.Join(base, "hold-cancel"))
+	if err != nil || code != 503 || !bytes.Contains(refused, []byte(`"error":"shutting_down"`)) {
+		t.Fatalf("a start during the stop = %d %s %v", code, refused, err)
+	}
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("run = %d: %s", code, output.String())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the coordinator did not exit after the signal")
+	}
+	task, err := s.Task(ctx, "local", "late")
+	if err != nil || task.State != store.Ready {
+		t.Fatalf("late task = %+v: %v", task, err)
 	}
 }

@@ -24,6 +24,7 @@ const described: Record<string, string> = {
 // The states the coordinator leaves on its own; the others change only on a request from here.
 const activeStates = new Set<TaskState>(["preparing", "running", "verifying", "cancel_requested", "interrupted"]);
 const pollMs = 2000;
+const refreshLimit = 4;
 
 function shown(error: unknown): Shown {
   if (error instanceof AdaError) return { code: error.code, message: described[error.code] ?? error.message, requestId: error.requestId };
@@ -56,12 +57,23 @@ export function App({ client }: { client: AdaClient }) {
     setTasks((current) => current.map((t) => (t.id === task.id && task.revision >= t.revision ? task : t)));
   }, []);
 
-  // refresh reads one task back from the coordinator; one read per task is in flight at a time,
-  // so a busy stream does not pile up requests. A failure is shown; a success clears nothing.
+  // refresh reads one task back from the coordinator: one read per task and refreshLimit in all
+  // are in flight, the rest wait their turn in order. A trigger during a task's read asks for one
+  // more read after it, since that answer may predate what triggered it. A failure is shown; a
+  // success clears nothing.
   const reading = useRef(new Set<string>());
+  const again = useRef(new Set<string>());
+  const waiting = useRef<string[]>([]);
   const refresh = useCallback(
     async (id: string) => {
-      if (reading.current.has(id)) return;
+      if (reading.current.has(id)) {
+        again.current.add(id);
+        return;
+      }
+      if (reading.current.size >= refreshLimit) {
+        if (!waiting.current.includes(id)) waiting.current.push(id);
+        return;
+      }
       reading.current.add(id);
       try {
         replace(await client.getTask(id));
@@ -69,6 +81,9 @@ export function App({ client }: { client: AdaClient }) {
         if (!quitting.current) setError(shown(e));
       } finally {
         reading.current.delete(id);
+        if (again.current.delete(id) && !waiting.current.includes(id)) waiting.current.unshift(id);
+        const next = waiting.current.shift();
+        if (next !== undefined) void refresh(next);
       }
     },
     [client, replace],

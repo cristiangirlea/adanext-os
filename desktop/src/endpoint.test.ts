@@ -1,10 +1,10 @@
 import { expect, it, vi } from "vitest";
 import net from "node:net";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { call, endpoint, findOrStart, probeCoordinator } from "./adad";
+import { call, endpoint, findOrStart, ownerOnlyDirectory, probeCoordinator } from "./adad";
 import { openEventStream } from "./sse";
 
 async function peer(mode: string) {
@@ -95,3 +95,23 @@ for (const mode of ["silent", "trickle", "http-silent", "http-trickle"]) {
     } finally { await fake.close(); }
   });
 }
+
+it("trusts a token only in the user's own 0700 directory", () => {
+  const dir = (mode: number, uid = 501, directory = true) => ({ isDirectory: () => directory, uid, mode });
+  expect(ownerOnlyDirectory(dir(0o40700), 501)).toBe(true);
+  expect(ownerOnlyDirectory(dir(0o40750), 501)).toBe(false);
+  expect(ownerOnlyDirectory(dir(0o40755), 501)).toBe(false);
+  expect(ownerOnlyDirectory(dir(0o40700, 0), 501)).toBe(false);
+  expect(ownerOnlyDirectory(dir(0o120700, 501, false), 501)).toBe(false);
+  expect(ownerOnlyDirectory(dir(0o40700), undefined)).toBe(false);
+});
+
+it.skipIf(process.platform === "win32")("refuses a token whose directory another account can read, before the handshake", async () => {
+  const fake = await peer("good");
+  try {
+    await chmod(fake.config.stateDir, 0o750);
+    await expect(call(fake.socketPath, { method: "GET", path: "/v1/tasks", timeoutMs: 300 })).rejects.toThrow("endpoint authentication failed");
+    expect(fake.nonces).toHaveLength(0);
+    expect(fake.payload()).toBe("");
+  } finally { await fake.close(); }
+});

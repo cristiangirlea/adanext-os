@@ -446,7 +446,7 @@ func TestAStartArrivingBetweenTheStopsCommitAndTheExecutorHandoffIsRefused(t *te
 	}
 	runner := &recordingRunner{}
 	stopper := &recordingStopper{}
-	h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "local", nil }, exec: Execution{EngineSHA256: strings.Repeat("a", 64), Runner: runner, Owner: "local", Stopper: stopper}}
+	h := &handler{store: f.s, hub: f.hub, auth: func(*http.Request) (string, error) { return "local", nil }, admission: &Admission{}, exec: Execution{EngineSHA256: strings.Repeat("a", 64), Runner: runner, Owner: "local", Stopper: stopper}}
 	type reply struct {
 		code int
 		body []byte
@@ -551,4 +551,28 @@ func TestDrainLetsAnOpenStreamDeliverWhatIsCommittedAndEnd(t *testing.T) {
 		t.Fatalf("subscribers remain: %d", got)
 	}
 	f.hub.Close()
+}
+
+// A signal stops the coordinator without the owner's request: it closes the same
+// admission, and a start after that is refused rather than queued for no executor.
+func TestAStartAfterTheCoordinatorClosesAdmissionIsRefused(t *testing.T) {
+	runner := &recordingRunner{}
+	admission := &Admission{}
+	f := newFixture(t, Execution{EngineSHA256: strings.Repeat("a", 64), Runner: runner, Owner: "local", Admission: admission})
+	ctx := context.Background()
+	id := create(t, f, "late-create", "work")["id"].(string)
+	if code, _ := f.request(t, "POST", "/v1/tasks/"+id+"/ready", "late-ready", "0", nil); code != 200 {
+		t.Fatal(code)
+	}
+	admission.Close()
+	if code, body := f.request(t, "POST", "/v1/tasks/"+id+"/start", "late-start", "1", []byte(policy)); code != 503 || !bytes.Contains(body, []byte(`"error":"shutting_down"`)) {
+		t.Fatalf("start = %d %s", code, body)
+	}
+	if launched := runner.launches(); len(launched) != 0 {
+		t.Fatalf("launched %v after admission closed", launched)
+	}
+	task, err := f.s.Task(ctx, "alice", id)
+	if err != nil || task.State != store.Ready || task.Revision != 1 {
+		t.Fatalf("task = %+v: %v", task, err)
+	}
 }

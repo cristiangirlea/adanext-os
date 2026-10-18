@@ -72,24 +72,96 @@ func isLowerHex(value string) bool {
 	return err == nil && hex.EncodeToString(decoded) == value
 }
 
+type options struct {
+	stateDir, name, enginePath, engineHash string
+	detach                                 bool
+	concurrency                            int
+}
+
+func parseFlags(args []string, output io.Writer) (*options, *flag.FlagSet, error) {
+	o := &options{}
+	flags := flag.NewFlagSet("adad", flag.ContinueOnError)
+	flags.SetOutput(output)
+	flags.StringVar(&o.stateDir, "state-dir", defaultStateDir(), "coordinator state directory")
+	flags.StringVar(&o.name, "name", "adad", "coordinator endpoint name")
+	flags.BoolVar(&o.detach, "detach", false, "keep neither the desktop's Windows job nor any handle or descriptor it inherited; re-exec before serving")
+	flags.StringVar(&o.enginePath, "engine", "", "pinned Harness engine path")
+	flags.StringVar(&o.engineHash, "engine-sha256", "", "pinned Harness engine SHA-256")
+	flags.IntVar(&o.concurrency, "concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")
+	return o, flags, flags.Parse(args)
+}
+
+// detachArgs drops a trailing "--" that ends the flags, so the re-exec's appended
+// -detach=false stays a flag; a "--" that is a flag's value is kept.
+func detachArgs(args []string) []string {
+	if n := len(args); n > 0 && args[n-1] == "--" {
+		if _, _, err := parseFlags(args[:n-1], io.Discard); err == nil {
+			return args[:n-1]
+		}
+	}
+	return args
+}
+
+// startupLogLimit caps the start-up log; anything beyond it is dropped.
+const startupLogLimit = 64 << 10
+
+// startupLog keeps what a start writes to stderr, which is null for a detached
+// coordinator, until the coordinator serves; then it closes and drops the rest.
+type startupLog struct {
+	mu   sync.Mutex
+	w    io.Writer
+	c    io.Closer
+	left int
+}
+
+func (l *startupLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n := min(len(p), l.left); n > 0 {
+		written, _ := l.w.Write(p[:n])
+		l.left -= max(written, n)
+	}
+	return len(p), nil
+}
+
+func (l *startupLog) close() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.left = 0
+	if l.c != nil {
+		l.c.Close()
+		l.c = nil
+	}
+}
+
+// withStartupLog writes stderr to the state directory's start-up log as well, replaced
+// on every start; without a usable state directory it is stderr alone.
+func withStartupLog(stateDir string, stderr io.Writer) (io.Writer, *startupLog) {
+	if os.MkdirAll(stateDir, 0700) != nil {
+		return stderr, nil
+	}
+	f, err := ipc.OpenStartupLog(stateDir)
+	if err != nil {
+		return stderr, nil
+	}
+	log := &startupLog{w: f, c: f, left: startupLogLimit}
+	return io.MultiWriter(log, stderr), log
+}
+
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	_ = stdout
-	flags := flag.NewFlagSet("adad", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	stateDir := flags.String("state-dir", defaultStateDir(), "coordinator state directory")
-	name := flags.String("name", "adad", "coordinator endpoint name")
-	detach := flags.Bool("detach", false, "keep neither the desktop's Windows job nor any handle or descriptor it inherited; re-exec before serving")
-	enginePath := flags.String("engine", "", "pinned Harness engine path")
-	engineHash := flags.String("engine-sha256", "", "pinned Harness engine SHA-256")
-	concurrency := flags.Int("concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")
-	if err := flags.Parse(args); err != nil {
+	opts, flags, err := parseFlags(args, stderr)
+	if err != nil {
 		return 2
 	}
-	if *concurrency < 1 {
+	if opts.concurrency < 1 {
 		fmt.Fprintln(stderr, "adad: -concurrency must be at least 1")
 		return 2
 	}
-	if *stateDir == "" {
+	if opts.stateDir == "" {
 		fmt.Fprintln(stderr, "adad: LOCALAPPDATA is not set; pass -state-dir")
 		return 2
 	}
@@ -97,7 +169,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "adad: unexpected arguments")
 		return 2
 	}
-	if (*enginePath == "") != (*engineHash == "") || (*engineHash != "" && (len(*engineHash) != 64 || !isLowerHex(*engineHash))) {
+	if (opts.enginePath == "") != (opts.engineHash == "") || (opts.engineHash != "" && (len(opts.engineHash) != 64 || !isLowerHex(opts.engineHash))) {
 		fmt.Fprintln(stderr, "adad: -engine and -engine-sha256 must be paired; SHA-256 must be 64 lowercase hex characters")
 		return 2
 	}
@@ -105,21 +177,26 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "adad: stopped during start-up")
 		return 0
 	}
-	if *detach {
-		launched, err := detachFromJob(args)
+	if opts.detach {
+		launched, err := detachFromJob(detachArgs(args))
 		if err != nil {
+			// The launcher's stdio may be null or already dropped.
+			stderr, log := withStartupLog(opts.stateDir, stderr)
 			fmt.Fprintln(stderr, "adad:", err)
+			log.close()
 			return 1
 		}
 		if launched {
 			return 0
 		}
 	}
-	if err := os.MkdirAll(*stateDir, 0700); err != nil {
+	if err := os.MkdirAll(opts.stateDir, 0700); err != nil {
 		fmt.Fprintln(stderr, "adad: create state directory:", err)
 		return 1
 	}
-	lock, err := ipc.Acquire(ipc.Config{StateDir: *stateDir, Name: *name})
+	stderr, startup := withStartupLog(opts.stateDir, stderr)
+	defer startup.close()
+	lock, err := ipc.Acquire(ipc.Config{StateDir: opts.stateDir, Name: opts.name})
 	if err != nil {
 		var running *ipc.AlreadyRunningError
 		if errors.As(err, &running) {
@@ -130,7 +207,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer lock.Release()
-	s, err := store.Open(ctx, filepath.Join(*stateDir, "adanext.db"))
+	s, err := store.Open(ctx, filepath.Join(opts.stateDir, "adanext.db"))
 	if err != nil {
 		if ctx.Err() != nil {
 			fmt.Fprintln(stderr, "adad: stopped during start-up")
@@ -169,17 +246,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	// Artifacts already on disk are served whether or not this coordinator
 	// runs an engine: a restart without one still answers reads of past results.
-	artifacts, err := artifact.Open(filepath.Join(*stateDir, "artifacts"))
+	artifacts, err := artifact.Open(filepath.Join(opts.stateDir, "artifacts"))
 	if err != nil {
 		fmt.Fprintln(stderr, "adad: open artifacts:", err)
 		return 1
 	}
 	stop := &coordinatorStop{requested: make(chan struct{})}
-	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Writer: artifacts, Owner: ownerAccount, Stopper: stop}
+	admission := &api.Admission{}
+	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Writer: artifacts, Owner: ownerAccount, Stopper: stop, Admission: admission}
 	// Without a usable git adad still serves; only inspection answers git_unavailable.
-	mirrors := filepath.Join(*stateDir, "inspect")
+	mirrors := filepath.Join(opts.stateDir, "inspect")
 	_ = os.RemoveAll(mirrors) // mirrors an earlier coordinator did not finish removing
-	if git, err := source.Resolve(ctx, filepath.Join(*stateDir, "git")); err != nil {
+	if git, err := source.Resolve(ctx, filepath.Join(opts.stateDir, "git")); err != nil {
 		fmt.Fprintln(stderr, "adad: inspection unavailable:", err)
 		execution.GitUnavailable = err.Error()
 	} else {
@@ -200,10 +278,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		})
 		return stopErr
 	}
-	if *enginePath != "" && *engineHash != "" {
-		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: *concurrency})
+	if opts.enginePath != "" && opts.engineHash != "" {
+		local = executor.New(executor.Config{EnginePath: opts.enginePath, EngineSHA256: opts.engineHash, StateDir: opts.stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: opts.concurrency})
 		stop.local = local
-		execution.EngineSHA256, execution.Runner = *engineHash, local
+		execution.EngineSHA256, execution.Runner = opts.engineHash, local
 		defer func() {
 			if err := stopExecutor(); err != nil {
 				fmt.Fprintln(stderr, "adad: stop executor:", err)
@@ -219,6 +297,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	server := &http.Server{Handler: api.New(s, hub, func(*http.Request) (string, error) { return ownerAccount, nil }, execution), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
 	server.RegisterOnShutdown(hub.Close)
 	serveErr := make(chan error, 1)
+	startup.close()
 	go func() { serveErr <- server.Serve(listener) }()
 	// A signal and the owner's stop request take the same path: the stop request
 	// has already recorded its reason on every attempt and asked the running ones
@@ -239,6 +318,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	case <-stopping:
+		// Either path refuses starts from here: the endpoint stays up while work stops.
+		admission.Close()
 		// Keep the endpoint alive until cancellation and process-tree shutdown
 		// finish. Its disappearance is the desktop's proof that work stopped.
 		if err := stopExecutor(); err != nil {

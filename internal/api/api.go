@@ -41,17 +41,13 @@ const maxQueuedPerUser = 3
 const stopReason = "coordinator stopped by the owner"
 
 type handler struct {
-	store    *store.Store
-	hub      *Hub
-	auth     Authenticator
-	exec     Execution
-	readPage func(context.Context, string, string, int64, int, int, func(store.Event) int) ([]store.Event, error)
-	readLast func(context.Context, string, string) (int64, error)
-	// admission serialises start against the owner's stop: a start holds it
-	// shared from its transaction through the scheduler handoff, the stop
-	// exclusively from before its transaction through the executor handoff.
-	admission         sync.RWMutex
-	stopping          bool        // Set under admission by a stop that committed; starts are then refused.
+	store             *store.Store
+	hub               *Hub
+	auth              Authenticator
+	exec              Execution
+	readPage          func(context.Context, string, string, int64, int, int, func(store.Event) int) ([]store.Event, error)
+	readLast          func(context.Context, string, string) (int64, error)
+	admission         *Admission
 	beforeStopHandoff func()      // Test seam between the stop's commit and the executor handoff.
 	capturing         atomic.Bool // Held by the one snapshot capturing and storing at a time.
 }
@@ -101,6 +97,22 @@ type ArtifactWriter interface {
 	sync.Locker
 }
 
+// Admission serialises starts against the coordinator's stop: a start holds it
+// shared from its transaction through the scheduler handoff, a stop exclusively,
+// the owner's from before its transaction through the executor handoff. The
+// coordinator closes it itself on a signal, before stopping the executor.
+type Admission struct {
+	mu       sync.RWMutex
+	stopping bool // Set under mu once a stop begins; starts are then refused.
+}
+
+// Close refuses every later start, after any start already admitted has handed off.
+func (a *Admission) Close() {
+	a.mu.Lock()
+	a.stopping = true
+	a.mu.Unlock()
+}
+
 type Execution struct {
 	EngineSHA256 string
 	Generation   int64
@@ -114,12 +126,18 @@ type Execution struct {
 	Writer       ArtifactWriter     // stores snapshot content; nil until the artifact store opens
 	// GitUnavailable is why Inspector is nil, the message of git_unavailable.
 	GitUnavailable string
+	// Admission is shared with the coordinator's signal-driven stop; New makes one when nil.
+	Admission *Admission
 }
 
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
 	h := &handler{store: s, hub: hub, auth: auth}
 	if len(execution) != 0 {
 		h.exec = execution[0]
+	}
+	h.admission = h.exec.Admission
+	if h.admission == nil {
+		h.admission = &Admission{}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/tasks", h.create)
@@ -613,10 +631,10 @@ func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
-	h.admission.Lock()
-	defer h.admission.Unlock()
-	wasStopping := h.stopping
-	h.stopping = true
+	h.admission.mu.Lock()
+	defer h.admission.mu.Unlock()
+	wasStopping := h.admission.stopping
+	h.admission.stopping = true
 	var result store.StopResult
 	stopped := false
 	ok = h.mutate(w, r, user, k, nil, "", func(tx *store.Tx) (int, any, error) {
@@ -639,7 +657,7 @@ func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 		return 202, stopJSON{result.Running, result.Queued, stopReason}, nil
 	})
 	if !ok || !stopped {
-		h.stopping = wasStopping
+		h.admission.stopping = wasStopping
 		return
 	}
 	for _, id := range result.Attempts {
@@ -690,11 +708,11 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 	// Held through the transaction and the scheduler handoff: a stop waits
 	// for both, and a start that finds the stop in or past its transaction
 	// is refused rather than recorded for an executor that will not run it.
-	h.admission.RLock()
-	defer h.admission.RUnlock()
+	h.admission.mu.RLock()
+	defer h.admission.mu.RUnlock()
 	var attemptID string
 	ok = h.mutate(w, r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
-		if h.stopping {
+		if h.admission.stopping {
 			return 0, nil, errShuttingDown
 		}
 		if h.exec.EngineSHA256 == "" || h.exec.Runner == nil {

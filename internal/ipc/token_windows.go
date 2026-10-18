@@ -12,6 +12,15 @@ import (
 )
 
 func createTokenFile(dir string) (*os.File, error) {
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return createOwnerOnly(filepath.Join(dir, ".adad-token-"+hex.EncodeToString(nonce)))
+}
+
+// createOwnerOnly creates a new file whose DACL grants only the current user.
+func createOwnerOnly(name string) (*os.File, error) {
 	sid, err := currentSID()
 	if err != nil {
 		return nil, err
@@ -20,11 +29,6 @@ func createTokenFile(dir string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	nonce := make([]byte, 16)
-	if _, err = rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	name := filepath.Join(dir, ".adad-token-"+hex.EncodeToString(nonce))
 	ptr, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, err
@@ -37,3 +41,6 @@ func createTokenFile(dir string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(h), name), nil
 }
+
+// The token itself carries an owner-only DACL on Windows.
+func checkTokenDir(string) error { return nil }

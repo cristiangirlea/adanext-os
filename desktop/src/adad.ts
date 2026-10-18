@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
@@ -62,6 +62,17 @@ export class EndpointAuthenticationError extends Error {
   constructor() { super("endpoint authentication failed"); }
 }
 
+// On Unix the token's directory must be the user's own and 0700: an account that could
+// replace the token could replace the socket too.
+export function ownerOnlyDirectory(info: { isDirectory(): boolean; uid: number; mode: number }, uid: number | undefined): boolean {
+  return info.isDirectory() && uid !== undefined && info.uid === uid && (info.mode & 0o777) === 0o700;
+}
+
+async function readEndpointToken(stateDir: string): Promise<Buffer> {
+  if (process.platform !== "win32" && !ownerOnlyDirectory(await lstat(stateDir), process.getuid?.())) throw new EndpointAuthenticationError();
+  return readFile(path.join(stateDir, "adad.token"));
+}
+
 // No socket is returned to http until the proof has been checked. Returning the
 // connecting socket here would let Node flush buffered request headers early.
 export function endpointConnection(socketPath: string, timeoutMs = 5000): NonNullable<http.RequestOptions["createConnection"]> {
@@ -100,7 +111,7 @@ export function endpointConnection(socketPath: string, timeoutMs = 5000): NonNul
       connected = true;
       const dir = endpointStates.get(socketPath);
       if (!dir) { finish(new EndpointAuthenticationError()); return; }
-      void readFile(path.join(dir, "adad.token")).then((value) => {
+      void readEndpointToken(dir).then((value) => {
         if (settled) return;
         if (value.length !== 32) { finish(new EndpointAuthenticationError()); return; }
         key = value;
@@ -331,8 +342,10 @@ export async function findOrStart(config: CoordinatorConfig, socketPath: string,
     })) return;
     await io.sleep(Math.min(100, Math.max(0, deadline - io.now())));
   }
-  if (last) throw new Error("timed out waiting for adad to start: the endpoint accepted connections but did not answer", { cause: last });
-  throw new Error("timed out waiting for adad to start");
+  // A detached coordinator's stderr is null; its start-up errors are in this log.
+  const log = `its start-up log is ${path.join(config.stateDir, "startup.log")}`;
+  if (last) throw new Error(`timed out waiting for adad to start: the endpoint accepted connections but did not answer; ${log}`, { cause: last });
+  throw new Error(`timed out waiting for adad to start; ${log}`);
 }
 
 // The coordinator's worst orderly stop: the executor's stop budget (5 grace periods of 10 s
