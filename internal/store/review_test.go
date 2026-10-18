@@ -17,8 +17,8 @@ func TestOpenRefusesUnrecordedOrTamperedMigrations(t *testing.T) {
 	for _, tc := range []struct{ query, want string }{
 		{"DROP TABLE events", "invalid store schema"},
 		{"UPDATE schema_migrations SET sha256='tampered' WHERE version=1", "migration 1 checksum differs"},
-		{"DELETE FROM schema_migrations", "requires 5 migration records, found 0"},
-		{"INSERT INTO schema_migrations VALUES(6,'unexpected')", "recorded migration version 6 is inconsistent with schema version 5"},
+		{"DELETE FROM schema_migrations", "requires 6 migration records, found 0"},
+		{"INSERT INTO schema_migrations VALUES(7,'unexpected')", "recorded migration version 7 is inconsistent with schema version 6"},
 		{"PRAGMA user_version=0", "recorded migration version 1 is inconsistent with schema version 0"},
 	} {
 		query := tc.query
@@ -264,7 +264,7 @@ func TestMigrationRefusesForeignKeyViolationsBeforeCommit(t *testing.T) {
 	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.ExecContext(ctx, "INSERT INTO tasks VALUES('orphan','missing','u','objective','criteria','draft',0,'created','updated')"); err != nil {
+	if _, err := conn.ExecContext(ctx, "INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated) VALUES('orphan','missing','u','objective','criteria','draft',0,'created','updated')"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
@@ -282,12 +282,12 @@ func TestMigrationRefusesForeignKeyViolationsBeforeCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files := fstest.MapFS{"migrations/0001_initial.sql": &fstest.MapFile{Data: initial}, "migrations/0002_idempotency_project.sql": &fstest.MapFile{Data: second}, "migrations/0003_artifacts.sql": &fstest.MapFile{Data: third}, "migrations/0004_execution.sql": &fstest.MapFile{Data: mustMigration(t, "migrations/0004_execution.sql")}, "migrations/0005_import.sql": &fstest.MapFile{Data: mustMigration(t, "migrations/0005_import.sql")}, "migrations/0006_good.sql": &fstest.MapFile{Data: []byte("CREATE TABLE should_not_commit(id INTEGER);")}}
+	files := fstest.MapFS{"migrations/0001_initial.sql": &fstest.MapFile{Data: initial}, "migrations/0002_idempotency_project.sql": &fstest.MapFile{Data: second}, "migrations/0003_artifacts.sql": &fstest.MapFile{Data: third}, "migrations/0004_execution.sql": &fstest.MapFile{Data: mustMigration(t, "migrations/0004_execution.sql")}, "migrations/0005_import.sql": &fstest.MapFile{Data: mustMigration(t, "migrations/0005_import.sql")}, "migrations/0006_workspaces.sql": &fstest.MapFile{Data: mustMigration(t, "migrations/0006_workspaces.sql")}, "migrations/0007_good.sql": &fstest.MapFile{Data: []byte("CREATE TABLE should_not_commit(id INTEGER);")}}
 	if err := s.migrate(ctx, files); err == nil || !strings.Contains(err.Error(), "foreign key check") {
 		t.Fatalf("migration: %v", err)
 	}
 	var version, count int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
 		t.Fatalf("version: %d %v", version, err)
 	}
 	if err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='should_not_commit'").Scan(&count); err != nil || count != 0 {

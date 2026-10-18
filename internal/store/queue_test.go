@@ -101,7 +101,7 @@ func seedSecondUserAndTasks(t *testing.T, s *Store) {
 	execute(t, s, `INSERT INTO project_members VALUES ('q', 'u', 'owner', 'added')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('q', 'v', 'member', 'added')`)
 	for _, row := range [][3]string{{"t2", "p", "u"}, {"t3", "q", "v"}, {"t4", "p", "u"}} {
-		execute(t, s, `INSERT INTO tasks VALUES (?, ?, ?, 'objective', 'criteria', 'preparing', 2, 'created', 'updated')`, row[0], row[1], row[2])
+		execute(t, s, `INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated) VALUES (?, ?, ?, 'objective', 'criteria', 'preparing', 2, 'created', 'updated')`, row[0], row[1], row[2])
 	}
 	// Three more pending attempts: the second created in the same instant as
 	// the first, so the row order breaks the tie; one by the other user.

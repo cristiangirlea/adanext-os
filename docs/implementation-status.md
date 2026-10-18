@@ -1184,6 +1184,26 @@ more users (M4b), artifact origins when content repeats (#89).
   because before M4 there is no real workflow, diff or review to show; the branch hand-off joins
   M7. JetBrains (Kotlin, its own pipe or socket client and handshake) is a later slice.
 
+- **2026-10-19, M3.3 managed clone and task workspaces.** Points the backlog entry left open.
+  A task binds to a snapshot when it is created (`POST /v1/tasks` takes an optional `snapshot`,
+  one of the project's, else 404) and keeps it; migration 0006 adds the nullable
+  `tasks.snapshot` and the `workspaces` table. Starting a task of an imported project with no
+  snapshot answers 409 `snapshot_required`, and one whose snapshot was taken on an unborn branch
+  409 `unborn_base`; a project with no source (only test seeds) keeps the scratch directory. The
+  clone is made on the first start that needs it, not at import, and every start fetches, each
+  from a freshly built mirror under a per-project lock. The mirror records the original's HEAD
+  commit as `refs/ada/head`, and every fetch takes it, so a detached base no branch reaches is
+  always present (#79); the fetch leaves Ada's own `ada/*` branches alone. The workspace is
+  prepared after the launch claim and before the engine starts; a cancel or stop ends the
+  preparation and the attempt fails, as a cancel during launch already did. The manifest's
+  policy is the attempt's mode. Untracked files are created through a parent-directory handle
+  per component that never follows a link (`openat` with `O_NOFOLLOW`, or `NtCreateFile` with
+  `FILE_OPEN_REPARSE_POINT` relative to the parent's handle). Just before the engine starts the
+  executor compares the workspace row with the attempt's identity, the row with its hash, and
+  the copy in the worktree's git directory with the row; any difference, or a missing worktree,
+  moves the attempt to `recovery_required` with a recovery event naming it, and nothing is
+  rebuilt. Worktrees and task branches are never removed in M3.3; M7 exports and removes them.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).

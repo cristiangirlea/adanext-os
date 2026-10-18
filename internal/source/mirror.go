@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,12 +31,14 @@ type mirrorSource struct {
 	files        ConfigFiles
 	index        []byte // nil when the repository has no index yet
 	indexModTime time.Time
+	head         string // the HEAD commit, empty when unborn
 }
 
 // writeMirror builds a git directory at mirror that git can use with the
 // original's work tree: Ada's config, copies of HEAD, refs, shallow, the
-// excludes and attributes, the index with its mtime, and the original's
-// objects through alternates.
+// excludes and attributes, the index with its mtime, the original's objects
+// through alternates, and refs/ada/head naming the HEAD commit, so a fetch
+// always reaches a detached HEAD.
 func writeMirror(mirror string, src mirrorSource) error {
 	for _, dir := range []string{"objects/info", "refs", "info"} {
 		if err := os.MkdirAll(filepath.Join(mirror, filepath.FromSlash(dir)), 0o700); err != nil {
@@ -43,38 +46,7 @@ func writeMirror(mirror string, src mirrorSource) error {
 		}
 	}
 	l := src.layout
-	var cfg strings.Builder
-	version, _ := src.repo.get("core.repositoryformatversion")
-	if version == "" {
-		version = "0"
-	}
-	cfg.WriteString("[core]\n\trepositoryformatversion = " + quoteConfig(version) + "\n\tbare = false\n")
-	for _, key := range mirrorKeys {
-		if v, ok := src.merged.get(key); ok {
-			cfg.WriteString("\t" + key[len("core."):] + " = " + quoteConfig(v) + "\n")
-		}
-	}
-	for _, f := range []struct{ key, fallback, name string }{
-		{"core.excludesFile", "ignore", "ada-excludes"},
-		{"core.attributesFile", "attributes", "ada-attributes"},
-	} {
-		path := src.files.userFile(src.merged, f.key, f.fallback)
-		if path == "" || IsRemotePath(path) {
-			continue
-		}
-		dst := filepath.Join(mirror, f.name)
-		copied, err := copyUserFile(path, dst)
-		if err != nil {
-			return err
-		}
-		if copied {
-			cfg.WriteString("\t" + f.key[len("core."):] + " = " + quoteConfig(filepath.ToSlash(dst)) + "\n")
-		}
-	}
-	if format, ok := src.repo.get("extensions.objectformat"); ok {
-		cfg.WriteString("[extensions]\n\tobjectformat = " + quoteConfig(format) + "\n")
-	}
-	if err := os.WriteFile(filepath.Join(mirror, "config"), []byte(cfg.String()), 0o600); err != nil {
+	if err := writeAdaConfig(mirror, src, false); err != nil {
 		return err
 	}
 	if copied, err := copyRepoFile(l.gitDir, filepath.Join(l.gitDir, "HEAD"), filepath.Join(mirror, "HEAD")); err != nil || !copied {
@@ -97,6 +69,17 @@ func writeMirror(mirror string, src mirrorSource) error {
 			return err
 		}
 	}
+	if err := os.RemoveAll(filepath.Join(mirror, "refs", "ada")); err != nil {
+		return err
+	}
+	if src.head != "" {
+		if err := os.MkdirAll(filepath.Join(mirror, "refs", "ada"), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(mirror, "refs", "ada", "head"), []byte(src.head+"\n"), 0o600); err != nil {
+			return err
+		}
+	}
 	if info, err := os.Lstat(filepath.Join(l.commonDir, "objects")); err != nil || !info.IsDir() || isLink(filepath.Join(l.commonDir, "objects"), info) {
 		return errors.New("objects is not a directory")
 	}
@@ -115,6 +98,50 @@ func writeMirror(mirror string, src mirrorSource) error {
 		}
 	}
 	return nil
+}
+
+// writeAdaConfig writes the config of Ada's git directory dir: the format
+// version and object format, the data-only keys, and copies of the user's
+// excludes and attributes files; core holds further [core] lines.
+func writeAdaConfig(dir string, src mirrorSource, bare bool, core ...string) error {
+	var cfg strings.Builder
+	version, _ := src.repo.get("core.repositoryformatversion")
+	if version == "" {
+		version = "0"
+	}
+	cfg.WriteString("[core]\n\trepositoryformatversion = " + quoteConfig(version) + "\n\tbare = " + strconv.FormatBool(bare) + "\n")
+	for _, line := range core {
+		cfg.WriteString("\t" + line + "\n")
+	}
+	for _, key := range mirrorKeys {
+		if v, ok := src.merged.get(key); ok {
+			cfg.WriteString("\t" + key[len("core."):] + " = " + quoteConfig(v) + "\n")
+		}
+	}
+	for _, f := range []struct{ key, fallback, name string }{
+		{"core.excludesFile", "ignore", "ada-excludes"},
+		{"core.attributesFile", "attributes", "ada-attributes"},
+	} {
+		dst := filepath.Join(dir, f.name)
+		if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		path := src.files.userFile(src.merged, f.key, f.fallback)
+		if path == "" || IsRemotePath(path) {
+			continue
+		}
+		copied, err := copyUserFile(path, dst)
+		if err != nil {
+			return err
+		}
+		if copied {
+			cfg.WriteString("\t" + f.key[len("core."):] + " = " + quoteConfig(filepath.ToSlash(dst)) + "\n")
+		}
+	}
+	if format, ok := src.repo.get("extensions.objectformat"); ok {
+		cfg.WriteString("[extensions]\n\tobjectformat = " + quoteConfig(format) + "\n")
+	}
+	return os.WriteFile(filepath.Join(dir, "config"), []byte(cfg.String()), 0o600)
 }
 
 // copyUserFile copies a regular file a config names, following its local

@@ -171,9 +171,17 @@ func TestHelperFakeEngine(t *testing.T) {
 	if err := json.Unmarshal(rawStart, &input); err != nil {
 		os.Exit(2)
 	}
-	if input.Type != "start" || input.Task.Prompt != "objective\n\nAcceptance criteria:\ncriteria" || input.Task.Backend != "codex" || input.Task.Mode != "auto" || input.Task.Dir != filepath.Join(filepath.Dir(os.Getenv("HRN_HOME")), "work") || strings.Contains(input.Task.Dir, "never-use") {
+	wantDir := os.Getenv("ADA_FAKE_DIR") // a workspace test's worktree
+	if wantDir == "" {
+		wantDir = filepath.Join(filepath.Dir(os.Getenv("HRN_HOME")), "work")
+	}
+	if input.Type != "start" || input.Task.Prompt != "objective\n\nAcceptance criteria:\ncriteria" || input.Task.Backend != "codex" || input.Task.Mode != "auto" || input.Task.Dir != wantDir || strings.Contains(input.Task.Dir, "never-use") {
 		fmt.Fprintln(os.Stderr, "invalid scratch task")
 		os.Exit(2)
+	}
+	if os.Getenv("ADA_FAKE_DIR") != "" {
+		cwd, _ := os.Getwd()
+		mark("cwd:" + cwd)
 	}
 	if info, err := os.Stat(input.Task.Dir); err != nil || !info.IsDir() {
 		fmt.Fprintln(os.Stderr, "scratch missing")

@@ -1,0 +1,258 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/cristiangirlea/ada-os/internal/source"
+	"github.com/cristiangirlea/ada-os/internal/store"
+)
+
+// fixtureGit runs the system git in dir to build a repository, with the
+// machine's own system and global config left out.
+func fixtureGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "init.defaultBranch=main"}, args...)...)
+	cmd.Dir = dir
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(kv), "GIT_") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_AUTHOR_NAME=Ada Test", "GIT_AUTHOR_EMAIL=ada@example.com", "GIT_COMMITTER_NAME=Ada Test", "GIT_COMMITTER_EMAIL=ada@example.com")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// treeSums hashes every file under dir, .git included.
+func treeSums(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	sums := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		sums[path] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sums
+}
+
+// workspaceExecutor is testExecutor with project p imported from a
+// repository holding staged, unstaged and untracked work, and the task bound
+// to a snapshot of it.
+func workspaceExecutor(t *testing.T, script string) (e *Executor, s *store.Store, marker, repo, worktree string) {
+	t.Helper()
+	ctx := context.Background()
+	e, s, dir, marker := testExecutor(t, script)
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureGit(t, repo, "init", "-q")
+	writeFile(t, filepath.Join(repo, "a.txt"), "one\n")
+	fixtureGit(t, repo, "add", "a.txt")
+	fixtureGit(t, repo, "commit", "-q", "-m", "first")
+	writeFile(t, filepath.Join(repo, "a.txt"), "one\nstaged\n")
+	fixtureGit(t, repo, "add", "a.txt")
+	writeFile(t, filepath.Join(repo, "a.txt"), "one\nstaged\nunstaged\n")
+	writeFile(t, filepath.Join(repo, "notes", "n.bin"), "\x00\x01note\r\n")
+	g, err := source.Resolve(ctx, filepath.Join(dir, "git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspector := &source.Inspector{Git: g, MirrorRoot: filepath.Join(dir, "inspect")}
+	c, err := inspector.Capture(ctx, repo, source.Selection{Untracked: []string{"notes/n.bin"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(data []byte) store.ArtifactRef {
+		ref, err := e.cfg.Artifacts.Write(ctx, bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store.ArtifactRef{Hash: ref.Hash, Size: ref.Size}
+	}
+	snap := store.Snapshot{ID: "snap", Project: "p", BaseCommit: c.Inspection.Identity.Head, Fingerprint: c.Inspection.Fingerprint, Staged: write(c.Staged), Unstaged: write(c.Unstaged)}
+	for _, f := range c.Untracked {
+		snap.Untracked = append(snap.Untracked, store.SnapshotFile{Path: f.Path, Mode: f.Mode, Artifact: write(f.Content)})
+	}
+	_, err = s.Do(ctx, "u", "bind", "bind", nil, func(tx *store.Tx) ([]byte, error) {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO project_sources(project,canonical_path,common_dir,fingerprint,imported) VALUES('p',?,?,?,'now')", repo, filepath.Join(repo, ".git"), c.Inspection.Fingerprint); err != nil {
+			return nil, err
+		}
+		if _, err := tx.RecordSnapshot(ctx, snap); err != nil {
+			return nil, err
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE tasks SET snapshot='snap' WHERE id='task'")
+		return []byte("ok"), err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.Workspaces = &source.Workspaces{Inspector: inspector, Root: filepath.Join(dir, "projects")}
+	worktree = e.cfg.Workspaces.WorktreePath("p", "attempt")
+	e.cfg.Env = append(e.cfg.Env, "ADA_FAKE_DIR="+worktree)
+	return e, s, marker, repo, worktree
+}
+
+func sameSums(t *testing.T, before, after map[string]string) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Errorf("%d files before, %d after", len(before), len(after))
+	}
+	for path, sum := range before {
+		if after[path] != sum {
+			t.Errorf("%s changed", path)
+		}
+	}
+}
+
+func canonical(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return resolved
+}
+
+func TestTheEngineRunsInTheTasksWorktreeWithTheSnapshotCommitted(t *testing.T) {
+	e, s, marker, repo, worktree := workspaceExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
+	before := treeSums(t, repo)
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	cwd := ""
+	for _, line := range markerLines(t, marker) {
+		if after, ok := strings.CutPrefix(line, "cwd:"); ok {
+			cwd = after
+		}
+	}
+	if cwd == "" || canonical(t, cwd) != canonical(t, worktree) {
+		t.Fatalf("the engine ran in %q, not the worktree %q", cwd, worktree)
+	}
+	for _, p := range []string{"a.txt", "notes/n.bin"} {
+		want, _ := os.ReadFile(filepath.Join(repo, filepath.FromSlash(p)))
+		if got, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(p))); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: worktree %q, original %q, %v", p, got, want, err)
+		}
+	}
+	if got := fixtureGit(t, worktree, "log", "-1", "--format=%s %an"); got != "Imported working changes Ada" {
+		t.Fatalf("worktree HEAD = %q", got)
+	}
+	row, err := s.Workspace(context.Background(), "attempt")
+	if err != nil || row.Path != worktree || row.Branch != "ada/task" || row.Snapshot != "snap" || row.Task != "task" || row.Project != "p" || row.Policy != "auto" || row.Executor != "local" || len(row.ManifestHash) != 64 {
+		t.Fatalf("workspace row = %+v, %v", row, err)
+	}
+	sameSums(t, before, treeSums(t, repo))
+}
+
+func TestAMismatchedWorkspaceGoesToRecoveryRequiredAndIsNotRebuilt(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		tamper func(t *testing.T, s *store.Store, manifest, worktree string)
+		after  func(t *testing.T, manifest, worktree string)
+	}{
+		{"the manifest copy", func(t *testing.T, _ *store.Store, manifest, _ string) {
+			data, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(manifest, bytes.Replace(data, []byte(`"auto"`), []byte(`"yolo"`), 1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, func(t *testing.T, manifest, _ string) {
+			if data, _ := os.ReadFile(manifest); !bytes.Contains(data, []byte(`"yolo"`)) {
+				t.Fatal("the tampered manifest copy was rewritten")
+			}
+		}},
+		{"the workspace row", func(t *testing.T, s *store.Store, _, _ string) {
+			_, err := s.Do(context.Background(), "u", "tamper", "tamper", nil, func(tx *store.Tx) ([]byte, error) {
+				_, err := tx.ExecContext(context.Background(), "UPDATE workspaces SET policy='yolo' WHERE attempt='attempt'")
+				return []byte("ok"), err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}, func(*testing.T, string, string) {}},
+		{"the whole record, rewritten consistently for another policy", func(t *testing.T, s *store.Store, manifest, _ string) {
+			row, err := s.Workspace(context.Background(), "attempt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := source.Manifest{Version: row.ManifestVersion, Project: row.Project, Task: row.Task, Attempt: row.Attempt, Snapshot: row.Snapshot,
+				BaseCommit: row.BaseCommit, Branch: row.Branch, Path: row.Path, Executor: row.Executor, Policy: "yolo"}
+			if err := os.WriteFile(manifest, m.Encode(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = s.Do(context.Background(), "u", "rewrite", "rewrite", nil, func(tx *store.Tx) ([]byte, error) {
+				_, err := tx.ExecContext(context.Background(), "UPDATE workspaces SET policy='yolo',manifest_hash=? WHERE attempt='attempt'", m.Hash())
+				return []byte("ok"), err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}, func(*testing.T, string, string) {}},
+		{"the worktree, deleted", func(t *testing.T, _ *store.Store, _, worktree string) {
+			if err := os.RemoveAll(worktree); err != nil {
+				t.Fatal(err)
+			}
+		}, func(t *testing.T, _, worktree string) {
+			if _, err := os.Lstat(worktree); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the worktree was rebuilt: %v", err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, s, marker, _, worktree := workspaceExecutor(t, "happy")
+			manifest := filepath.Join(e.cfg.Workspaces.Root, "p", "repo.git", "worktrees", "attempt", "ada-manifest.json")
+			e.beforeCheck = func(string) { c.tamper(t, s, manifest, worktree) }
+			e.LaunchAttempt("attempt")
+			waitAttempt(t, s, "recovery_required")
+			task, err := s.Task(context.Background(), "u", "task")
+			if err != nil || task.State != store.RecoveryRequired {
+				t.Fatalf("task = %+v, %v", task, err)
+			}
+			events, err := s.Events(context.Background(), "u", "attempt", 0)
+			if err != nil || len(events) != 1 || events[0].Kind != "recovery" || !bytes.Contains(events[0].Payload, []byte("workspace manifest mismatch")) {
+				t.Fatalf("events = %+v, %v", events, err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the engine started: %v", err)
+			}
+			c.after(t, manifest, worktree)
+		})
+	}
+}

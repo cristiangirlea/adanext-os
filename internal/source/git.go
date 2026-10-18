@@ -111,6 +111,12 @@ func (g *Git) env() []string {
 // command builds a git call against the mirror git directory and the
 // original work tree; both empty for a call that needs no repository.
 func (g *Git) command(ctx context.Context, mirror, workTree string, args ...string) *exec.Cmd {
+	return g.commandWith(ctx, nil, mirror, workTree, args...)
+}
+
+// commandWith is command with further config for this call alone; a git
+// directory may come without a work tree (a bare repository).
+func (g *Git) commandWith(ctx context.Context, config []string, gitDir, workTree string, args ...string) *exec.Cmd {
 	argv := []string{"--no-pager",
 		"-c", "core.hooksPath=" + g.hooks,
 		"-c", "core.fsmonitor=false",
@@ -118,11 +124,17 @@ func (g *Git) command(ctx context.Context, mirror, workTree string, args ...stri
 		"-c", "credential.helper=",
 		"-c", "protocol.allow=never",
 	}
+	for _, c := range config {
+		argv = append(argv, "-c", c)
+	}
 	if len(args) > 0 && (args[0] == "status" || args[0] == "diff") {
 		argv = append(argv, "-c", "diff.ignoreSubmodules=all")
 	}
-	if mirror != "" {
-		argv = append(argv, "--git-dir="+mirror, "--work-tree="+workTree)
+	if gitDir != "" {
+		argv = append(argv, "--git-dir="+gitDir)
+	}
+	if workTree != "" {
+		argv = append(argv, "--work-tree="+workTree)
 	}
 	if len(args) > 0 {
 		argv = append(argv, args[0])
@@ -142,15 +154,19 @@ func (g *Git) command(ctx context.Context, mirror, workTree string, args ...stri
 
 // run returns a call's standard output, or an error carrying its standard error.
 func (g *Git) run(ctx context.Context, mirror, workTree string, args ...string) ([]byte, error) {
-	cmd := g.command(ctx, mirror, workTree, args...)
+	return output(g.command(ctx, mirror, workTree, args...), args[0])
+}
+
+// output runs cmd for git's name subcommand.
+func output(cmd *exec.Cmd, name string) ([]byte, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		if _, ok := errors.AsType[*exec.ExitError](err); ok {
-			return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+			return nil, fmt.Errorf("git %s: %w: %s", name, err, strings.TrimSpace(stderr.String()))
 		}
-		return nil, fmt.Errorf("git %s: %w", args[0], err)
+		return nil, fmt.Errorf("git %s: %w", name, err)
 	}
 	return out, nil
 }

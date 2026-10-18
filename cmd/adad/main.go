@@ -176,8 +176,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	stop := &coordinatorStop{requested: make(chan struct{})}
 	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Writer: artifacts, Owner: ownerAccount, Stopper: stop}
-	// Without a usable git adad still serves; only inspection answers git_unavailable.
+	// Without a usable git adad still serves; only inspection answers
+	// git_unavailable, and an imported project's attempt fails.
 	mirrors := filepath.Join(*stateDir, "inspect")
+	var workspaces *source.Workspaces
 	_ = os.RemoveAll(mirrors) // mirrors an earlier coordinator did not finish removing
 	if git, err := source.Resolve(ctx, filepath.Join(*stateDir, "git")); err != nil {
 		fmt.Fprintln(stderr, "adad: inspection unavailable:", err)
@@ -185,6 +187,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	} else {
 		inspector := &source.Inspector{Git: git, MirrorRoot: mirrors, Config: source.DefaultConfigFiles(git.Path)}
 		execution.Inspector, execution.Capturer = inspector, inspector
+		workspaces = &source.Workspaces{Inspector: inspector, Root: filepath.Join(*stateDir, "projects")}
 	}
 	var local *executor.Executor
 	var stopOnce sync.Once
@@ -201,7 +204,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return stopErr
 	}
 	if *enginePath != "" && *engineHash != "" {
-		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: *concurrency})
+		local = executor.New(executor.Config{EnginePath: *enginePath, EngineSHA256: *engineHash, StateDir: *stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: *concurrency, Workspaces: workspaces})
 		stop.local = local
 		execution.EngineSHA256, execution.Runner = *engineHash, local
 		defer func() {

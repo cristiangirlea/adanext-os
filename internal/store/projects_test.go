@@ -164,7 +164,7 @@ func TestAVersionFourStoreMigratesForwardKeepingItsProjects(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	path := s.path
-	for _, query := range []string{"DROP TABLE snapshot_untracked", "DROP TABLE source_snapshots", "DROP TABLE project_sources", "DELETE FROM schema_migrations WHERE version=5", "PRAGMA user_version=4"} {
+	for _, query := range []string{"DROP TABLE workspaces", "ALTER TABLE tasks DROP COLUMN snapshot", "DROP TABLE snapshot_untracked", "DROP TABLE source_snapshots", "DROP TABLE project_sources", "DELETE FROM schema_migrations WHERE version>=5", "PRAGMA user_version=4"} {
 		execute(t, s, query)
 	}
 	if err := s.Close(); err != nil {
@@ -176,7 +176,7 @@ func TestAVersionFourStoreMigratesForwardKeepingItsProjects(t *testing.T) {
 	}
 	defer upgraded.Close()
 	var version int
-	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
+	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
 		t.Fatalf("version %d: %v", version, err)
 	}
 	if _, err := upgraded.ProjectSource(ctx, "u", "p"); !errors.Is(err, ErrNoSource) {

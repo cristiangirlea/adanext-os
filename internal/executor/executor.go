@@ -22,11 +22,13 @@ import (
 	"github.com/cristiangirlea/ada-os/internal/api"
 	"github.com/cristiangirlea/ada-os/internal/artifact"
 	"github.com/cristiangirlea/ada-os/internal/engine"
+	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
 
 type ArtifactWriter interface {
 	Write(context.Context, io.Reader, int64) (artifact.Ref, error)
+	Open(hash string) (io.ReadCloser, error) // Verifies the content at EOF; a snapshot's content is read through it.
 	Remove(hash string) error
 	Blobs() ([]string, error)
 	sync.Locker // The artifact lifecycle lock, shared with every other writer (artifact.Store.Lock).
@@ -43,7 +45,8 @@ type Config struct {
 	Concurrency                        int // Attempts launched at once across all users; 0 is the plan's default of 1.
 	CancelGrace                        time.Duration
 	PreparingDeadline                  time.Duration
-	Env                                []string // Extra controlled environment entries for helper-process tests.
+	Env                                []string           // Extra controlled environment entries for helper-process tests.
+	Workspaces                         *source.Workspaces // nil when git is missing or too old: an imported project's attempt then fails.
 }
 
 type active struct {
@@ -64,6 +67,7 @@ type Executor struct {
 	afterCancelCheck func()                          // Test seam after the cancel handling first checks whether the engine is accepted.
 	afterRunning     func()                          // Test seam between storing the attempt running and accepting its events.
 	beforeRemove     func(hash string)               // Test seam between discard's reference check and its removal.
+	beforeCheck      func(attemptID string)          // Test seam between preparing the workspace and checking it before the engine starts.
 }
 
 func New(cfg Config) *Executor {
@@ -300,12 +304,13 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}); err != nil {
 		return
 	}
-	if err := os.MkdirAll(work, 0700); err != nil {
-		e.fail(a, fmt.Errorf("scratch directory: %w", err))
+	if err := os.MkdirAll(base, 0700); err != nil {
+		e.fail(a, fmt.Errorf("attempt directory: %w", err))
 		return
 	}
-	if err := os.Chmod(work, 0700); err != nil {
-		e.fail(a, err)
+	work, workspace, err := e.prepare(a, active, work)
+	if err != nil {
+		e.fail(a, fmt.Errorf("workspace: %w", err))
 		return
 	}
 	stderr, err := os.OpenFile(filepath.Join(base, "engine.stderr"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -360,6 +365,18 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		stdoutWriter.Close()
 		e.fail(a, fmt.Errorf("engine verification: %w", err))
 		return
+	}
+	if workspace {
+		if e.beforeCheck != nil {
+			e.beforeCheck(a.ID)
+		}
+		if reason := e.checkWorkspace(a); reason != "" {
+			stdin.Close()
+			stdout.Close()
+			stdoutWriter.Close()
+			e.recoverWorkspace(a, reason)
+			return
+		}
 	}
 	if err := cmd.Start(); err != nil {
 		stdin.Close()

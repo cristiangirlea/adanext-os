@@ -58,7 +58,7 @@ func seed(t *testing.T, s *Store) {
 	execute(t, s, `INSERT INTO users VALUES ('u', 'user', 'created')`)
 	execute(t, s, `INSERT INTO projects VALUES ('p', 'project', '/source', '2026-10-11T00:00:00Z')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('p', 'u', 'owner', 'added')`)
-	execute(t, s, `INSERT INTO tasks VALUES ('t', 'p', 'u', 'objective', 'criteria', 'draft', 0, 'created', 'updated')`)
+	execute(t, s, `INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated) VALUES ('t', 'p', 'u', 'objective', 'criteria', 'draft', 0, 'created', 'updated')`)
 	execute(t, s, `INSERT INTO attempts(id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended) VALUES ('a', 't', 'u', 'codex', 'model', 'low', 'local', 1, 'hash', 'run', 'session', 'running', 'started', NULL)`)
 }
 
@@ -174,7 +174,7 @@ func TestConcurrentOpenersApplyTheInitialMigrationOnce(t *testing.T) {
 			}
 			defer s.Close()
 			var version int
-			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
+			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
 				t.Errorf("version: %d %v", version, err)
 			}
 		}()
@@ -187,7 +187,7 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	path := s.path
@@ -204,7 +204,7 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	if s != nil {
 		s.Close()
 	}
-	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "5") {
+	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "6") {
 		t.Fatalf("future schema: %v", err)
 	}
 }
@@ -229,14 +229,15 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 		"migrations/0003_artifacts.sql":           &fstest.MapFile{Data: third},
 		"migrations/0004_execution.sql":           &fstest.MapFile{Data: mustMigration(t, "migrations/0004_execution.sql")},
 		"migrations/0005_import.sql":              &fstest.MapFile{Data: mustMigration(t, "migrations/0005_import.sql")},
-		"migrations/0006_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
-		"migrations/0007_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
+		"migrations/0006_workspaces.sql":          &fstest.MapFile{Data: mustMigration(t, "migrations/0006_workspaces.sql")},
+		"migrations/0007_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
+		"migrations/0008_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
 	}
 	if err := s.migrate(ctx, migrations); err == nil {
 		t.Fatal("bad migration succeeded")
 	}
 	var version, count int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	if err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='rolled_back'").Scan(&count); err != nil || count != 0 {
@@ -244,13 +245,13 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 	}
 	execute(t, s, "INSERT INTO committed VALUES(1)")
 	var recorded int
-	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 6 {
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 7 {
 		t.Fatalf("migration records: %d %v", recorded, err)
 	}
 }
 
 func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
-	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5", "migrations/0004_execution.sql": "74a497b8e4f143e143e0d32f99cd763a157ba1742c2b5929d363e50e17f140be", "migrations/0005_import.sql": "8d41f95ae741b9af1e052297892d0a785abae629d7959f5882002f650b5ad49c"}
+	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5", "migrations/0004_execution.sql": "74a497b8e4f143e143e0d32f99cd763a157ba1742c2b5929d363e50e17f140be", "migrations/0005_import.sql": "8d41f95ae741b9af1e052297892d0a785abae629d7959f5882002f650b5ad49c", "migrations/0006_workspaces.sql": "e64a38b34b8af8311a7859f632641a94185f4c34a4d3540a844bc378a0e6c2a1"}
 	files, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)

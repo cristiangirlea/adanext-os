@@ -77,6 +77,7 @@ type Task struct {
 	State                                                 State
 	Revision                                              int64
 	Created, Updated                                      string
+	Snapshot                                              string // empty when the task is bound to none
 	Attempt                                               TaskAttempt
 }
 
@@ -87,7 +88,7 @@ type TaskAttempt struct {
 	QueuePosition int
 }
 
-const taskReadColumns = `t.id,t.project,t.created_by,t.objective,t.acceptance_criteria,t.state,t.revision,t.created,t.updated,
+const taskReadColumns = `t.id,t.project,t.created_by,t.objective,t.acceptance_criteria,t.state,t.revision,t.created,t.updated,COALESCE(t.snapshot,''),
 	a.id,a.state,CASE WHEN a.state='pending' THEN (SELECT count(*)+1 FROM attempts p WHERE p.state='pending' AND p.rowid<a.rowid) ELSE 0 END`
 const taskReadFrom = ` FROM tasks t LEFT JOIN attempts a ON a.rowid=(SELECT max(latest.rowid) FROM attempts latest WHERE latest.task=t.id)`
 
@@ -95,7 +96,7 @@ func scanTaskRead(row interface{ Scan(...any) error }, extra ...any) (Task, erro
 	var task Task
 	var id, state sql.NullString
 	var position int
-	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &id, &state, &position}
+	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot, &id, &state, &position}
 	err := row.Scan(append(args, extra...)...)
 	if id.Valid {
 		task.Attempt = TaskAttempt{ID: id.String, State: state.String, QueuePosition: position}
