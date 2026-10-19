@@ -72,9 +72,20 @@ func treeSums(t *testing.T, dir string) map[string]string {
 	return sums
 }
 
+// preparationBound is the liveness bound for an attempt that prepares a
+// workspace: a clone or fetch and a worktree with the snapshot committed, a
+// few dozen git processes that a loaded Windows PC starts slowly.
+const preparationBound = 120 * time.Second
+
+func waitAttemptPrepared(t *testing.T, s *store.Store, want string) store.Attempt {
+	t.Helper()
+	return waitAttemptWithin(t, s, want, preparationBound)
+}
+
 // workspaceExecutor is testExecutor with project p imported from a
 // repository holding staged, unstaged and untracked work, and the task bound
-// to a snapshot of it.
+// to a snapshot of it. Its cleanup stops the executor before the temporary
+// directories go, so no preparation's git is still running in them.
 func workspaceExecutor(t *testing.T, script string) (e *Executor, s *store.Store, marker, repo, worktree string) {
 	t.Helper()
 	ctx := context.Background()
@@ -127,6 +138,14 @@ func workspaceExecutor(t *testing.T, script string) (e *Executor, s *store.Store
 	e.cfg.Workspaces = &source.Workspaces{Inspector: inspector, Root: filepath.Join(dir, "projects")}
 	worktree = e.cfg.Workspaces.WorktreePath("p", "attempt")
 	e.cfg.Env = append(e.cfg.Env, "ADA_FAKE_DIR="+worktree)
+	// Registered after every t.TempDir above, so it runs before their removal.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), preparationBound+e.StopBudget())
+		defer cancel()
+		if err := e.Stop(ctx); err != nil {
+			t.Errorf("stop the executor: %v", err)
+		}
+	})
 	return e, s, marker, repo, worktree
 }
 
@@ -155,8 +174,14 @@ func TestTheEngineRunsInTheTasksWorktreeWithTheSnapshotCommitted(t *testing.T) {
 	e, s, marker, repo, worktree := workspaceExecutor(t, "happy")
 	e.cfg.CancelGrace = naturalExitGrace
 	before := treeSums(t, repo)
+	// The times go in the log, to size preparationBound by.
+	start := time.Now()
+	e.cfg.Workspaces.AfterSync = func(_ context.Context, cloned bool) {
+		t.Logf("synced the clone (cloned %v) %v after the start", cloned, time.Since(start))
+	}
+	e.beforeCheck = func(string) { t.Logf("prepared the first workspace %v after the start", time.Since(start)) }
 	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "ended_ok")
+	waitAttemptPrepared(t, s, "ended_ok")
 	cwd := ""
 	for _, line := range markerLines(t, marker) {
 		if after, ok := strings.CutPrefix(line, "cwd:"); ok {
@@ -179,6 +204,12 @@ func TestTheEngineRunsInTheTasksWorktreeWithTheSnapshotCommitted(t *testing.T) {
 	if err != nil || row.Path != worktree || row.Branch != "ada/task" || row.Snapshot != "snap" || row.Task != "task" || row.Project != "p" || row.Policy != "auto" || row.Executor != "local" || len(row.ManifestHash) != 64 {
 		t.Fatalf("workspace row = %+v, %v", row, err)
 	}
+	// A second preparation fetches into the clone the first one made.
+	start = time.Now()
+	if _, err := e.cfg.Workspaces.Prepare(context.Background(), repo, source.Manifest{Project: "p", Task: "t2", Attempt: "a2", Snapshot: "snap", BaseCommit: row.BaseCommit, Executor: "local", Policy: "auto"}, source.Changes{}); err != nil {
+		t.Fatalf("a second prepare: %v", err)
+	}
+	t.Logf("prepared the second workspace %v after its start", time.Since(start))
 	sameSums(t, before, treeSums(t, repo))
 }
 
@@ -249,7 +280,7 @@ func TestAMismatchedWorkspaceGoesToRecoveryRequiredAndIsNotRebuilt(t *testing.T)
 			manifest := filepath.Join(e.cfg.Workspaces.Root, "p", "repo.git", "worktrees", "attempt", "ada-manifest.json")
 			e.beforeCheck = func(string) { c.tamper(t, s, manifest, worktree) }
 			e.LaunchAttempt("attempt")
-			waitAttempt(t, s, "recovery_required")
+			waitAttemptPrepared(t, s, "recovery_required")
 			task, err := s.Task(context.Background(), "u", "task")
 			if err != nil || task.State != store.RecoveryRequired {
 				t.Fatalf("task = %+v, %v", task, err)
@@ -288,12 +319,12 @@ func TestACancelOrStopDuringPreparationFailsTheAttemptAndFreesTheProject(t *test
 			e.LaunchAttempt("attempt")
 			select {
 			case <-inside:
-			case <-time.After(30 * time.Second):
+			case <-time.After(preparationBound):
 				t.Fatal("the preparation never synced")
 			}
 			c.end(e)
 			close(release)
-			waitAttempt(t, s, c.state)
+			waitAttemptPrepared(t, s, c.state)
 			if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
 				t.Fatalf("the engine started: %v", err)
 			}
@@ -303,17 +334,27 @@ func TestACancelOrStopDuringPreparationFailsTheAttemptAndFreesTheProject(t *test
 			}
 			// The project's lock was released: another preparation goes through.
 			base := fixtureGit(t, repo, "rev-parse", "HEAD")
-			done := make(chan error, 1)
+			done, finished := make(chan error, 1), make(chan struct{})
 			go func() {
+				defer close(finished)
 				_, err := e.cfg.Workspaces.Prepare(context.Background(), repo, source.Manifest{Project: "p", Task: "t2", Attempt: "a2", Snapshot: "s2", BaseCommit: base, Executor: "local", Policy: "auto"}, source.Changes{})
 				done <- err
 			}()
+			// The executor's stop does not cover this preparation: a failed
+			// test still waits for its git before the cleanup removes the directories.
+			t.Cleanup(func() {
+				select {
+				case <-finished:
+				case <-time.After(preparationBound):
+					t.Error("the later prepare is still running")
+				}
+			})
 			select {
 			case err := <-done:
 				if err != nil {
 					t.Fatalf("a later prepare: %v", err)
 				}
-			case <-time.After(30 * time.Second):
+			case <-time.After(preparationBound):
 				t.Fatal("the project's lock is still held")
 			}
 		})

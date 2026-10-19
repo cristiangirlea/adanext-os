@@ -329,7 +329,7 @@ func openGate(t *testing.T, path string) {
 
 func waitMarker(t *testing.T, marker, prefix string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(markerBound)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), prefix) {
 			return
