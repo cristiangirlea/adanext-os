@@ -135,6 +135,30 @@ func TestEngineFlagsRequirePairAndLowercaseSHA256(t *testing.T) {
 	}
 }
 
+func TestPreparingDeadlineFlagReachesTheExecutor(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want time.Duration
+	}{{nil, 2 * time.Minute}, {[]string{"-preparing-deadline", "45s"}, 45 * time.Second}} {
+		o, _, err := parseFlags(tc.args, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := o.executorConfig().PreparingDeadline; got != tc.want {
+			t.Errorf("%v: preparing deadline = %s, want %s", tc.args, got, tc.want)
+		}
+	}
+}
+
+func TestNonPositivePreparingDeadlineIsRefused(t *testing.T) {
+	for _, value := range []string{"0s", "-1m"} {
+		var output bytes.Buffer
+		if code := run(context.Background(), []string{"-state-dir", ownerOnlyDir(t), "-preparing-deadline", value}, &output, &output); code != 2 || !strings.Contains(output.String(), "-preparing-deadline must be positive") {
+			t.Fatalf("%s: run = %d: %s", value, code, output.String())
+		}
+	}
+}
+
 func TestCanceledStartupStopsCleanly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
