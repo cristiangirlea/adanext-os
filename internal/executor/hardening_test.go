@@ -217,15 +217,10 @@ func TestForceKillStopsTheGrandchildWithTheEngine(t *testing.T) {
 	if pid == 0 {
 		t.Fatal("grandchild did not record identity")
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		current, err := processIdentity(pid)
-		if err != nil || current != identity {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The kill is what this proves, not how fast Windows reaps a loaded PC's process.
+	if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
+		t.Fatalf("grandchild %d with creation time %s survived engine kill: %v", pid, identity, err)
 	}
-	t.Fatalf("grandchild %d with creation time %s survived engine kill", pid, identity)
 }
 
 func TestCancelAfterSuccessfulResultRequiresRecovery(t *testing.T) {

@@ -134,7 +134,55 @@ func testDetachedCoordinator(t *testing.T, launcher launcherJob) {
 		t.Fatalf("the launcher itself serves: %v", err)
 	}
 	assertServedFromTheRoot(t, log)
+	stopDetachedCoordinator(t, cfg)
+}
+
+// stopDetachedCoordinator stops the coordinator through its API and waits, by pid and
+// creation time, for its process to exit: it frees its lock before it exits, and until
+// then it still holds files in the state directory open.
+func stopDetachedCoordinator(t *testing.T, cfg ipc.Config) {
+	t.Helper()
+	var running *ipc.AlreadyRunningError
+	lock, err := ipc.Acquire(cfg)
+	if err == nil {
+		lock.Release()
+	}
+	if !errors.As(err, &running) {
+		t.Fatalf("no coordinator holds the lock: %v", err)
+	}
 	stopCoordinator(t, cfg)
+	if err := waitProcessGone(running.PID, running.Created, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitProcessGone waits until the process with this pid and creation time (as the
+// lock records it) has exited. A pid that is gone or now names another process has
+// exited; any other open error is reported.
+func waitProcessGone(pid int, created string, timeout time.Duration) error {
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	var creation, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(handle, &creation, &exited, &kernel, &user); err != nil {
+		return err
+	}
+	if fmt.Sprintf("%d", uint64(creation.HighDateTime)<<32|uint64(creation.LowDateTime)) != created {
+		return nil
+	}
+	event, err := windows.WaitForSingleObject(handle, uint32(timeout/time.Millisecond))
+	if err != nil {
+		return err
+	}
+	if event != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("process %d still running after %s", pid, timeout)
+	}
+	return nil
 }
 
 // The broker can take seconds; the launcher's output must not wait for it.
@@ -186,7 +234,7 @@ func TestBrokerPathReleasesTheLaunchersOutputBeforeTheBroker(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	stopCoordinator(t, cfg)
+	stopDetachedCoordinator(t, cfg)
 	// The broker is held for 2 s: output closed before it, not at the launcher's exit.
 	if held < time.Second {
 		content, _ := os.ReadFile(log)
