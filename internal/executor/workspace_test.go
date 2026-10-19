@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -316,5 +317,171 @@ func TestACancelOrStopDuringPreparationFailsTheAttemptAndFreesTheProject(t *test
 				t.Fatal("the project's lock is still held")
 			}
 		})
+	}
+}
+
+// snapshotBlob is the stored file of one of the bound snapshot's artifacts.
+func snapshotBlob(t *testing.T, e *Executor, s *store.Store, pick func(store.Snapshot) store.ArtifactRef) string {
+	t.Helper()
+	src, err := s.AttemptSource(context.Background(), "attempt")
+	if err != nil || src.Snapshot == nil {
+		t.Fatalf("attempt source = %+v, %v", src, err)
+	}
+	hash := pick(*src.Snapshot).Hash
+	return filepath.Join(e.cfg.StateDir, "artifacts", hash[:2], hash)
+}
+
+func flipLastByte(t *testing.T, blob string) {
+	t.Helper()
+	data, err := os.ReadFile(blob)
+	if err != nil || len(data) == 0 {
+		t.Fatalf("blob %s: %d bytes, %v", blob, len(data), err)
+	}
+	data[len(data)-1] ^= 1
+	if err := os.Chmod(blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blob, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// refusedBeforeTheEngine checks the attempt went to recovery with one
+// recovery event holding each of want, and the engine never started.
+func refusedBeforeTheEngine(t *testing.T, s *store.Store, marker string, want ...string) {
+	t.Helper()
+	waitAttempt(t, s, "recovery_required")
+	if task, err := s.Task(context.Background(), "u", "task"); err != nil || task.State != store.RecoveryRequired {
+		t.Fatalf("task = %+v, %v", task, err)
+	}
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil || len(events) != 1 || events[0].Kind != "recovery" {
+		t.Fatalf("events = %+v, %v", events, err)
+	}
+	for _, w := range want {
+		if !bytes.Contains(events[0].Payload, []byte(w)) {
+			t.Errorf("recovery event %s does not name %q", events[0].Payload, w)
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the engine started: %v", err)
+	}
+}
+
+func TestACorruptedSnapshotArtifactRefusesTheFirstLaunchBeforeTheWorktreeIsWritten(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		pick    func(store.Snapshot) store.ArtifactRef
+		corrupt func(t *testing.T, blob string)
+	}{
+		{"the unstaged patch, a byte flipped", func(s store.Snapshot) store.ArtifactRef { return s.Unstaged }, flipLastByte},
+		{"an untracked file, a byte flipped", func(s store.Snapshot) store.ArtifactRef { return s.Untracked[0].Artifact }, flipLastByte},
+		{"the staged patch, removed", func(s store.Snapshot) store.ArtifactRef { return s.Staged }, func(t *testing.T, blob string) {
+			if err := os.Remove(blob); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, s, marker, _, worktree := workspaceExecutor(t, "happy")
+			blob := snapshotBlob(t, e, s, c.pick)
+			c.corrupt(t, blob)
+			e.LaunchAttempt("attempt")
+			refusedBeforeTheEngine(t, s, marker, "snapshot artifact mismatch", filepath.Base(blob))
+			if _, err := os.Lstat(worktree); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the worktree was written: %v", err)
+			}
+			if _, err := s.Workspace(context.Background(), "attempt"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("a workspace was recorded: %v", err)
+			}
+		})
+	}
+}
+
+func TestASnapshotArtifactCorruptedAfterPreparationRefusesTheLaunch(t *testing.T) {
+	e, s, marker, _, worktree := workspaceExecutor(t, "happy")
+	blob := snapshotBlob(t, e, s, func(s store.Snapshot) store.ArtifactRef { return s.Untracked[0].Artifact })
+	e.beforeCheck = func(string) { flipLastByte(t, blob) }
+	e.LaunchAttempt("attempt")
+	refusedBeforeTheEngine(t, s, marker, "snapshot artifact mismatch", filepath.Base(blob))
+	// The prepared worktree is left as it was, neither removed nor rebuilt.
+	if got := fixtureGit(t, worktree, "log", "-1", "--format=%s"); got != "Imported working changes" {
+		t.Fatalf("worktree HEAD = %q", got)
+	}
+}
+
+// rewriteManifest changes the workspace row and the manifest copy together,
+// so they agree with each other and the row's hash.
+func rewriteManifest(t *testing.T, s *store.Store, manifest string, change func(*source.Manifest)) {
+	t.Helper()
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m source.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	change(&m)
+	if err := os.WriteFile(manifest, m.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Do(context.Background(), "u", "rewrite", "rewrite", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(context.Background(), "UPDATE workspaces SET manifest_version=?,task_revision=?,ownership_generation=?,manifest_hash=? WHERE attempt='attempt'",
+			m.Version, m.TaskRevision, m.Generation, m.Hash())
+		return []byte("ok"), err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAStaleManifestRefusesTheLaunch(t *testing.T) {
+	update := func(t *testing.T, s *store.Store, query string) {
+		t.Helper()
+		_, err := s.Do(context.Background(), "u", query, query, nil, func(tx *store.Tx) ([]byte, error) {
+			_, err := tx.ExecContext(context.Background(), query)
+			return []byte("ok"), err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		name, field string
+		stale       func(t *testing.T, s *store.Store, manifest string)
+	}{
+		{"the task revision moved", "task revision", func(t *testing.T, s *store.Store, _ string) {
+			update(t, s, "UPDATE tasks SET revision=revision+1 WHERE id='task'")
+		}},
+		{"the task bound to another snapshot", "snapshot", func(t *testing.T, s *store.Store, _ string) {
+			update(t, s, "INSERT INTO source_snapshots(id,project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created) SELECT 'snap2',project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created FROM source_snapshots WHERE id='snap'")
+			update(t, s, "UPDATE tasks SET snapshot='snap2' WHERE id='task'")
+		}},
+		{"an older ownership generation", "ownership generation", func(t *testing.T, s *store.Store, manifest string) {
+			rewriteManifest(t, s, manifest, func(m *source.Manifest) { m.Generation-- })
+		}},
+		{"an older manifest version", "version", func(t *testing.T, s *store.Store, manifest string) {
+			rewriteManifest(t, s, manifest, func(m *source.Manifest) { m.Version = 1 })
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, s, marker, _, _ := workspaceExecutor(t, "happy")
+			manifest := filepath.Join(e.cfg.Workspaces.Root, "p", "repo.git", "worktrees", "attempt", "ada-manifest.json")
+			e.beforeCheck = func(string) { c.stale(t, s, manifest) }
+			e.LaunchAttempt("attempt")
+			refusedBeforeTheEngine(t, s, marker, "workspace manifest mismatch", c.field)
+		})
+	}
+}
+
+func TestTheManifestBindsTheTaskRevisionAndOwnershipGeneration(t *testing.T) {
+	e, s, _, _, _ := workspaceExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	row, err := s.Workspace(context.Background(), "attempt")
+	if err != nil || row.ManifestVersion != source.ManifestVersion || source.ManifestVersion != 2 || row.TaskRevision != 2 || row.Generation != e.cfg.Generation {
+		t.Fatalf("workspace row = %+v, %v", row, err)
 	}
 }

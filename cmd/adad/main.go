@@ -311,7 +311,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		execution.GitUnavailable = err.Error()
 	} else {
 		inspector := &source.Inspector{Git: git, MirrorRoot: mirrors, Config: source.DefaultConfigFiles(git.Path)}
-		execution.Inspector, execution.Capturer = inspector, inspector
+		execution.Inspector, execution.Capturer, execution.Drifter = inspector, inspector, inspector
 		workspaces = &source.Workspaces{Inspector: inspector, Root: filepath.Join(opts.stateDir, "projects")}
 	}
 	var local *executor.Executor

@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated 2026-10-17. Statuses: not started, in progress, implemented (code merged), verified
+Updated 2026-10-19. Statuses: not started, in progress, implemented (code merged), verified
 (evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
 are in `docs/backlog.md`.
 
@@ -9,7 +9,7 @@ are in `docs/backlog.md`.
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
-| M3 Project workspaces | in progress | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97 | M3.4 drift and launch revalidation |
+| M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #PR | M4 first local workflow |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -1240,6 +1240,36 @@ task's second attempt (#98).
   the manifest's branch and prepared head, which the row's hash binds; any difference, or a
   missing worktree, moves the attempt to `recovery_required` with a recovery event naming it,
   and nothing is rebuilt. Worktrees and task branches are never removed in M3.3; M7 exports and removes them.
+
+- **2026-10-19, M3.4 drift and launch revalidation.** Points the backlog entry left open. A
+  snapshot recorded neither its branch nor what each path looked like, only the fingerprint's
+  single hash, so drift could not tell which paths changed or which untracked files are new.
+  Migration 0007 adds `source_snapshots.branch` (empty when detached) and `snapshot_paths`: for
+  each changed or untracked path, its part of the fingerprint (its index entries without stat
+  data and its state on disk, hashed apart from the rest), a flag for untracked, taken from the
+  capture's first inspection. A snapshot from before 0007 (NULL branch) answers drift with 409
+  `snapshot_outdated`; take a new one. `GET /v1/projects/{id}/drift` reads the newest snapshot
+  (by insertion order) for a member and answers, in this order, 404 for a non-member, 409
+  `no_source`, 409 `no_snapshot`, 409 `snapshot_outdated`, 503 `git_unavailable`; it takes no
+  lock of its own, as inspect takes none. The kinds, each apart: `new_commits` are those on the
+  snapshot's branch (on HEAD when the snapshot was detached or the branch is gone) that the base
+  does not reach, newest first, at most 100 listed with `new_commit_count` the total, and none
+  when the original no longer has the base; `head_moved` when HEAD is another commit;
+  `branch_changed` (with `branch` and `detached`) when the checked-out branch differs;
+  `untracked` the untracked paths the snapshot did not have; `changed` every other path whose
+  entry differs, which includes a staged or unstaged change made or undone and an untracked
+  file edited or removed; `blockers` every blocker the inspection finds, since a snapshot never
+  has one, and a blocker that stops the inspection leaves the commits and paths unread. Ignored
+  files are outside the comparison, as they are outside the fingerprint. The workspace
+  manifest's version 2 adds the task's revision and the attempt's ownership generation (two
+  nullable `workspaces` columns; a version 1 row reads them as -1 and is refused). The revision
+  stays put from the start through the launch (a cancel of a launching attempt is handed to the
+  executor without a transition), so a moved revision means the manifest is stale. A snapshot
+  artifact that is missing or no longer holds its recorded size and hash now moves the attempt
+  to `recovery_required` with the reason `snapshot artifact mismatch` (M3.3 ended it
+  `ended_failed`): on a first preparation every artifact is read and checked before any of it is
+  applied, and just before the engine starts, after the manifest check, every artifact is read
+  again.
 
 ## Owner actions pending
 

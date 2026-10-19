@@ -143,7 +143,7 @@ func newProjectsFixture(t *testing.T, change ...func(*Execution)) *projectsFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	execution := Execution{Inspector: inspector, Capturer: inspector, Artifacts: artifacts, Writer: artifacts}
+	execution := Execution{Inspector: inspector, Capturer: inspector, Drifter: inspector.in, Artifacts: artifacts, Writer: artifacts}
 	for _, c := range change {
 		c(&execution)
 	}

@@ -16,8 +16,9 @@ import (
 	"sync"
 )
 
-// ManifestVersion is the version of the workspace manifest this code writes.
-const ManifestVersion = 1
+// ManifestVersion is the version of the workspace manifest this code writes;
+// version 2 added the task revision and the ownership generation.
+const ManifestVersion = 2
 
 const (
 	manifestFile  = "ada-manifest.json"
@@ -39,17 +40,19 @@ func mismatch(format string, args ...any) error {
 
 // Manifest binds an attempt's worktree to what it was prepared from.
 type Manifest struct {
-	Version    int    `json:"version"`
-	Project    string `json:"project"`
-	Task       string `json:"task"`
-	Attempt    string `json:"attempt"`
-	Snapshot   string `json:"snapshot"`
-	BaseCommit string `json:"base_commit"`
-	Branch     string `json:"branch"`
-	Path       string `json:"path"`
-	Executor   string `json:"executor"`
-	Policy     string `json:"policy"`
-	Head       string `json:"head"`
+	Version      int    `json:"version"`
+	Project      string `json:"project"`
+	Task         string `json:"task"`
+	TaskRevision int64  `json:"task_revision"`
+	Attempt      string `json:"attempt"`
+	Generation   int64  `json:"ownership_generation"`
+	Snapshot     string `json:"snapshot"`
+	BaseCommit   string `json:"base_commit"`
+	Branch       string `json:"branch"`
+	Path         string `json:"path"`
+	Executor     string `json:"executor"`
+	Policy       string `json:"policy"`
+	Head         string `json:"head"`
 }
 
 // Encode is the manifest as stored beside the worktree.
@@ -135,8 +138,9 @@ func alphanumericByte(c byte) bool {
 // source, creates the task's branch ada/<task> at the base commit and the
 // attempt's worktree on it, commits the snapshot's changes there as one
 // commit, and writes the manifest into the worktree's git directory. m names
-// the project, task, attempt, snapshot, base commit, executor and policy; the
-// returned manifest adds the version, branch, path and prepared HEAD commit.
+// the project, the task and its revision, the attempt and its ownership
+// generation, the snapshot, base commit, executor and policy; the returned
+// manifest adds the version, branch, path and prepared HEAD commit.
 func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, changes Changes) (Manifest, error) {
 	for _, id := range []string{m.Project, m.Task, m.Attempt} {
 		if !safeName(id) {

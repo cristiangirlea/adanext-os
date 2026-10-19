@@ -10,7 +10,7 @@ import (
 func TestArtifactMigrationFromEmptyReachesVersionThree(t *testing.T) {
 	s := openTestStore(t)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
 		t.Fatalf("version %d: %v", version, err)
 	}
 }

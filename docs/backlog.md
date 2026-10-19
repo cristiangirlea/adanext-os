@@ -259,7 +259,7 @@ is M4.
   commands and a bundle URI is cloned and fetched, and no marker is written; the imported-changes
   commit reproduces the snapshot; the engine's working directory is the worktree; a tampered
   manifest goes to recovery.
-- [ ] **M3.4 Drift and launch revalidation.** `GET /v1/projects/{id}/drift` inspects the original
+- [x] **M3.4 Drift and launch revalidation** (#99: #PR, 2026-10-19). `GET /v1/projects/{id}/drift` inspects the original
   again and compares it with the newest snapshot: new commits, a moved branch, changed or new
   paths, each reported. Immediately before launch the scheduler checks that the snapshot's
   artifacts still hash to their recorded values and that the workspace manifest matches the
