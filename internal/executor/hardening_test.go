@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -488,4 +489,59 @@ func TestPartialLineAfterASuccessfulResultFailsTheAttempt(t *testing.T) {
 		t.Fatalf("task = %+v: %v", task, err)
 	}
 	errorEventContains(t, s, "truncated protocol line")
+}
+
+func TestOneFailureRecordsOneCause(t *testing.T) {
+	// One engine exits by itself before hello, another is shut down after a
+	// bad hello and exits on its closed stdin: neither is killed. The third
+	// sends a fatal error, which is the cause: no executor_error repeats it.
+	for script, cause := range map[string]string{"exit_immediately": "exit status 23", "bad_protocol": "hello protocol", "fatal": ""} {
+		t.Run(script, func(t *testing.T) {
+			e, s, _, _ := testExecutor(t, script)
+			e.cfg.CancelGrace = naturalExitGrace
+			e.LaunchAttempt("attempt")
+			waitAttempt(t, s, "ended_failed")
+			events, err := s.Events(context.Background(), "u", "attempt", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var causes []string
+			fatalNotices := 0
+			for _, event := range events {
+				if event.Kind == "executor_error" {
+					causes = append(causes, string(event.Payload))
+				}
+				if event.Kind == "engine_notice" && strings.Contains(string(event.Payload), `"fatal":true`) {
+					fatalNotices++
+				}
+			}
+			if cause == "" {
+				if len(causes) != 0 || fatalNotices != 1 {
+					t.Fatalf("causes = %q, fatal notices = %d, want none and one", causes, fatalNotices)
+				}
+				return
+			}
+			if len(causes) != 1 || !strings.Contains(causes[0], cause) {
+				t.Fatalf("causes = %q, want one containing %q", causes, cause)
+			}
+		})
+	}
+}
+
+func TestAPINotesListEveryEventKind(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "api", "doc.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := string(data)
+	// The engine's protocol v1 kinds, the executor's own, the store's, and the M2.3b name.
+	kinds := append(slices.Clone(protocolEventKinds), "engine_notice", "result", "executor_error", "recovery", "cancel")
+	for _, kind := range kinds {
+		if !strings.Contains(notes, "`"+kind+"`") {
+			t.Errorf("event kind %s is not in the API notes", kind)
+		}
+	}
+	if !strings.Contains(notes, "M2.3b") {
+		t.Error("the API notes do not name the kinds of M2.3b databases")
+	}
 }

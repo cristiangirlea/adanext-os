@@ -44,7 +44,7 @@ type Config struct {
 	Generation                         int64
 	Concurrency                        int // Attempts launched at once across all users; 0 is the plan's default of 1.
 	CancelGrace                        time.Duration
-	PreparingDeadline                  time.Duration
+	PreparingDeadline                  time.Duration      // For hello and the start's answer; adad's -preparing-deadline, 0 is 2 minutes.
 	Env                                []string           // Extra controlled environment entries for helper-process tests.
 	Workspaces                         *source.Workspaces // nil when git is missing or too old: an imported project's attempt then fails.
 }
@@ -643,12 +643,14 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 		}
 	}
+	// One failure records one cause. An engine whose stream ended is exiting:
+	// its exit status joins the cause, recorded once it is known. Otherwise the
+	// cause is recorded before the shutdown, whose exit error it explains.
 	abort := func(cause error) {
-		causeRecorded := e.recordCause(a, cause)
+		causeRecorded := !errors.Is(cause, io.EOF) && e.recordCause(a, cause)
 		_, killed, waitErr := drain()
-		if waitErr != nil && !killed {
+		if waitErr != nil && !killed && !causeRecorded {
 			cause = fmt.Errorf("%w; engine exit: %v", cause, waitErr)
-			causeRecorded = false
 		}
 		e.failFinal(a, cause, causeRecorded, killed)
 	}
@@ -784,7 +786,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		}
 		switch m.Type {
 		case "event":
-			if !contains([]string{"text", "thinking", "tool_call", "tool_result", "info", "error", "session"}, m.Event.Kind) {
+			if !contains(protocolEventKinds, m.Event.Kind) {
 				abort(fmt.Errorf("event kind %q is not in protocol v1", m.Event.Kind))
 				return
 			}
@@ -857,10 +859,30 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	}
 }
 
+// protocolEventKinds are the event kinds protocol v1 defines.
+var protocolEventKinds = []string{"text", "thinking", "tool_call", "tool_result", "info", "error", "session"}
+
+// engineEnvironmentKeys are what the claude and codex CLIs need to find the
+// owner's sign-ins and tools (decisions log, 2026-10-19).
+func engineEnvironmentKeys(goos string) []string {
+	keys := []string{"PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "LANG", "LC_ALL", "LC_CTYPE", "CLAUDE_CONFIG_DIR", "CODEX_HOME"}
+	if goos == "windows" {
+		return append(keys, "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERNAME", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432", "ProgramData", "ALLUSERSPROFILE", "SystemDrive", "PUBLIC", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "COMPUTERNAME", "PSModulePath")
+	}
+	return append(keys, "HOME", "USER", "LOGNAME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")
+}
+
+// refusedKey is a provider key or token or a variable of adad's own: never
+// passed, even should the allow-list name one.
+func refusedKey(key string) bool {
+	key = strings.ToUpper(key)
+	return strings.HasSuffix(key, "_API_KEY") || strings.HasSuffix(key, "_TOKEN") || strings.HasPrefix(key, "ADANEXT_") || strings.HasPrefix(key, "ADA_")
+}
+
 func (e *Executor) environment(base string) []string {
 	var env []string
-	for _, key := range []string{"PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT"} {
-		if value := os.Getenv(key); value != "" {
+	for _, key := range engineEnvironmentKeys(runtime.GOOS) {
+		if value := os.Getenv(key); value != "" && !refusedKey(key) {
 			env = append(env, key+"="+value)
 		}
 	}

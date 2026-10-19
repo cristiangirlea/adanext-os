@@ -76,6 +76,7 @@ type options struct {
 	stateDir, name, enginePath, engineHash string
 	detach                                 bool
 	concurrency                            int
+	preparingDeadline                      time.Duration
 }
 
 func parseFlags(args []string, output io.Writer) (*options, *flag.FlagSet, error) {
@@ -88,7 +89,13 @@ func parseFlags(args []string, output io.Writer) (*options, *flag.FlagSet, error
 	flags.StringVar(&o.enginePath, "engine", "", "pinned Harness engine path")
 	flags.StringVar(&o.engineHash, "engine-sha256", "", "pinned Harness engine SHA-256")
 	flags.IntVar(&o.concurrency, "concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")
+	flags.DurationVar(&o.preparingDeadline, "preparing-deadline", 2*time.Minute, "how long a launched engine has to say hello and accept the start before the attempt fails")
 	return o, flags, flags.Parse(args)
+}
+
+// executorConfig is the executor's configuration the flags decide.
+func (o *options) executorConfig() executor.Config {
+	return executor.Config{EnginePath: o.enginePath, EngineSHA256: o.engineHash, StateDir: o.stateDir, Concurrency: o.concurrency, PreparingDeadline: o.preparingDeadline}
 }
 
 // detachArgs drops a trailing "--" that ends the flags, so the re-exec's appended
@@ -200,6 +207,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if opts.concurrency < 1 {
 		fmt.Fprintln(stderr, "adad: -concurrency must be at least 1")
+		return 2
+	}
+	if opts.preparingDeadline <= 0 {
+		fmt.Fprintln(stderr, "adad: -preparing-deadline must be positive")
 		return 2
 	}
 	if opts.stateDir == "" {
@@ -329,7 +340,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return stopErr
 	}
 	if opts.enginePath != "" && opts.engineHash != "" {
-		local = executor.New(executor.Config{EnginePath: opts.enginePath, EngineSHA256: opts.engineHash, StateDir: opts.stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: opts.concurrency, Workspaces: workspaces})
+		cfg := opts.executorConfig()
+		cfg.Artifacts, cfg.Store, cfg.Hub, cfg.Generation, cfg.Workspaces = artifacts, s, hub, generation, workspaces
+		local = executor.New(cfg)
 		stop.local = local
 		execution.EngineSHA256, execution.Runner = opts.engineHash, local
 		defer func() {
