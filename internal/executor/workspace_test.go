@@ -464,6 +464,10 @@ func TestAStaleManifestRefusesTheLaunch(t *testing.T) {
 		{"an older manifest version", "version", func(t *testing.T, s *store.Store, manifest string) {
 			rewriteManifest(t, s, manifest, func(m *source.Manifest) { m.Version = 1 })
 		}},
+		// A row written before version 2 bound no revision or generation; it reads -1.
+		{"a version-1 row", "version, task revision, ownership generation", func(t *testing.T, s *store.Store, _ string) {
+			update(t, s, "UPDATE workspaces SET manifest_version=1,task_revision=NULL,ownership_generation=NULL WHERE attempt='attempt'")
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e, s, marker, _, _ := workspaceExecutor(t, "happy")

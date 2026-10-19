@@ -24,8 +24,13 @@ type Baseline struct {
 // NewCommits are those on the snapshot's branch (on HEAD when the snapshot
 // was detached or the branch is gone) that the base does not reach, newest
 // first. Changed are the paths whose entries differ from the snapshot's,
-// other than Untracked, the untracked paths the snapshot did not have.
+// other than Untracked, the untracked paths the snapshot did not have; each
+// lists at most maxBlockerPaths, and its count keeps the total.
 type Drift struct {
+	// Path and CommonDir are the repository inspected, for the caller to
+	// check it is still the one recorded.
+	Path, CommonDir string `json:"-"`
+
 	Drift          bool      `json:"drift"`
 	BaseCommit     string    `json:"base_commit"`
 	Head           string    `json:"head"`
@@ -38,6 +43,8 @@ type Drift struct {
 	BranchChanged  bool      `json:"branch_changed"`
 	Changed        []string  `json:"changed"`
 	Untracked      []string  `json:"untracked"`
+	ChangedCount   int       `json:"changed_count"`
+	UntrackedCount int       `json:"untracked_count"`
 	Blockers       []Blocker `json:"blockers"`
 }
 
@@ -62,30 +69,38 @@ func (in *Inspector) Drift(ctx context.Context, path string, base Baseline) (Dri
 		return Drift{}, err
 	}
 	id := r.Identity
-	d := Drift{BaseCommit: base.BaseCommit, Head: id.Head, HeadMoved: id.Head != base.BaseCommit, NewCommits: []Commit{},
-		SnapshotBranch: base.Branch, Branch: id.Branch, Detached: id.Detached, BranchChanged: id.Branch != base.Branch,
+	d := Drift{Path: id.Path, CommonDir: id.CommonDir, BaseCommit: base.BaseCommit, Head: id.Head, NewCommits: []Commit{},
+		SnapshotBranch: base.Branch, Branch: id.Branch, Detached: id.Detached,
 		Changed: []string{}, Untracked: []string{}, Blockers: r.Blockers}
+	// HEAD was read when the mirror was built or HEAD resolved; an unborn
+	// branch still has a name.
+	if src != nil || id.Head != "" || id.Branch != "" {
+		d.HeadMoved, d.BranchChanged = id.Head != base.BaseCommit, id.Branch != base.Branch
+	}
 	if src != nil {
-		if d.NewCommits, d.NewCommitCount, err = in.newCommits(ctx, mirror, id.Head, base); err != nil {
+		if d.NewCommits, d.NewCommitCount, err = in.newCommits(ctx, mirror, id.Head, id.Branch, base); err != nil {
 			return Drift{}, err
 		}
 		d.Changed, d.Untracked = comparePaths(base.Paths, r.Paths)
+		d.ChangedCount, d.UntrackedCount = len(d.Changed), len(d.Untracked)
+		d.Changed, d.Untracked = d.Changed[:min(len(d.Changed), maxBlockerPaths)], d.Untracked[:min(len(d.Untracked), maxBlockerPaths)]
 	}
-	d.Drift = d.HeadMoved || d.BranchChanged || d.NewCommitCount > 0 || len(d.Changed)+len(d.Untracked)+len(d.Blockers) > 0
+	d.Drift = d.HeadMoved || d.BranchChanged || d.NewCommitCount > 0 || d.ChangedCount+d.UntrackedCount+len(d.Blockers) > 0
 	return d, nil
 }
 
 // newCommits lists, through the mirror, the commits on the snapshot's branch,
-// or on HEAD, that the base does not reach. A base the original no longer
-// has gives none: what is new cannot be told.
-func (in *Inspector) newCommits(ctx context.Context, mirror, head string, base Baseline) ([]Commit, int, error) {
-	tip := "HEAD"
-	if base.Branch != "" {
+// or on HEAD, that the base does not reach. Both start from head, the commit
+// already resolved, when the branch is the one checked out. A base the
+// original no longer has gives none: what is new cannot be told.
+func (in *Inspector) newCommits(ctx context.Context, mirror, head, branch string, base Baseline) ([]Commit, int, error) {
+	tip := head
+	if base.Branch != "" && base.Branch != branch {
 		if _, err := in.Git.run(ctx, mirror, "", "rev-parse", "--verify", "-q", "refs/heads/"+base.Branch+"^{commit}"); err == nil {
 			tip = "refs/heads/" + base.Branch
 		}
 	}
-	if tip == "HEAD" && head == "" {
+	if tip == "" {
 		return []Commit{}, 0, nil
 	}
 	revs := []string{tip}

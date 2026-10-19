@@ -9,7 +9,7 @@ are in `docs/backlog.md`.
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
-| M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #PR | M4 first local workflow |
+| M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100 | M4 first local workflow |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -1251,16 +1251,27 @@ task's second attempt (#98).
   `snapshot_outdated`; take a new one. `GET /v1/projects/{id}/drift` reads the newest snapshot
   (by insertion order) for a member and answers, in this order, 404 for a non-member, 409
   `no_source`, 409 `no_snapshot`, 409 `snapshot_outdated`, 503 `git_unavailable`; it takes no
-  lock of its own, as inspect takes none. The kinds, each apart: `new_commits` are those on the
-  snapshot's branch (on HEAD when the snapshot was detached or the branch is gone) that the base
-  does not reach, newest first, at most 100 listed with `new_commit_count` the total, and none
-  when the original no longer has the base; `head_moved` when HEAD is another commit;
-  `branch_changed` (with `branch` and `detached`) when the checked-out branch differs;
-  `untracked` the untracked paths the snapshot did not have; `changed` every other path whose
-  entry differs, which includes a staged or unstaged change made or undone and an untracked
-  file edited or removed; `blockers` every blocker the inspection finds, since a snapshot never
-  has one, and a blocker that stops the inspection leaves the commits and paths unread. Ignored
-  files are outside the comparison, as they are outside the fingerprint. The workspace
+  lock of its own, as inspect takes none. When the path now holds another repository (another
+  path or git common directory than the imported one) it answers 409 `source_changed`, as a
+  snapshot does; with no repository left there, the `not_git_repository` blocker says so. The
+  kinds, each apart: `new_commits` are those on the snapshot's branch (on HEAD when the snapshot
+  was detached or the branch is gone) that the base does not reach, newest first, at most 100
+  listed with `new_commit_count` the total, and none when the original no longer has the base;
+  the walk starts from the HEAD commit already read when the branch is the one checked out, so
+  `head` and `new_commits` agree; `head_moved` when HEAD is another commit;
+  `branch_changed` (with `branch` and `detached`) when the checked-out branch differs, both only
+  when HEAD was read; `untracked` the untracked paths the snapshot did not have; `changed` every
+  other path whose entry differs, which includes a staged or unstaged change made or undone and
+  an untracked file edited or removed; each of the two lists at most 100 paths, as a blocker
+  does, with `changed_count` and `untracked_count` the totals; `blockers` every blocker the
+  inspection finds, since a snapshot never has one, and a blocker that stops the inspection
+  leaves HEAD, the commits and the paths unread. Ignored files are outside the comparison, as
+  they are outside the fingerprint. `snapshot_paths` keeps every changed or untracked path
+  uncapped, unselected untracked files included, since drift needs each one to tell a new path
+  from an old one. The cost: one permanent row per such path per snapshot, so a repository with
+  an unignored `node_modules` stores hundreds of thousands of rows a snapshot, and drift holds
+  them in memory, as inspect already holds the same paths; capping or expiring them is the
+  owner's decision. The workspace
   manifest's version 2 adds the task's revision and the attempt's ownership generation (two
   nullable `workspaces` columns; a version 1 row reads them as -1 and is refused). The revision
   stays put from the start through the launch (a cancel of a launching attempt is handed to the

@@ -438,6 +438,12 @@ func (h *handler) drift(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
+	// Another repository now stands at the imported path; with none read,
+	// the blocker says so.
+	if d.Path != src.Path || d.CommonDir != "" && d.CommonDir != src.CommonDir {
+		captureError(w, source.ErrSourceChanged)
+		return
+	}
 	writeJSON(w, 200, struct {
 		Snapshot string `json:"snapshot"`
 		source.Drift

@@ -2,13 +2,16 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
 
@@ -106,5 +109,44 @@ func TestDriftNeedsGitAndASnapshotThatRecordedItsPaths(t *testing.T) {
 	}
 	if status, data := p.call(t, "alice", "GET", path, "", nil); status != 409 || !strings.Contains(string(data), `"error":"snapshot_outdated"`) {
 		t.Fatalf("a snapshot from before drift = %d %s", status, data)
+	}
+}
+
+func TestDriftOfAnotherRepositoryAtTheSourcePathIsRefused(t *testing.T) {
+	p := newProjectsFixture(t)
+	dir := newRepo(t)
+	project := p.importRepo(t, "alice", "import-1", dir)
+	p.snapshotOf(t, "snap-1", project.ID)
+	if err := os.RemoveAll(filepath.Join(dir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "init", "-q", "--separate-git-dir", filepath.Join(canonicalTemp(t), "elsewhere.git"))
+	path := "/v1/projects/" + project.ID + "/drift"
+	if status, data := p.call(t, "alice", "GET", path, "", nil); status != 409 || !strings.Contains(string(data), `"error":"source_changed"`) {
+		t.Fatalf("another repository = %d %s", status, data)
+	}
+	// With no repository left at all, drift reports the blocker.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	status, data := p.call(t, "alice", "GET", path, "", nil)
+	if status != 200 || !strings.Contains(string(data), `"code":"not_git_repository"`) || !strings.Contains(string(data), `"head_moved":false`) {
+		t.Fatalf("the original deleted = %d %s", status, data)
+	}
+}
+
+// failingDrifter answers every drift with an error.
+type failingDrifter struct{}
+
+func (failingDrifter) Drift(context.Context, string, source.Baseline) (source.Drift, error) {
+	return source.Drift{}, errors.New("git failed")
+}
+
+func TestADriftThatFailsAnswersAnInternalError(t *testing.T) {
+	p := newProjectsFixture(t, func(e *Execution) { e.Drifter = failingDrifter{} })
+	project := p.importRepo(t, "alice", "import-1", newRepo(t))
+	p.snapshotOf(t, "snap-1", project.ID)
+	if status, data := p.call(t, "alice", "GET", "/v1/projects/"+project.ID+"/drift", "", nil); status != 500 || strings.Contains(string(data), "git failed") {
+		t.Fatalf("a failed drift = %d %s", status, data)
 	}
 }
