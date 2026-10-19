@@ -1,9 +1,12 @@
 import { expect, it, vi } from "vitest";
 import net from "node:net";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { constants } from "node:fs";
+import { chmod, mkdtemp, mkdir, open, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { call, endpoint, findOrStart, ownerOnlyDirectory, ownerOnlyToken, probeCoordinator } from "./adad";
 import { openEventStream } from "./sse";
 
@@ -125,21 +128,31 @@ it("trusts only a regular 0600 token the user owns", () => {
   expect(ownerOnlyToken(file(0o100600), undefined)).toBe(false);
 });
 
-for (const kind of ["a link", "readable by the group"]) {
+for (const kind of ["a link", "a FIFO", "readable by the group"]) {
   it.skipIf(process.platform === "win32")(`refuses a token that is ${kind}, before the handshake`, async () => {
     const fake = await peer("good");
+    const token = path.join(fake.config.stateDir, "adad.token");
     try {
-      const token = path.join(fake.config.stateDir, "adad.token");
       if (kind === "a link") {
         const other = path.join(fake.config.stateDir, "key");
         await writeFile(other, await readFile(token), { mode: 0o600 });
         await rm(token);
         await symlink(other, token);
+      } else if (kind === "a FIFO") {
+        await rm(token);
+        await promisify(execFile)("mkfifo", ["-m", "600", token]);
       } else {
         await chmod(token, 0o640);
       }
-      await expect(call(fake.socketPath, { method: "GET", path: "/v1/tasks", timeoutMs: 300 })).rejects.toThrow("endpoint authentication failed");
+      // The connection's own 5 s deadline would also refuse a token read that waits.
+      const start = Date.now();
+      await expect(call(fake.socketPath, { method: "GET", path: "/v1/tasks", timeoutMs: 10_000 })).rejects.toThrow("endpoint authentication failed");
+      expect(Date.now() - start).toBeLessThan(3000);
       expect(fake.nonces).toHaveLength(0);
-    } finally { await fake.close(); }
-  });
+    } finally {
+      // A writer releases an open that waits on the FIFO.
+      if (kind === "a FIFO") await open(token, constants.O_WRONLY | constants.O_NONBLOCK).then((w) => w.close(), () => {});
+      await fake.close();
+    }
+  }, 10_000);
 }

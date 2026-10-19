@@ -102,6 +102,28 @@ func detachArgs(args []string) []string {
 	return args
 }
 
+// detachedArgs is the coordinator's command line. It runs from the root, so its paths must
+// mean what the launcher meant: each one set is made absolute in o and appended last, where it
+// wins over the relative value before it.
+func detachedArgs(args []string, o *options) ([]string, error) {
+	child := append([]string{}, detachArgs(args)...)
+	for _, path := range []struct {
+		flag  string
+		value *string
+	}{{"state-dir", &o.stateDir}, {"engine", &o.enginePath}} {
+		if *path.value == "" {
+			continue
+		}
+		abs, err := filepath.Abs(*path.value)
+		if err != nil {
+			return nil, fmt.Errorf("-%s: %w", path.flag, err)
+		}
+		*path.value = abs
+		child = append(child, "-"+path.flag+"="+abs)
+	}
+	return child, nil
+}
+
 // startupLogLimit caps the start-up log; anything beyond it is dropped.
 const startupLogLimit = 64 << 10
 
@@ -197,22 +219,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if opts.detach {
-		// The coordinator runs from the root: its paths must mean what the launcher meant.
-		child := append([]string{}, detachArgs(args)...)
-		for _, path := range []struct {
-			flag  string
-			value *string
-		}{{"state-dir", &opts.stateDir}, {"engine", &opts.enginePath}} {
-			if *path.value == "" {
-				continue
-			}
-			abs, err := filepath.Abs(*path.value)
-			if err != nil {
-				fmt.Fprintf(stderr, "adad: -%s: %v\n", path.flag, err)
-				return 2
-			}
-			*path.value = abs
-			child = append(child, "-"+path.flag+"="+abs)
+		child, err := detachedArgs(args, opts)
+		if err != nil {
+			fmt.Fprintln(stderr, "adad:", err)
+			return 2
 		}
 		launched, err := detachFromJob(child)
 		if err != nil {

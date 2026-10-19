@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +87,37 @@ func TestDetachDropsATrailingTerminatorButNotAFlagValue(t *testing.T) {
 	} {
 		if got := detachArgs(tc.args); !slices.Equal(got, tc.want) {
 			t.Errorf("detachArgs(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
+// The coordinator gets the launcher's relative paths as absolute flags after the rest, and no
+// -engine flag when none was given.
+func TestDetachedArgsAppendAbsolutePathsAndLeaveOutAnEmptyEngine(t *testing.T) {
+	t.Chdir(t.TempDir())
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := strings.Repeat("a", 64)
+	engine := filepath.Join("bin", "hrn")
+	for _, tc := range []struct{ args, want []string }{
+		{[]string{"-detach", "-state-dir", "state", "-engine", engine, "-engine-sha256", hash, "--"},
+			[]string{"-detach", "-state-dir", "state", "-engine", engine, "-engine-sha256", hash,
+				"-state-dir=" + filepath.Join(wd, "state"), "-engine=" + filepath.Join(wd, engine)}},
+		{[]string{"-detach", "-state-dir", "state"},
+			[]string{"-detach", "-state-dir", "state", "-state-dir=" + filepath.Join(wd, "state")}},
+	} {
+		opts, _, err := parseFlags(tc.args, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := detachedArgs(tc.args, opts)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("detachedArgs(%q) = %q, %v, want %q", tc.args, got, err, tc.want)
+		}
+		if opts.stateDir != filepath.Join(wd, "state") {
+			t.Errorf("state directory = %q", opts.stateDir)
 		}
 	}
 }

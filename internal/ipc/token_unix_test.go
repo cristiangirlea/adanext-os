@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -83,10 +84,10 @@ func TestAcquireTakesAStateDirectoryMadeOwnerOnly(t *testing.T) {
 	lock.Release()
 }
 
-// The token is opened without following a link and checked as opened: an account that
-// swapped the directory could make neither a link nor a 0600 file the user owns.
-func TestDialRefusesATokenThatIsALinkOrNotOwnerOnly(t *testing.T) {
-	for _, kind := range []string{"link", "mode 0640"} {
+// The token is opened without following a link or waiting on a FIFO and checked as opened:
+// an account that swapped the directory could make none of them a 0600 file the user owns.
+func TestDialRefusesATokenThatIsALinkAFIFOOrNotOwnerOnly(t *testing.T) {
+	for _, kind := range []string{"link", "FIFO", "mode 0640"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := Config{StateDir: ownerOnlyDir(t), Name: "token-file"}
 			lock, err := Acquire(cfg)
@@ -124,17 +125,37 @@ func TestDialRefusesATokenThatIsALinkOrNotOwnerOnly(t *testing.T) {
 				if err := os.Symlink(other, token); err != nil {
 					t.Fatal(err)
 				}
+			} else if kind == "FIFO" {
+				if err := os.Remove(token); err != nil {
+					t.Fatal(err)
+				}
+				if err := syscall.Mkfifo(token, 0600); err != nil {
+					t.Fatal(err)
+				}
 			} else if err := os.Chmod(token, 0640); err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			c, err := Dial(ctx, cfg)
-			if c != nil {
-				c.Close()
-			}
-			if err == nil {
-				t.Fatal("Dial trusted the token")
+			dialed := make(chan error, 1)
+			go func() {
+				c, err := Dial(ctx, cfg)
+				if c != nil {
+					c.Close()
+				}
+				dialed <- err
+			}()
+			select {
+			case err := <-dialed:
+				if err == nil {
+					t.Fatal("Dial trusted the token")
+				}
+			case <-time.After(3 * time.Second):
+				// A writer releases the blocked open, so the test ends.
+				if w, err := os.OpenFile(token, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+					w.Close()
+				}
+				t.Fatal("Dial waited on the token")
 			}
 		})
 	}
