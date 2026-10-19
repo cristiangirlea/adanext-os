@@ -391,7 +391,7 @@ func flipLastByte(t *testing.T, blob string) {
 // recovery event holding each of want, and the engine never started.
 func refusedBeforeTheEngine(t *testing.T, s *store.Store, marker string, want ...string) {
 	t.Helper()
-	waitAttempt(t, s, "recovery_required")
+	waitAttemptPrepared(t, s, "recovery_required")
 	if task, err := s.Task(context.Background(), "u", "task"); err != nil || task.State != store.RecoveryRequired {
 		t.Fatalf("task = %+v, %v", task, err)
 	}
@@ -524,7 +524,7 @@ func TestTheManifestBindsTheTaskRevisionAndOwnershipGeneration(t *testing.T) {
 	e, s, _, _, _ := workspaceExecutor(t, "happy")
 	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "ended_ok")
+	waitAttemptPrepared(t, s, "ended_ok")
 	row, err := s.Workspace(context.Background(), "attempt")
 	if err != nil || row.ManifestVersion != source.ManifestVersion || source.ManifestVersion != 2 || row.TaskRevision != 2 || row.Generation != e.cfg.Generation {
 		t.Fatalf("workspace row = %+v, %v", row, err)
