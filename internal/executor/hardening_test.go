@@ -489,3 +489,77 @@ func TestPartialLineAfterASuccessfulResultFailsTheAttempt(t *testing.T) {
 	}
 	errorEventContains(t, s, "truncated protocol line")
 }
+
+func TestADescendantLingeringAfterANaturalExitIsGoneWhenTheAttemptEnds(t *testing.T) {
+	t.Parallel()
+	e, s, _, marker := testExecutor(t, "ok_lingering_child")
+	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = naturalExitGrace
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	var identity string
+	for _, line := range strings.Split(string(data), "\n") {
+		if _, err := fmt.Sscanf(line, "child:%d:%s", &pid, &identity); err == nil {
+			break
+		}
+	}
+	if pid == 0 {
+		t.Fatalf("descendant did not record itself: %s", data)
+	}
+	if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
+		t.Fatalf("descendant outlived its attempt: %v", err)
+	}
+}
+
+func TestStopAfterAForcedKillCutsOffTheBufferedEventBacklog(t *testing.T) {
+	t.Parallel()
+	e, s, _, marker := testExecutor(t, "burst_ignore_cancel")
+	e.cfg.CancelGrace = 3 * time.Second
+	// 110 buffered events at 300 ms each outlast StopBudget's 20 s.
+	e.afterAppend = func() { time.Sleep(300 * time.Millisecond) }
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "running")
+	deadline := time.Now().Add(20 * time.Second)
+	for !slices.Contains(markerLines(t, marker), "burst") {
+		if time.Now().After(deadline) {
+			t.Fatal("engine did not write its burst")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The engine ignores the cancel, so the stop ends in a forced kill while
+	// the reader's buffer still holds most of the burst.
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
+	defer cancel()
+	start := time.Now()
+	if err := e.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	// The kill comes two grace periods into the stop; the check after the
+	// engine's exit would cut the backlog off only a grace period later.
+	if elapsed := time.Since(start); elapsed >= 3*e.cfg.CancelGrace-time.Second {
+		t.Fatalf("stop took %s: the backlog was not cut off at the kill", elapsed)
+	}
+	a, err := s.AttemptByID(context.Background(), "attempt")
+	if err != nil || a.Ended == "" {
+		t.Fatalf("attempt = %+v: %v", a, err)
+	}
+	errorEventContains(t, s, "stdout closed: the engine was killed")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := 0
+	for _, event := range events {
+		if event.Kind == "text" {
+			persisted++
+		}
+	}
+	if persisted >= 111 {
+		t.Fatalf("all %d buffered events were persisted after the kill", persisted)
+	}
+}

@@ -77,6 +77,41 @@ func TestHelperFakeEngine(t *testing.T) {
 		}
 		script = "grandchild_hold"
 	}
+	if script == "orphaned_group" || script == "group_leader_exits" {
+		// The engine starts a backend group whose leader leaves a descendant
+		// behind and exits: the descendant is reparented, its group leaderless.
+		next := "group_leader_exits"
+		if script == "group_leader_exits" {
+			next = "grandchild_hold"
+		}
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE="+next)
+		if script == "orphaned_group" {
+			if _, err := newBackendSupervisor(child); err != nil {
+				os.Exit(3)
+			}
+		}
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		if script == "group_leader_exits" {
+			for deadline := time.Now().Add(markerBound); ; time.Sleep(time.Millisecond) {
+				if data, _ := os.ReadFile(os.Getenv("ADA_FAKE_MARKER")); strings.Contains(string(data), "child:") {
+					os.Exit(0)
+				}
+				if time.Now().After(deadline) {
+					os.Exit(3)
+				}
+			}
+		}
+		_ = child.Wait()
+		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		fmt.Fprintln(f, "leader exited")
+		f.Close()
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	if script == "grandchild_hold" {
 		identity, _ := processIdentity(os.Getpid())
 		f, _ := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -302,6 +337,18 @@ func TestHelperFakeEngine(t *testing.T) {
 		mark("exiting")
 		os.Exit(0)
 	}
+	if script == "burst_ignore_cancel" {
+		// The same burst, then the engine ignores the cancel until it is killed.
+		var burst strings.Builder
+		for seq := 6; seq < 116; seq++ {
+			fmt.Fprintf(&burst, `{"v":1,"seq":%d,"type":"event","attempt_id":%q,"event":{"kind":"text"}}`+"\n", seq, input.AttemptID)
+		}
+		_, _ = io.WriteString(os.Stdout, burst.String())
+		mark("burst")
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	if script == "gap" {
 		line(7, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
 		os.Exit(0)
@@ -346,9 +393,7 @@ func TestHelperFakeEngine(t *testing.T) {
 		var nested *processSupervisor
 		if script == "nested_tree" {
 			var err error
-			// Mirror Harness: a separate backend process group on Unix, and a
-			// nested kill-on-close Job Object (without breakaway) on Windows.
-			nested, err = newProcessSupervisor(child)
+			nested, err = newBackendSupervisor(child)
 			if err != nil {
 				os.Exit(3)
 			}
@@ -372,12 +417,12 @@ func TestHelperFakeEngine(t *testing.T) {
 			os.Exit(0)
 		}
 	}
-	if script == "exit_with_child_stdout" || script == "child_stderr" {
+	if script == "exit_with_child_stdout" || script == "child_stderr" || script == "ok_lingering_child" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
 		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
 		if script == "child_stderr" {
 			child.Stderr = os.Stderr
-		} else {
+		} else if script == "exit_with_child_stdout" {
 			child.Stdout = os.Stdout
 		}
 		if err := child.Start(); err != nil {

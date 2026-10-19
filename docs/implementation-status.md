@@ -1282,6 +1282,24 @@ task's second attempt (#98).
   applied, and just before the engine starts, after the manifest check, every artifact is read
   again.
 
+- **2026-10-19, executor follow-ups (#57, #62, #73).** On Unix the engine now starts in a
+  session of its own (`Setsid`, where it had only a process group), so a backend running without
+  a terminal of its own cannot open `/dev/tty`. On Linux, Ada finds the whole tree by session id
+  and by parentage: descendants reparented to init or a subreaper, and groups whose leader has
+  exited, are both found. Before the kill, the engine's group is stopped (SIGSTOP), and each
+  group found is stopped and the tree scanned again until nothing new appears. Each group is
+  then killed through a member still bearing the creation time recorded for it. If the group
+  kill fails, the engine itself is killed. What the engine leaves behind after a natural exit is
+  killed the same way when the attempt ends, as the Job Object does on Windows. A forced kill
+  now cuts off the event lines already buffered, as a cancel behind an exited engine does, and
+  records "the engine was killed after the grace period" as the reason stdout closed. A
+  member's cancel that finds the attempt launching writes a `cancel` event in the transaction
+  that decides `ErrAttemptLaunched`, and the accept honours it as it does the owner's stop. The
+  macOS limit stays: without `/proc`, Ada kills only the engine's own group while the engine
+  runs. Backends that Harness puts in other groups survive a kill there, and nothing is killed
+  after a natural exit, because a group id with no creation time to check could name another
+  process. A tree walk through `sysctl` would lift this, but only a macOS runner could test it.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).

@@ -77,7 +77,8 @@ func (tx *Tx) QueuedAttempts(ctx context.Context, userID string) (int, error) {
 // event carrying the reason, and the task moves from preparing to canceled at
 // the expected revision. ErrAttemptLaunched means the attempt is no longer
 // pending, so the launch claim won and the cancel has to follow the running
-// path; nothing is written then.
+// path. A launching attempt then gets the cancel event in this transaction,
+// for its accept to honour (CancelRecorded), so the caller commits it.
 func (tx *Tx) CancelQueued(ctx context.Context, taskID string, expectedRevision int64, reason string) (string, error) {
 	if err := requireTaskMember(ctx, tx, tx.userID, taskID); err != nil {
 		return "", err
@@ -101,13 +102,21 @@ func cancelQueued(ctx context.Context, tx *sql.Tx, taskID string, expectedRevisi
 	if state != Preparing {
 		return "", fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, state, Canceled)
 	}
-	var attemptID string
-	err = tx.QueryRowContext(ctx, "SELECT id FROM attempts WHERE task=? AND state='pending' ORDER BY rowid DESC LIMIT 1", taskID).Scan(&attemptID)
+	var attemptID, attemptState string
+	err = tx.QueryRowContext(ctx, "SELECT id,state FROM attempts WHERE task=? AND state IN ('pending','launching') ORDER BY rowid DESC LIMIT 1", taskID).Scan(&attemptID, &attemptState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("%w: task %s", ErrAttemptLaunched, taskID)
 	}
 	if err != nil {
 		return "", err
+	}
+	if attemptState == "launching" {
+		// Recorded with the decision: an engine that accepts and returns ok
+		// before the executor's cancel runs still cannot end the task ok.
+		if err := appendCancelEvent(ctx, tx, attemptID, reason); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: task %s", ErrAttemptLaunched, taskID)
 	}
 	if err := withdrawAttempt(ctx, tx, attemptID, reason); err != nil {
 		return "", err
@@ -148,8 +157,8 @@ func requestCancel(ctx context.Context, tx *sql.Tx, taskID string) error {
 }
 
 // CancelRecorded reports whether a cancel event is on the attempt: the
-// owner's stop records one on a launching attempt, and the accept that
-// advances its task has to honour it.
+// owner's stop or a member's cancel records one on a launching attempt, and
+// the accept that advances its task has to honour it.
 func (tx *Tx) CancelRecorded(ctx context.Context, attemptID string) (bool, error) {
 	var n int
 	err := tx.tx.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE attempt=? AND kind='cancel'", attemptID).Scan(&n)

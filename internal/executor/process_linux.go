@@ -8,11 +8,6 @@ import (
 	"syscall"
 )
 
-type processRecord struct {
-	pid, parent, group int
-	created            string
-}
-
 func readProcessRecord(pid int) (processRecord, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
@@ -35,11 +30,27 @@ func readProcessRecord(pid int) (processRecord, error) {
 	if err != nil {
 		return processRecord{}, err
 	}
-	return processRecord{pid: pid, parent: parent, group: group, created: fields[19]}, nil
+	session, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return processRecord{}, err
+	}
+	return processRecord{pid: pid, parent: parent, group: group, session: session, created: fields[19]}, nil
 }
 
-// The map records group leaders' creation times, not just reusable numeric PIDs.
-func descendantGroups(root int) map[int]string {
+func processCreated(pid int) string {
+	record, err := readProcessRecord(pid)
+	if err != nil {
+		return ""
+	}
+	return record.created
+}
+
+// scanTree lists the engine's session and every descendant of its members by
+// parentage, which also finds one that started a session of its own. Linux
+// keeps a session id reserved while any member lives, so once the engine has
+// exited the id still names only what it left behind; a live process with the
+// engine's pid and another creation time means nothing can be told apart.
+func scanTree(root int, created string) map[int]processRecord {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
@@ -58,35 +69,71 @@ func descendantGroups(root int) map[int]string {
 		records[pid] = record
 		children[record.parent] = append(children[record.parent], pid)
 	}
-	groups := make(map[int]string)
-	visited := map[int]bool{root: true}
-	queue := []int{root}
+	if engine, ok := records[root]; ok && engine.created != created {
+		return nil
+	}
+	tree := make(map[int]processRecord)
+	var queue []int
+	for pid, record := range records {
+		if pid == root || record.session == root {
+			tree[pid] = record
+			queue = append(queue, pid)
+		}
+	}
 	for len(queue) != 0 {
 		parent := queue[0]
 		queue = queue[1:]
 		for _, pid := range children[parent] {
-			if visited[pid] {
-				continue
+			if _, seen := tree[pid]; !seen {
+				tree[pid] = records[pid]
+				queue = append(queue, pid)
 			}
-			visited[pid] = true
-			record := records[pid]
-			if record.group > 0 && record.group != root {
-				if leader, ok := records[record.group]; ok {
-					groups[record.group] = leader.created
-				}
-			}
-			queue = append(queue, pid)
 		}
 	}
-	return groups
+	return tree
 }
 
-func killDescendantGroups(groups map[int]string) {
-	for group, created := range groups {
-		leader, err := readProcessRecord(group)
-		if err != nil || leader.created != created {
+// stopTree stops the engine's tree group by group and scans again until a scan
+// finds nothing new: a stopped process forks nothing, and Linux restarts a
+// fork that a group signal interrupts, so the tree it returns is complete.
+func stopTree(signal func(int, syscall.Signal) error, root int, created string) map[int]processRecord {
+	if created == "" {
+		return nil
+	}
+	tree := make(map[int]processRecord)
+	for range 32 {
+		current := scanTree(root, created)
+		grew := false
+		for pid, record := range current {
+			if _, ok := tree[pid]; !ok {
+				tree[pid] = record
+				grew = true
+			}
+		}
+		if !grew {
+			break
+		}
+		stopped := make(map[int]bool)
+		for _, record := range current {
+			if !stopped[record.group] {
+				stopped[record.group] = true
+				_ = signal(-record.group, syscall.SIGSTOP)
+			}
+		}
+	}
+	return tree
+}
+
+// killTree kills each group through a member that is still the process
+// stopTree found, so a group id is never signalled on its number alone.
+func killTree(signal func(int, syscall.Signal) error, tree map[int]processRecord) {
+	killed := make(map[int]bool)
+	for pid, record := range tree {
+		current, err := readProcessRecord(pid)
+		if err != nil || current.created != record.created || killed[current.group] {
 			continue
 		}
-		_ = syscall.Kill(-group, syscall.SIGKILL)
+		killed[current.group] = true
+		_ = signal(-current.group, syscall.SIGKILL)
 	}
 }

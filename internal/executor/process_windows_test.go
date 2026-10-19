@@ -120,3 +120,9 @@ func TestWindowsStartupResumesTheInitialThreadBehindAnInjectedThread(t *testing.
 		})
 	}
 }
+
+// newBackendSupervisor mirrors Harness on Windows: a nested kill-on-close Job
+// Object, without breakaway.
+func newBackendSupervisor(cmd *exec.Cmd) (*processSupervisor, error) {
+	return newProcessSupervisor(cmd)
+}
