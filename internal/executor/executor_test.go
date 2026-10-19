@@ -548,6 +548,17 @@ func testExecutor(t *testing.T, script string) (*Executor, *store.Store, string,
 	}
 	marker := filepath.Join(dir, "marker")
 	e := New(Config{EnginePath: os.Args[0], EngineSHA256: want, EngineArgs: []string{"-test.run=^TestHelperFakeEngine$"}, StateDir: dir, Artifacts: a, Store: s, Hub: api.NewHub(), Generation: generation, CancelGrace: 200 * time.Millisecond, Env: []string{"ADA_FAKE_ENGINE=" + script, "ADA_FAKE_MARKER=" + marker, "GORACE=atexit_sleep_ms=0"}})
+	// Registered after the store's close and the directory's removal, so it
+	// runs before both: an attempt seen ended can still be in its run (the
+	// next schedule reads the store), and Stop waits for every run. The
+	// budget is read when the test ends, after any change to CancelGrace.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
+		defer cancel()
+		if err := e.Stop(ctx); err != nil {
+			t.Errorf("stop the executor: %v", err)
+		}
+	})
 	return e, s, dir, marker
 }
 
