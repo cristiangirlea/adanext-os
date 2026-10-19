@@ -229,6 +229,37 @@ describe("App", () => {
     }
   });
 
+  it("reads every active task when each read outlasts a poll", async () => {
+    vi.useFakeTimers();
+    try {
+      const ids = Array.from({ length: 10 }, (_, i) => `t${i}`);
+      const client = new FakeClient(ids.map((id) => makeTask({ id, state: "running", revision: 2 })));
+      client.hold = true;
+      render(<App client={client} />);
+      await flush();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      const read = new Set<string>();
+      for (let round = 0; round < 6 && read.size < ids.length; round++) {
+        // Each poll finds the reads still out and asks for one more of each.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2000);
+        });
+        await act(async () => {
+          client.release();
+          await Promise.resolve();
+        });
+        await flush();
+        for (const call of client.calls) if (call.startsWith("getTask:")) read.add(call.slice("getTask:".length));
+      }
+      expect(read).toEqual(new Set(ids));
+      expect(client.maxInFlight).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reads a task once more after triggers that arrive during its read, and only once", async () => {
     const client = new FakeClient([makeTask({ id: "t1", state: "running", revision: 2, attempt: { id: "a1", state: "running" } })]);
     render(<App client={client} />);

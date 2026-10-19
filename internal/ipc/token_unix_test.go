@@ -4,6 +4,7 @@ package ipc
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,7 @@ import (
 // Another account that could replace the token could also replace the socket: a
 // client reads the token only from the owner's own 0700 directory.
 func TestDialRefusesATokenDirectoryThatIsNotOwnerOnly(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "token-dir"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "token-dir"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -48,29 +49,99 @@ func TestDialRefusesATokenDirectoryThatIsNotOwnerOnly(t *testing.T) {
 	}
 }
 
-// A directory the user made, 0755 say, is the user's own and not writable by others:
-// Acquire keeps it, made owner-only, so the coordinator is reachable.
-func TestAcquireMakesTheUsersOwnStateDirectoryOwnerOnly(t *testing.T) {
-	cfg := Config{StateDir: filepath.Join(t.TempDir(), "state"), Name: "token-dir"}
+// A directory the user chose, 0755 say, may be their home or a project: Acquire refuses it
+// with the command that fixes it, and leaves its mode alone.
+func TestAcquireRefusesAStateDirectoryThatIsNotOwnerOnlyAndLeavesItsMode(t *testing.T) {
+	cfg := Config{StateDir: filepath.Join(ownerOnlyDir(t), "state"), Name: "token-dir"}
 	if err := os.Mkdir(cfg.StateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(cfg.StateDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := Acquire(cfg)
-	if err != nil {
-		t.Fatal(err)
+	if lock, err := Acquire(cfg); err == nil {
+		lock.Release()
+		t.Fatal("Acquire accepted a 0755 state directory")
+	} else if !strings.Contains(err.Error(), fmt.Sprintf("run chmod 700 %q", cfg.StateDir)) {
+		t.Fatalf("Acquire = %v", err)
 	}
-	defer lock.Release()
-	info, err := os.Lstat(cfg.StateDir)
-	if err != nil || info.Mode().Perm() != 0700 {
+	if info, err := os.Lstat(cfg.StateDir); err != nil || info.Mode().Perm() != 0755 {
 		t.Fatalf("state directory = %v %v", info.Mode(), err)
 	}
 }
 
+// The default directory is made 0700, and Acquire takes it as it is.
+func TestAcquireTakesAStateDirectoryMadeOwnerOnly(t *testing.T) {
+	cfg := Config{StateDir: filepath.Join(ownerOnlyDir(t), "a", "state"), Name: "token-dir"}
+	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := Acquire(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.Release()
+}
+
+// The token is opened without following a link and checked as opened: an account that
+// swapped the directory could make neither a link nor a 0600 file the user owns.
+func TestDialRefusesATokenThatIsALinkOrNotOwnerOnly(t *testing.T) {
+	for _, kind := range []string{"link", "mode 0640"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := Config{StateDir: ownerOnlyDir(t), Name: "token-file"}
+			lock, err := Acquire(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Release()
+			l, err := lock.Listen()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			go func() {
+				for {
+					c, err := l.Accept()
+					if err != nil {
+						return
+					}
+					c.Close()
+				}
+			}()
+			token := filepath.Join(cfg.StateDir, "adad.token")
+			if kind == "link" {
+				key, err := os.ReadFile(token)
+				if err != nil {
+					t.Fatal(err)
+				}
+				other := filepath.Join(ownerOnlyDir(t), "key")
+				if err := os.WriteFile(other, key, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(token); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(other, token); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Chmod(token, 0640); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			c, err := Dial(ctx, cfg)
+			if c != nil {
+				c.Close()
+			}
+			if err == nil {
+				t.Fatal("Dial trusted the token")
+			}
+		})
+	}
+}
+
 func TestListenRefusesToPublishATokenWhereClientsWouldRefuseIt(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "token-dir"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "token-dir"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)

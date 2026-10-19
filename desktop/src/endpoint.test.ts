@@ -1,10 +1,10 @@
 import { expect, it, vi } from "vitest";
 import net from "node:net";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { call, endpoint, findOrStart, ownerOnlyDirectory, probeCoordinator } from "./adad";
+import { call, endpoint, findOrStart, ownerOnlyDirectory, ownerOnlyToken, probeCoordinator } from "./adad";
 import { openEventStream } from "./sse";
 
 async function peer(mode: string) {
@@ -115,3 +115,31 @@ it.skipIf(process.platform === "win32")("refuses a token whose directory another
     expect(fake.payload()).toBe("");
   } finally { await fake.close(); }
 });
+
+it("trusts only a regular 0600 token the user owns", () => {
+  const file = (mode: number, uid = 501, regular = true) => ({ isFile: () => regular, uid, mode });
+  expect(ownerOnlyToken(file(0o100600), 501)).toBe(true);
+  expect(ownerOnlyToken(file(0o100640), 501)).toBe(false);
+  expect(ownerOnlyToken(file(0o100600, 0), 501)).toBe(false);
+  expect(ownerOnlyToken(file(0o010600, 501, false), 501)).toBe(false);
+  expect(ownerOnlyToken(file(0o100600), undefined)).toBe(false);
+});
+
+for (const kind of ["a link", "readable by the group"]) {
+  it.skipIf(process.platform === "win32")(`refuses a token that is ${kind}, before the handshake`, async () => {
+    const fake = await peer("good");
+    try {
+      const token = path.join(fake.config.stateDir, "adad.token");
+      if (kind === "a link") {
+        const other = path.join(fake.config.stateDir, "key");
+        await writeFile(other, await readFile(token), { mode: 0o600 });
+        await rm(token);
+        await symlink(other, token);
+      } else {
+        await chmod(token, 0o640);
+      }
+      await expect(call(fake.socketPath, { method: "GET", path: "/v1/tasks", timeoutMs: 300 })).rejects.toThrow("endpoint authentication failed");
+      expect(fake.nonces).toHaveLength(0);
+    } finally { await fake.close(); }
+  });
+}

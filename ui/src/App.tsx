@@ -81,7 +81,7 @@ export function App({ client }: { client: AdaClient }) {
         if (!quitting.current) setError(shown(e));
       } finally {
         reading.current.delete(id);
-        if (again.current.delete(id) && !waiting.current.includes(id)) waiting.current.unshift(id);
+        if (again.current.delete(id) && !waiting.current.includes(id)) waiting.current.push(id);
         const next = waiting.current.shift();
         if (next !== undefined) void refresh(next);
       }

@@ -16,11 +16,17 @@ func createTokenFile(dir string) (*os.File, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
-	return createOwnerOnly(filepath.Join(dir, ".adad-token-"+hex.EncodeToString(nonce)))
+	return createOwnerOnly(filepath.Join(dir, ".adad-token-"+hex.EncodeToString(nonce)), 0)
 }
 
-// createOwnerOnly creates a new file whose DACL grants only the current user.
-func createOwnerOnly(name string) (*os.File, error) {
+// createStartupFile lets the owner read the log while a hung start still holds it.
+func createStartupFile(name string) (*os.File, error) {
+	return createOwnerOnly(name, windows.FILE_SHARE_READ)
+}
+
+// createOwnerOnly creates a new file whose DACL grants only the current user; share is
+// what others may open it for while it is held.
+func createOwnerOnly(name string, share uint32) (*os.File, error) {
 	sid, err := currentSID()
 	if err != nil {
 		return nil, err
@@ -35,7 +41,7 @@ func createOwnerOnly(name string) (*os.File, error) {
 	}
 	sa := &windows.SecurityAttributes{SecurityDescriptor: sd}
 	sa.Length = uint32(unsafe.Sizeof(*sa))
-	h, err := windows.CreateFile(ptr, windows.GENERIC_WRITE, 0, sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	h, err := windows.CreateFile(ptr, windows.GENERIC_WRITE, share, sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -44,3 +50,5 @@ func createOwnerOnly(name string) (*os.File, error) {
 
 // The token itself carries an owner-only DACL on Windows.
 func checkTokenDir(string) error { return nil }
+
+func readToken(dir string) ([]byte, error) { return os.ReadFile(filepath.Join(dir, "adad.token")) }

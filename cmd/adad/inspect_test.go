@@ -34,7 +34,7 @@ func init() {
 
 func inspectThroughCoordinator(t *testing.T, path string) (int, []byte, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := ownerOnlyDir(t)
 	name := testEndpointName(t)
 	process := startHelper(t, dir, name)
 	t.Cleanup(func() { process.Process.Kill(); process.Wait() })
@@ -67,13 +67,13 @@ func gitUnavailable(t *testing.T, status int, data []byte, reason string) {
 }
 
 func TestCoordinatorWithoutGitRunsAndAnswersGitUnavailable(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	status, data, _ := inspectThroughCoordinator(t, t.TempDir())
+	t.Setenv("PATH", ownerOnlyDir(t))
+	status, data, _ := inspectThroughCoordinator(t, ownerOnlyDir(t))
 	gitUnavailable(t, status, data, "not found")
 }
 
 func TestCoordinatorRefusesAnOldGitAtStartUp(t *testing.T) {
-	dir := t.TempDir()
+	dir := ownerOnlyDir(t)
 	name := "git"
 	if runtime.GOOS == "windows" {
 		name = "git.exe"
@@ -89,12 +89,12 @@ func TestCoordinatorRefusesAnOldGitAtStartUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
-	status, data, _ := inspectThroughCoordinator(t, t.TempDir())
+	status, data, _ := inspectThroughCoordinator(t, ownerOnlyDir(t))
 	gitUnavailable(t, status, data, "2.44.0")
 }
 
 func TestCoordinatorInspectsARepositoryAndKeepsNoMirror(t *testing.T) {
-	repo, err := filepath.EvalSymlinks(t.TempDir())
+	repo, err := filepath.EvalSymlinks(ownerOnlyDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}

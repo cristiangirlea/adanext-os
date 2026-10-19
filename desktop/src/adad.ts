@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readFile } from "node:fs/promises";
 import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import path from "node:path";
@@ -68,9 +69,25 @@ export function ownerOnlyDirectory(info: { isDirectory(): boolean; uid: number; 
   return info.isDirectory() && uid !== undefined && info.uid === uid && (info.mode & 0o777) === 0o700;
 }
 
+// The token as opened must be a regular 0600 file the user owns: an account that swapped the
+// directory after its check could make neither.
+export function ownerOnlyToken(info: { isFile(): boolean; uid: number; mode: number }, uid: number | undefined): boolean {
+  return info.isFile() && uid !== undefined && info.uid === uid && (info.mode & 0o777) === 0o600;
+}
+
 async function readEndpointToken(stateDir: string): Promise<Buffer> {
-  if (process.platform !== "win32" && !ownerOnlyDirectory(await lstat(stateDir), process.getuid?.())) throw new EndpointAuthenticationError();
-  return readFile(path.join(stateDir, "adad.token"));
+  const token = path.join(stateDir, "adad.token");
+  if (process.platform === "win32") return readFile(token);
+  const uid = process.getuid?.();
+  if (!ownerOnlyDirectory(await lstat(stateDir), uid)) throw new EndpointAuthenticationError();
+  // Without following a link or waiting on a FIFO; checked by its handle, not its path.
+  const handle = await open(token, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    if (!ownerOnlyToken(await handle.stat(), uid)) throw new EndpointAuthenticationError();
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
 }
 
 // No socket is returned to http until the proof has been checked. Returning the

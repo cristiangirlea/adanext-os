@@ -11,8 +11,8 @@ import (
 )
 
 func TestALockSymlinkIsRefusedWithoutChangingItsTarget(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(t.TempDir(), "target")
+	dir := ownerOnlyDir(t)
+	target := filepath.Join(ownerOnlyDir(t), "target")
 	if err := os.WriteFile(target, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestALockSymlinkIsRefusedWithoutChangingItsTarget(t *testing.T) {
 }
 
 func TestAGroupWritableStateDirectoryIsRefused(t *testing.T) {
-	dir := t.TempDir()
+	dir := ownerOnlyDir(t)
 	if err := os.Chmod(dir, 0777); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestAGroupWritableStateDirectoryIsRefused(t *testing.T) {
 }
 
 func TestAGroupReadableLockFileIsRefused(t *testing.T) {
-	dir := t.TempDir()
+	dir := ownerOnlyDir(t)
 	path := filepath.Join(dir, "adad.lock")
 	if err := os.WriteFile(path, []byte("keep"), 0644); err != nil {
 		t.Fatal(err)
@@ -65,13 +65,13 @@ func TestAGroupReadableLockFileIsRefused(t *testing.T) {
 }
 
 func TestTheLockOpensInTheCheckedDirectoryWhenItsPathBecomesASymlink(t *testing.T) {
-	base := t.TempDir()
+	base := ownerOnlyDir(t)
 	dir := filepath.Join(base, "state")
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	moved := filepath.Join(base, "moved")
-	elsewhere := t.TempDir()
+	elsewhere := ownerOnlyDir(t)
 	afterStateDirChecked = func() {
 		if err := os.Rename(dir, moved); err != nil {
 			t.Fatal(err)
@@ -95,7 +95,7 @@ func TestTheLockOpensInTheCheckedDirectoryWhenItsPathBecomesASymlink(t *testing.
 }
 
 func TestAnExistingLockOpensInTheCheckedDirectoryWhenItsPathBecomesASymlink(t *testing.T) {
-	base := t.TempDir()
+	base := ownerOnlyDir(t)
 	dir := filepath.Join(base, "state")
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestAnExistingLockOpensInTheCheckedDirectoryWhenItsPathBecomesASymlink(t *t
 		t.Fatal(err)
 	}
 	moved := filepath.Join(base, "moved")
-	elsewhere := t.TempDir()
+	elsewhere := ownerOnlyDir(t)
 	afterStateDirChecked = func() {
 		if err := os.Rename(dir, moved); err != nil {
 			t.Fatal(err)
@@ -135,7 +135,7 @@ func TestTheCheckedDirectoryIsClosedWhenAcquireIsAbandonedAfterTheCheck(t *testi
 	if runtime.GOOS != "linux" {
 		t.Skip("counts descriptors through /proc/self/fd")
 	}
-	cfg := Config{StateDir: t.TempDir(), Name: "abandon"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "abandon"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -166,8 +166,8 @@ func TestTheCheckedDirectoryIsClosedWhenAcquireIsAbandonedAfterTheCheck(t *testi
 }
 
 func TestAStateDirectorySymlinkIsRefusedOnUnix(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(t.TempDir(), path); err != nil {
+	path := filepath.Join(ownerOnlyDir(t), "link")
+	if err := os.Symlink(ownerOnlyDir(t), path); err != nil {
 		t.Fatal(err)
 	}
 	lock, err := Acquire(Config{StateDir: path, Name: "link"})

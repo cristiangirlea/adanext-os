@@ -83,7 +83,7 @@ func Dial(ctx context.Context, cfg Config) (net.Conn, error) {
 		c.Close()
 		return nil, err
 	}
-	key, err := os.ReadFile(filepath.Join(cfg.StateDir, "adad.token"))
+	key, err := readToken(cfg.StateDir)
 	if err != nil || len(key) != 32 {
 		return fail()
 	}

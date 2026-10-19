@@ -18,7 +18,7 @@ import (
 )
 
 func TestEndpointTokenIsPrivateAndReplacedOnRestart(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "token-rotation"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "token-rotation"}
 	var previous []byte
 	for range 2 {
 		lock, err := Acquire(cfg)
@@ -55,7 +55,7 @@ func TestEndpointTokenIsPrivateAndReplacedOnRestart(t *testing.T) {
 }
 
 func TestDialRefusesAnEndpointWithTheWrongToken(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "wrong-token"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "wrong-token"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestListenerClosesMalformedAndSilentClientsBeforeHTTP(t *testing.T) {
 	request := "GET / HTTP/1.1\r\nHost: adad\r\n\r\n"
 	for name, input := range map[string]string{"raw request": request, "garbage": "garbage\n" + request, "silent": ""} {
 		t.Run(name, func(t *testing.T) {
-			cfg := Config{StateDir: t.TempDir(), Name: "bad-client"}
+			cfg := Config{StateDir: ownerOnlyDir(t), Name: "bad-client"}
 			lock, err := Acquire(cfg)
 			if err != nil {
 				t.Fatal(err)
@@ -133,7 +133,7 @@ func TestListenerClosesMalformedAndSilentClientsBeforeHTTP(t *testing.T) {
 }
 
 func TestHTTPWorksAfterEndpointAuthentication(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "http-auth"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "http-auth"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -288,13 +288,24 @@ func TestListenerRetriesAFailedAcceptWithBackoffAndKeepsServing(t *testing.T) {
 func TestCloseDuringAcceptBackoffReturnsPromptlyAsClosed(t *testing.T) {
 	flaky := &flakyListener{failures: 1 << 30, conns: make(chan net.Conn), closed: make(chan struct{})}
 	a := authenticateListener(flaky, make([]byte, 32))
-	time.Sleep(100 * time.Millisecond)
+	// After nine failed accepts the backoff is at its 1 s cap.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+		flaky.mu.Lock()
+		calls := len(flaky.calls)
+		flaky.mu.Unlock()
+		if calls >= 9 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d accepts in 10 s", calls)
+		}
+	}
 	start := time.Now()
 	if err := a.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 2*time.Second {
-		t.Fatal("Close waited for the accept backoff")
+	if took := time.Since(start); took > 300*time.Millisecond {
+		t.Fatalf("Close waited %v for the accept backoff", took)
 	}
 	if _, err := a.Accept(); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("Accept after Close = %v", err)

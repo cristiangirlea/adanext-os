@@ -151,6 +151,25 @@ func withStartupLog(stateDir string, stderr io.Writer) (io.Writer, *startupLog) 
 	return io.MultiWriter(log, stderr), log
 }
 
+// failBeforeLock reports a start that failed before taking the lock. The start-up log gets
+// it too, under the lock, unless another coordinator holds it: that log is the other's.
+func failBeforeLock(cfg ipc.Config, stderr io.Writer, message ...any) int {
+	_ = os.MkdirAll(cfg.StateDir, 0700)
+	lock, err := ipc.Acquire(cfg)
+	var running *ipc.AlreadyRunningError
+	if errors.As(err, &running) {
+		fmt.Fprintln(stderr, message...)
+		return 1
+	}
+	if err == nil {
+		defer lock.Release()
+	}
+	stderr, log := withStartupLog(cfg.StateDir, stderr)
+	fmt.Fprintln(stderr, message...)
+	log.close()
+	return 1
+}
+
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	_ = stdout
 	opts, flags, err := parseFlags(args, stderr)
@@ -178,13 +197,27 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if opts.detach {
-		launched, err := detachFromJob(detachArgs(args))
+		// The coordinator runs from the root: its paths must mean what the launcher meant.
+		child := append([]string{}, detachArgs(args)...)
+		for _, path := range []struct {
+			flag  string
+			value *string
+		}{{"state-dir", &opts.stateDir}, {"engine", &opts.enginePath}} {
+			if *path.value == "" {
+				continue
+			}
+			abs, err := filepath.Abs(*path.value)
+			if err != nil {
+				fmt.Fprintf(stderr, "adad: -%s: %v\n", path.flag, err)
+				return 2
+			}
+			*path.value = abs
+			child = append(child, "-"+path.flag+"="+abs)
+		}
+		launched, err := detachFromJob(child)
 		if err != nil {
 			// The launcher's stdio may be null or already dropped.
-			stderr, log := withStartupLog(opts.stateDir, stderr)
-			fmt.Fprintln(stderr, "adad:", err)
-			log.close()
-			return 1
+			return failBeforeLock(ipc.Config{StateDir: opts.stateDir, Name: opts.name}, stderr, "adad:", err)
 		}
 		if launched {
 			return 0
@@ -194,19 +227,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "adad: create state directory:", err)
 		return 1
 	}
-	stderr, startup := withStartupLog(opts.stateDir, stderr)
-	defer startup.close()
 	lock, err := ipc.Acquire(ipc.Config{StateDir: opts.stateDir, Name: opts.name})
 	if err != nil {
 		var running *ipc.AlreadyRunningError
 		if errors.As(err, &running) {
+			// The running coordinator's start-up log is its own.
 			fmt.Fprintln(stderr, "adad:", running)
 			return 0
 		}
+		stderr, log := withStartupLog(opts.stateDir, stderr)
 		fmt.Fprintln(stderr, "adad: acquire lock:", err)
+		log.close()
 		return 1
 	}
 	defer lock.Release()
+	// Under the lock, so a second start never replaces this one's log.
+	stderr, startup := withStartupLog(opts.stateDir, stderr)
+	defer startup.close()
 	s, err := store.Open(ctx, filepath.Join(opts.stateDir, "adanext.db"))
 	if err != nil {
 		if ctx.Err() != nil {

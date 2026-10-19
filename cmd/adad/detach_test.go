@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cristiangirlea/ada-os/internal/ipc"
 )
 
 const detachDepthVar = "ADA_DETACH_DEPTH"
@@ -84,4 +88,39 @@ func TestDetachDropsATrailingTerminatorButNotAFlagValue(t *testing.T) {
 			t.Errorf("detachArgs(%q) = %q, want %q", tc.args, got, tc.want)
 		}
 	}
+}
+
+// The coordinator serves from the root, so a relative -state-dir must still mean the
+// launcher's directory.
+func TestDetachedCoordinatorKeepsARelativeStateDirectory(t *testing.T) {
+	// Short enough for sun_path.
+	root, err := os.MkdirTemp("", "ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	log := filepath.Join(root, "detach.log")
+	cfg := ipc.Config{StateDir: filepath.Join(root, "state"), Name: testEndpointName(t)}
+	cmd := exec.Command(os.Args[0], "-detach", "-state-dir", "state", "-name", cfg.Name)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "ADA_DETACH_HELPER_LOG="+log)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		content, _ := os.ReadFile(log)
+		t.Fatalf("launcher: %v %s\n%s", err, out, content)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		conn, err := ipc.Dial(ctx, cfg)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		if ctx.Err() != nil {
+			content, _ := os.ReadFile(log)
+			t.Fatalf("the coordinator did not serve from the launcher's state directory: %v\n%s", err, content)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stopCoordinator(t, cfg)
 }

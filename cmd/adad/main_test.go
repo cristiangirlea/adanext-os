@@ -127,7 +127,7 @@ func TestEngineFlagsRequirePairAndLowercaseSHA256(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var output bytes.Buffer
-			args := append([]string{"-state-dir", t.TempDir()}, tc.args...)
+			args := append([]string{"-state-dir", ownerOnlyDir(t)}, tc.args...)
 			if code := run(context.Background(), args, &output, &output); code != 2 || !strings.Contains(output.String(), "engine") {
 				t.Fatalf("run = %d: %s", code, output.String())
 			}
@@ -139,7 +139,7 @@ func TestCanceledStartupStopsCleanly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var output bytes.Buffer
-	code := run(ctx, []string{"-state-dir", t.TempDir(), "-name", testEndpointName(t)}, &output, &output)
+	code := run(ctx, []string{"-state-dir", ownerOnlyDir(t), "-name", testEndpointName(t)}, &output, &output)
 	if code != 0 || !strings.Contains(output.String(), "adad: stopped during start-up") {
 		t.Fatalf("%d %s", code, output.String())
 	}
@@ -173,7 +173,7 @@ func TestDefaultStateDirectoryRejectsWorldWritableExistingDirectory(t *testing.T
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permissions")
 	}
-	dir := t.TempDir()
+	dir := ownerOnlyDir(t)
 	if err := os.Chmod(dir, 0777); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func startHelper(t *testing.T, dir, name string, engine ...string) *exec.Cmd {
 }
 
 func TestSecondCoordinatorReportsPIDAndStaleLockRecovers(t *testing.T) {
-	dir := t.TempDir()
+	dir := ownerOnlyDir(t)
 	name := testEndpointName(t)
 	first := startHelper(t, dir, name)
 	defer func() {
@@ -305,7 +305,7 @@ func TestSecondCoordinatorReportsPIDAndStaleLockRecovers(t *testing.T) {
 }
 
 func TestSecondCoordinatorReportsUnknownHolderForAnEmptyRecord(t *testing.T) {
-	dir := t.TempDir()
+	dir := ownerOnlyDir(t)
 	name := testEndpointName(t)
 	first := startHelper(t, dir, name)
 	defer func() { _ = first.Process.Kill(); _ = first.Wait() }()
@@ -1260,4 +1260,15 @@ func TestAStartDuringASignalDrivenStopIsRefused(t *testing.T) {
 	if err != nil || task.State != store.Ready {
 		t.Fatalf("late task = %+v: %v", task, err)
 	}
+}
+
+// ownerOnlyDir is a t.TempDir made 0700, as Ada makes its state directory: under umask 022
+// testing makes it 0755, which Acquire refuses.
+func ownerOnlyDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

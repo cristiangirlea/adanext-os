@@ -18,5 +18,5 @@ func OpenStartupLog(stateDir string) (*os.File, error) {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	return createOwnerOnly(path)
+	return createStartupFile(path)
 }
