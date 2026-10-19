@@ -1285,7 +1285,12 @@ task's second attempt (#98).
   the engine's environment is an allow-list that grows by exactly what the real claude and codex
   CLIs need to find the owner's sign-ins and tools, nothing of `adad`'s own and no provider API
   keys. Besides `PATH`, `SystemRoot`, `WINDIR`, `ComSpec` and `PATHEXT`: on Windows `USERPROFILE`,
-  `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `USERNAME`; on Unix `HOME`,
+  `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `USERNAME`, and the standard
+  system variables the CLIs' tools (PowerShell, Git, vswhere) look for, none of them secret:
+  `ProgramFiles`, `ProgramFiles(x86)`, `ProgramW6432`, `CommonProgramFiles`,
+  `CommonProgramFiles(x86)`, `CommonProgramW6432`, `ProgramData`, `ALLUSERSPROFILE`, `SystemDrive`,
+  `PUBLIC`, `OS`, `PROCESSOR_ARCHITECTURE`, `NUMBER_OF_PROCESSORS`, `COMPUTERNAME`, `PSModulePath`;
+  on Unix `HOME`,
   `USER`, `LOGNAME`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
   `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`; on both `LANG`, `LC_ALL`, `LC_CTYPE`, and `CLAUDE_CONFIG_DIR`
   and `CODEX_HOME` when set (the credential profiles of the 2026-10-13 entry). Never passed, even
@@ -1293,12 +1298,16 @@ task's second attempt (#98).
   `*_TOKEN`, and any `ADANEXT_*` or `ADA_*` variable; the executor checks that rule on top of the
   list. `HRN_HOME` stays per attempt, and Ada always names the backend, so `hrn` never falls back to
   its `api` backend. Reason: the real CLIs look for their sign-ins and configuration under the
-  user's home and these directories, which the earlier list left out. The rest of #58: the preparing
+  user's home and these directories, which the earlier list left out. Only the fake engine has run
+  with this list so far: the live check with the real claude and codex CLIs happens at M4's first
+  real run, and that run is the evidence for this list. The rest of #58: the preparing
   deadline is `adad -preparing-deadline` (default 2m, positive only). The event kinds, and the old
   names M2.3b databases keep (documented, not migrated), are listed in the API notes
-  (`internal/api/doc.go`). One failure records one cause event: `abort` records the cause before the
-  shutdown and no longer records it again with the exit error; when the engine's stream had already
-  ended, the cause waits for the exit and carries its status in that one event. On Windows a
+  (`internal/api/doc.go`). The executor records one `executor_error` per failure it detects: `abort`
+  records the cause before the shutdown and no longer records it again with the exit error; when the
+  engine's stream had already ended, the cause waits for the exit and carries its status in that one
+  event. After a fatal engine error, the `engine_notice` marked fatal is the cause and no
+  `executor_error` repeats it. On Windows a
   coordinator crash kills the engine and its descendants (the Job Object is kill-on-close;
   `TestCrashAndRestartRecoversTheRunningAttemptWithoutRelaunch`), and the next start moves the
   attempt to `recovery_required`. An `ok` result followed by a stdout the post-exit check had to

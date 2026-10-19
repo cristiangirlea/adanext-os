@@ -1088,7 +1088,7 @@ func TestFatalErrorAndResultAreBothStored(t *testing.T) {
 }
 
 func TestEngineEnvironmentCarriesTheCLIsSignInsAndNoKeys(t *testing.T) {
-	windowsKeys := []string{"USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERNAME"}
+	windowsKeys := []string{"USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERNAME", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432", "ProgramData", "ALLUSERSPROFILE", "SystemDrive", "PUBLIC", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "COMPUTERNAME", "PSModulePath"}
 	unixKeys := []string{"HOME", "USER", "LOGNAME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"}
 	allowed := []string{"PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "LANG", "LC_ALL", "LC_CTYPE", "CLAUDE_CONFIG_DIR", "CODEX_HOME"}
 	refused := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY", "FOO_TOKEN", "ADANEXT_STATE_DIR", "ADA_SECRET", "SECRET_TEST_VAR"}

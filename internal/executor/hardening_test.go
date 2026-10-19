@@ -492,9 +492,10 @@ func TestPartialLineAfterASuccessfulResultFailsTheAttempt(t *testing.T) {
 }
 
 func TestOneFailureRecordsOneCause(t *testing.T) {
-	// One engine exits by itself before hello, the other is shut down after a
-	// bad hello and exits on its closed stdin: neither is killed.
-	for script, cause := range map[string]string{"exit_immediately": "exit status 23", "bad_protocol": "hello protocol"} {
+	// One engine exits by itself before hello, another is shut down after a
+	// bad hello and exits on its closed stdin: neither is killed. The third
+	// sends a fatal error, which is the cause: no executor_error repeats it.
+	for script, cause := range map[string]string{"exit_immediately": "exit status 23", "bad_protocol": "hello protocol", "fatal": ""} {
 		t.Run(script, func(t *testing.T) {
 			e, s, _, _ := testExecutor(t, script)
 			e.cfg.CancelGrace = naturalExitGrace
@@ -505,10 +506,20 @@ func TestOneFailureRecordsOneCause(t *testing.T) {
 				t.Fatal(err)
 			}
 			var causes []string
+			fatalNotices := 0
 			for _, event := range events {
 				if event.Kind == "executor_error" {
 					causes = append(causes, string(event.Payload))
 				}
+				if event.Kind == "engine_notice" && strings.Contains(string(event.Payload), `"fatal":true`) {
+					fatalNotices++
+				}
+			}
+			if cause == "" {
+				if len(causes) != 0 || fatalNotices != 1 {
+					t.Fatalf("causes = %q, fatal notices = %d, want none and one", causes, fatalNotices)
+				}
+				return
 			}
 			if len(causes) != 1 || !strings.Contains(causes[0], cause) {
 				t.Fatalf("causes = %q, want one containing %q", causes, cause)

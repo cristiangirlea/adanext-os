@@ -30,10 +30,12 @@
 // `session`; any other kind fails the attempt. `engine_notice` is a protocol
 // error message the engine sent (fatal or not), `result` its result line, with
 // a large final moved to an artifact. From the executor: `executor_error`, a
-// cause of failure ({"error": ...}), one per failure, plus one saying the engine
-// was killed after the grace period when it was; `info` also when a descendant
-// kept stderr open after a clean exit; `recovery` ({"reason": ...}) when an
-// attempt moves to recovery_required. From the store: `recovery` with
+// cause of failure ({"error": ...}), one per failure the executor detects, plus
+// one saying the engine was killed after the grace period when it was; after a
+// fatal engine error, the `engine_notice` marked fatal is the cause and no
+// `executor_error` repeats it; `info` also when a descendant kept stderr open
+// after a clean exit; `recovery` ({"reason": ...}) when an attempt moves to
+// recovery_required. From the store: `recovery` with
 // old_generation and attempt_state for an attempt a restart abandoned, and
 // `cancel` ({"reason": ...}) for a recorded cancel or stop.
 //
