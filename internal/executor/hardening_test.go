@@ -217,15 +217,10 @@ func TestForceKillStopsTheGrandchildWithTheEngine(t *testing.T) {
 	if pid == 0 {
 		t.Fatal("grandchild did not record identity")
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		current, err := processIdentity(pid)
-		if err != nil || current != identity {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The kill is what this proves, not how fast Windows reaps a loaded PC's process.
+	if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
+		t.Fatalf("grandchild %d with creation time %s survived engine kill: %v", pid, identity, err)
 	}
-	t.Fatalf("grandchild %d with creation time %s survived engine kill", pid, identity)
 }
 
 func TestCancelAfterSuccessfulResultRequiresRecovery(t *testing.T) {
@@ -405,9 +400,10 @@ func TestResultRecoveryStorageFailureFinalizesAttempt(t *testing.T) {
 }
 
 func TestStopEndsADescendantFeedingValidEventsFasterThanStoragePersistsThem(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "valid_stream_after_exit")
 	cleanupGrandchild(t, marker)
-	e.cfg.CancelGrace = 200 * time.Millisecond
+	e.cfg.CancelGrace = naturalExitGrace
 	e.cfg.Env = append(e.cfg.Env, "ADA_FAKE_INTERVAL=100ms")
 	e.afterAppend = func() { time.Sleep(150 * time.Millisecond) }
 	e.LaunchAttempt("attempt")
@@ -439,9 +435,11 @@ func TestStopEndsADescendantFeedingValidEventsFasterThanStoragePersistsThem(t *t
 }
 
 func TestStopAfterTheEngineExitsCutsOffTheBufferedEventBacklog(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "burst_before_exit")
-	e.cfg.CancelGrace = 200 * time.Millisecond
-	e.afterAppend = func() { time.Sleep(150 * time.Millisecond) }
+	e.cfg.CancelGrace = naturalExitGrace
+	// 110 buffered events at 300 ms each outlast StopBudget's 30 s.
+	e.afterAppend = func() { time.Sleep(300 * time.Millisecond) }
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "running")
 	// The engine marks its exit once the whole burst is in the pipe; the
@@ -479,9 +477,10 @@ func TestStopAfterTheEngineExitsCutsOffTheBufferedEventBacklog(t *testing.T) {
 }
 
 func TestPartialLineAfterASuccessfulResultFailsTheAttempt(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "ok_partial_tail_hold")
 	cleanupGrandchild(t, marker)
-	e.cfg.CancelGrace = 100 * time.Millisecond
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
 	task, err := s.Task(context.Background(), "u", "task")

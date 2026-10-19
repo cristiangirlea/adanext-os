@@ -129,6 +129,7 @@ func TestQueuedAttemptsLaunchInOrderOfCreationAcrossUsers(t *testing.T) {
 
 func TestACancelRacingTheLaunchEndsCanceledBeforeLaunchOrThroughTheRunningPathNeverBoth(t *testing.T) {
 	e, s, dir, _ := testExecutor(t, "block")
+	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
 	e.LaunchAttempt("attempt")
 	waitAttemptID(t, s, "attempt", "running")
@@ -372,6 +373,7 @@ func pauseCancel(t *testing.T, e *Executor) func() {
 
 func TestAResultTheEngineReturnsAfterTheStopCommittedEndsTheTaskCanceled(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "gated_ok")
+	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
 	release := pauseCancel(t, e)
 	e.LaunchAttempt("attempt")
@@ -398,6 +400,7 @@ func TestAResultTheEngineReturnsAfterTheStopCommittedEndsTheTaskCanceled(t *test
 
 func TestAStopRecordedWhileTheAttemptIsLaunchingIsHonouredWhenTheEngineAccepts(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "gated_ok")
+	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
 	release := pauseCancel(t, e)
 	e.LaunchAttempt("attempt")
