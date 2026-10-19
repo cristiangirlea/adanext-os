@@ -134,7 +134,102 @@ func testDetachedCoordinator(t *testing.T, launcher launcherJob) {
 		t.Fatalf("the launcher itself serves: %v", err)
 	}
 	assertServedFromTheRoot(t, log)
+	stopDetachedCoordinator(t, cfg)
+}
+
+// stopDetachedCoordinator stops the coordinator through its API and waits, by pid and
+// creation time, for its process to exit: it frees its lock before it exits, and until
+// then it still holds files in the state directory open.
+func stopDetachedCoordinator(t *testing.T, cfg ipc.Config) {
+	t.Helper()
+	var running *ipc.AlreadyRunningError
+	lock, err := ipc.Acquire(cfg)
+	if err == nil {
+		lock.Release()
+	}
+	if !errors.As(err, &running) {
+		t.Fatalf("no coordinator holds the lock: %v", err)
+	}
+	// A failed stop must not leave the coordinator holding the state directory.
+	t.Cleanup(func() {
+		if t.Failed() {
+			if err := terminateProcess(running.PID, running.Created, 10*time.Second); err != nil {
+				t.Log(err)
+			}
+		}
+	})
 	stopCoordinator(t, cfg)
+	if running.PID <= 0 || running.Created == "" {
+		t.Fatalf("lock holder unknown: %v", running)
+	}
+	if err := waitProcessGone(running.PID, running.Created, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// terminateProcess ends the process with this pid and creation time and waits for it.
+// A pid that is unknown, gone or now names another process is left alone.
+func terminateProcess(pid int, created string, timeout time.Duration) error {
+	if pid <= 0 || created == "" {
+		return nil
+	}
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	if same, err := createdAt(handle, created); err != nil || !same {
+		return err
+	}
+	if err := windows.TerminateProcess(handle, 1); err != nil {
+		return err
+	}
+	event, err := windows.WaitForSingleObject(handle, uint32(timeout/time.Millisecond))
+	if err != nil {
+		return err
+	}
+	if event != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("process %d still running %s after it was terminated", pid, timeout)
+	}
+	return nil
+}
+
+// createdAt reports whether the process behind handle has this creation time, in the
+// lock's decimal FILETIME form.
+func createdAt(handle windows.Handle, created string) (bool, error) {
+	var creation, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(handle, &creation, &exited, &kernel, &user); err != nil {
+		return false, err
+	}
+	return fmt.Sprintf("%d", uint64(creation.HighDateTime)<<32|uint64(creation.LowDateTime)) == created, nil
+}
+
+// waitProcessGone waits until the process with this pid and creation time (as the
+// lock records it) has exited. A pid that is gone or now names another process has
+// exited; any other open error is reported.
+func waitProcessGone(pid int, created string, timeout time.Duration) error {
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	if same, err := createdAt(handle, created); err != nil || !same {
+		return err
+	}
+	event, err := windows.WaitForSingleObject(handle, uint32(timeout/time.Millisecond))
+	if err != nil {
+		return err
+	}
+	if event != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("process %d still running after %s", pid, timeout)
+	}
+	return nil
 }
 
 // The broker can take seconds; the launcher's output must not wait for it.
@@ -186,7 +281,7 @@ func TestBrokerPathReleasesTheLaunchersOutputBeforeTheBroker(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	stopCoordinator(t, cfg)
+	stopDetachedCoordinator(t, cfg)
 	// The broker is held for 2 s: output closed before it, not at the launcher's exit.
 	if held < time.Second {
 		content, _ := os.ReadFile(log)
