@@ -54,12 +54,6 @@ func (e *Executor) prepare(a store.Attempt, active *active, scratch string) (str
 	if err != nil {
 		return "", false, err
 	}
-	// A cancel after git's last call still keeps the engine from starting.
-	select {
-	case <-active.cancel:
-		return "", false, fmt.Errorf("preparation: %w", context.Canceled)
-	default:
-	}
 	err = e.owned(a.ID, func(tx *store.Tx) error {
 		_, err := tx.RecordWorkspace(ctx, store.Workspace{Attempt: m.Attempt, Project: m.Project, Task: m.Task, Snapshot: m.Snapshot, BaseCommit: m.BaseCommit,
 			Branch: m.Branch, Path: m.Path, ManifestVersion: m.Version, ManifestHash: m.Hash(), Executor: m.Executor, Policy: m.Policy})

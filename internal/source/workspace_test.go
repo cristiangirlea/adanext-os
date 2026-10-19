@@ -480,6 +480,77 @@ func TestStaleLockFilesInTheCloneAreRemovedBeforeAFetch(t *testing.T) {
 	}
 }
 
+func TestALockOnAnAdaBranchIsLeftForItsEngine(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	lock := filepath.Join(w.repo("p"), "refs", "heads", "ada", "t1.lock")
+	write(t, lock, "")
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "2")
+	if _, err := os.Lstat(lock); err != nil {
+		t.Fatalf("the engine's lock was removed: %v", err)
+	}
+}
+
+func TestABaseTheOriginalHasPrunedIsTakenFromTheClone(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	snap := mustCapture(t, w.Inspector, dir)
+	mustPrepare(t, w, dir, snap, "1")
+	git(t, dir, "commit", "-q", "--amend", "--allow-empty", "-m", "amended")
+	git(t, dir, "reflog", "expire", "--expire-unreachable=now", "--all")
+	git(t, dir, "gc", "-q", "--prune=now")
+	base := snap.Inspection.Identity.Head
+	if _, err := fixtureGit(dir, "cat-file", "-e", base); err == nil {
+		t.Fatal("the original still holds the base")
+	}
+	m := mustPrepare(t, w, dir, snap, "2")
+	if got := git(t, m.Path, "rev-parse", "HEAD"); got != base {
+		t.Fatalf("HEAD = %s, want the base %s", got, base)
+	}
+	// A project with no clone yet names the missing base.
+	fresh := newWorkspaces(t)
+	if _, err := prepareCapture(fresh, dir, snap, "1"); err == nil || !strings.Contains(err.Error(), "is not in the clone") {
+		t.Fatalf("a fresh clone without the base: %v", err)
+	}
+}
+
+func TestAUserBranchNamedAdaNeverReachesTheClone(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		branch string
+		before bool
+	}{
+		{"ada before the first prepare", "ada", true},
+		{"ada/t1 before the first prepare", "ada/t1", true},
+		{"ada between two prepares", "ada", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := newRepo(t, nil)
+			w := newWorkspaces(t)
+			if c.before {
+				git(t, dir, "branch", c.branch)
+			}
+			first := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+			if !c.before {
+				git(t, dir, "branch", c.branch)
+			}
+			mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "2")
+			repo := w.repo("p")
+			if got := git(t, repo, "for-each-ref", "--format=%(refname)", "refs/heads"); got != "refs/heads/ada/t1\nrefs/heads/ada/t2\nrefs/heads/main" {
+				t.Fatalf("the clone's branches:\n%s", got)
+			}
+			if got := git(t, repo, "rev-parse", "refs/heads/ada/t1"); got != first.Head {
+				t.Fatalf("ada/t1 = %s, want %s", got, first.Head)
+			}
+		})
+	}
+}
+
 func TestTheImportedChangesCommitReproducesTheSnapshotUnderAutocrlf(t *testing.T) {
 	t.Parallel()
 	dir := tempDir(t)

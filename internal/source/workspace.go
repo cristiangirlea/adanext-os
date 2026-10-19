@@ -190,8 +190,8 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 // time, then fetches from one, and gives the clone Ada's config. Neither call
 // reads the original's config, and --no-local makes pack-objects copy what
 // the mirror reaches through alternates into the clone's own pack. The mirror
-// names base as refs/ada/base, so the clone gets it however the original's
-// refs have moved since the snapshot.
+// names base as refs/ada/base when it has the commit, so the clone gets it
+// however the original's refs have moved since the snapshot.
 func (w *Workspaces) sync(ctx context.Context, project, source, base string) error {
 	in := w.Inspector
 	dir := filepath.Join(w.Root, project)
@@ -212,11 +212,17 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) err
 	if src == nil {
 		return &BlockedError{Blockers: r.Blockers}
 	}
-	if err := os.MkdirAll(filepath.Join(mirror, "refs", "ada"), 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(mirror, "refs", "ada", "base"), []byte(base+"\n"), 0o600); err != nil {
-		return err
+	// A base the original has pruned gets no ref: the clone may still hold
+	// it, else Prepare names it missing.
+	_, err = in.Git.run(ctx, mirror, "", "cat-file", "-e", base+"^{commit}")
+	hasBase := err == nil
+	if hasBase {
+		if err := os.MkdirAll(filepath.Join(mirror, "refs", "ada"), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(mirror, "refs", "ada", "base"), []byte(base+"\n"), 0o600); err != nil {
+			return err
+		}
 	}
 	transport := []string{"protocol.file.allow=always", "transfer.bundleURI=false"}
 	repo := w.repo(project)
@@ -241,6 +247,10 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) err
 			os.RemoveAll(tmp)
 			return err
 		}
+		if err := w.dropAdaBranches(ctx, tmp); err != nil {
+			os.RemoveAll(tmp)
+			return err
+		}
 		if err := w.writeConfig(tmp, mirror, *src); err != nil {
 			os.RemoveAll(tmp)
 			return err
@@ -257,12 +267,15 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) err
 			return err
 		}
 	}
-	// refs/ada/head carries a detached HEAD no branch reaches; ada/* are Ada's
-	// own branches, which --prune leaves alone. --prune clears a deleted branch
-	// before a branch under its name arrives; --update-shallow takes new
-	// shallow roots of a shallow original.
+	// refs/ada/head carries a detached HEAD no branch reaches; ada and ada/*
+	// are Ada's own names, which the fetch never takes and --prune leaves
+	// alone. --prune clears a deleted branch before a branch under its name
+	// arrives; --update-shallow takes new shallow roots of a shallow original.
 	args := []string{"fetch", "-q", "--prune", "--update-shallow", "--no-tags", "--no-write-fetch-head", "--no-auto-gc", "--no-recurse-submodules", "--", mirror,
-		"+refs/heads/*:refs/heads/*", "^refs/heads/ada/*", "+refs/tags/*:refs/tags/*", "+refs/ada/base:refs/ada/base"}
+		"+refs/heads/*:refs/heads/*", "^refs/heads/ada", "^refs/heads/ada/*", "+refs/tags/*:refs/tags/*"}
+	if hasBase {
+		args = append(args, "+refs/ada/base:refs/ada/base")
+	}
 	if src.head != "" {
 		args = append(args, "+refs/ada/head:refs/ada/head")
 	}
@@ -275,15 +288,37 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) err
 	return nil
 }
 
+// dropAdaBranches deletes the original's branches named ada or ada/*, which
+// a fresh clone copies, so those names stay Ada's.
+func (w *Workspaces) dropAdaBranches(ctx context.Context, repo string) error {
+	g := w.Inspector.Git
+	out, err := g.run(ctx, repo, "", "for-each-ref", "--format=%(refname)", "refs/heads/ada")
+	if err != nil {
+		return err
+	}
+	for _, ref := range strings.Fields(string(out)) {
+		if _, err := g.run(ctx, repo, "", "update-ref", "--no-deref", "-d", ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // removeLocks removes the lock files a killed clone or fetch left in the
-// clone. It runs under the project's lock, where no other git writes the
-// clone: one attempt per project is active, and adad is a singleton.
+// clone. It runs under the project's lock, where no other clone or fetch
+// writes it. Locks under refs/heads/ada/ are left, as only engines write
+// there; the risk left is an engine nobody confirmed had exited, still
+// running git in its worktree, whose packed-refs.lock this can remove.
 func removeLocks(repo string) error {
 	stale, err := filepath.Glob(filepath.Join(repo, "*.lock"))
 	if err != nil {
 		return err
 	}
+	ada := filepath.Join(repo, "refs", "heads", "ada")
 	err = filepath.WalkDir(filepath.Join(repo, "refs"), func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && path == ada {
+			return fs.SkipDir
+		}
 		if err == nil && d.Type().IsRegular() && strings.HasSuffix(path, ".lock") {
 			stale = append(stale, path)
 		}

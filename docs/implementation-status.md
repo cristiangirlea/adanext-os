@@ -1192,17 +1192,28 @@ more users (M4b), artifact origins when content repeats (#89).
   409 `unborn_base`; a project with no source (only test seeds) keeps the scratch directory. The
   clone is made on the first start that needs it, not at import, and every start fetches, each
   from a freshly built mirror under a per-project lock. The mirror records the original's HEAD
-  commit as `refs/ada/head`, and every fetch takes it, so a detached base no branch reaches is
-  always present (#79); the fetch leaves Ada's own `ada/*` branches alone. The workspace is
-  prepared after the launch claim and before the engine starts; a cancel or stop ends the
-  preparation and the attempt fails, as a cancel during launch already did. The manifest's
-  policy is the attempt's mode. Untracked files are created through a parent-directory handle
+  commit as `refs/ada/head` and the snapshot's base as `refs/ada/base`, the latter written only
+  when the mirror has that commit (an original that has pruned it would make the fetch fail; the
+  clone may still hold it through an earlier task's branch, else Prepare names it missing), so a
+  detached or since-moved base reaches the clone (#79). The fetch runs with `--prune` and never
+  takes or prunes the names `ada` and `ada/*`, which stay Ada's: a fresh clone deletes the
+  original's branches of those names. Before a fetch, lock files a killed clone or fetch left are
+  removed, except under `refs/heads/ada/`, which only engines write; the limit is an engine whose
+  exit nobody confirmed (`recovery_required`) still running git, whose `packed-refs.lock` can be
+  removed. The clone has `gc.auto=0` and `maintenance.auto=false`, and fetches with
+  `--update-shallow` so a shallow original's new shallow roots arrive. The workspace is prepared
+  after the launch claim and before the engine starts; a cancel during preparation ends the
+  attempt `ended_failed` and a coordinator stop ends it `recovery_required`; the engine never
+  starts. Under `core.autocrlf=true` a file stored with LF is checked out with CRLF in Ada's
+  worktree (git's own checkout; status stays clean). The manifest's policy is the attempt's
+  mode. Untracked files are created through a parent-directory handle
   per component that never follows a link (`openat` with `O_NOFOLLOW`, or `NtCreateFile` with
   `FILE_OPEN_REPARSE_POINT` relative to the parent's handle). Just before the engine starts the
   executor compares the workspace row with the attempt's identity, the row with its hash, and
-  the copy in the worktree's git directory with the row; any difference, or a missing worktree,
-  moves the attempt to `recovery_required` with a recovery event naming it, and nothing is
-  rebuilt. Worktrees and task branches are never removed in M3.3; M7 exports and removes them.
+  the copy in the worktree's git directory with the row, and the worktree's branch and HEAD with
+  the manifest's branch and prepared head, which the row's hash binds; any difference, or a
+  missing worktree, moves the attempt to `recovery_required` with a recovery event naming it,
+  and nothing is rebuilt. Worktrees and task branches are never removed in M3.3; M7 exports and removes them.
 
 ## Owner actions pending
 
