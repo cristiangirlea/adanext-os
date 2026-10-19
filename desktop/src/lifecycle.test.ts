@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import * as childProcess from "node:child_process";
+import path from "node:path";
 import { EventEmitter } from "node:events";
 import { coordinatorConfig, endpoint, findOrStart, parseSID, spawnCoordinator, waitForExit, type LifecycleIO, QUIT_WAIT_MS } from "./adad";
 
@@ -31,7 +32,8 @@ describe("coordinator lifecycle", () => {
     expect(fake.probe).toHaveBeenCalledTimes(3);
   });
   it("bounds startup and propagates launch and access errors", async () => {
-    await expect(findOrStart(config, "/pipe", io([]), 100)).rejects.toThrow(/timed out/);
+    // A detached coordinator's stderr is null: the message names where its start-up errors are.
+    await expect(findOrStart(config, "/pipe", io([]), 100)).rejects.toThrow(`timed out waiting for adad to start; its start-up log is ${path.join(config.stateDir, "startup.log")}`);
     const denied = io([]);
     denied.probe = async () => { throw new Error("access denied"); };
     await expect(findOrStart(config, "/pipe", denied)).rejects.toThrow("access denied");
@@ -57,7 +59,7 @@ describe("coordinator lifecycle", () => {
     neverReady.probe = async () => { if (!launched) { launched = true; return false; } throw timedOut(); };
     const failure = await findOrStart(config, "/pipe", neverReady, 1000).catch((error: Error) => error);
     expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toBe("timed out waiting for adad to start: the endpoint accepted connections but did not answer");
+    expect((failure as Error).message).toBe(`timed out waiting for adad to start: the endpoint accepted connections but did not answer; its start-up log is ${path.join(config.stateDir, "startup.log")}`);
     expect(((failure as Error).cause as NodeJS.ErrnoException).code).toBe("ETIMEDOUT");
     expect(neverReady.spawn).toHaveBeenCalledOnce();
   });

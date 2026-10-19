@@ -16,7 +16,7 @@ import (
 )
 
 func TestListenAndDialRoundTripBytes(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "roundtrip"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "roundtrip"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestListenRequiresAHeldLock(t *testing.T) {
 		listener.Close()
 		t.Fatal("nil lock allowed Listen")
 	}
-	lock, err := Acquire(Config{StateDir: t.TempDir(), Name: "released"})
+	lock, err := Acquire(Config{StateDir: ownerOnlyDir(t), Name: "released"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestListenRequiresAHeldLock(t *testing.T) {
 }
 
 func TestDialWithoutAListenerStopsAtTheContextDeadline(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "absent"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "absent"}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -177,7 +177,7 @@ func TestAlreadyRunningErrorReportsTheHolderIdentityOrUnknown(t *testing.T) {
 
 func TestConfigRefusesANameLongerThan64Bytes(t *testing.T) {
 	for _, name := range []string{strings.Repeat("a", 65), strings.Repeat("a", 64)} {
-		err := (Config{StateDir: t.TempDir(), Name: name}).validate()
+		err := (Config{StateDir: ownerOnlyDir(t), Name: name}).validate()
 		if (err == nil) != (len(name) == 64) {
 			t.Fatalf("name length %d: %v", len(name), err)
 		}
@@ -190,7 +190,7 @@ func TestAnUnreadableHolderRecordReportsAnUnknownHolder(t *testing.T) {
 		{"malformed", "ADANEXT_IPC_MALFORMED_RECORD=1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{StateDir: t.TempDir(), Name: "helper"}
+			cfg := Config{StateDir: ownerOnlyDir(t), Name: "helper"}
 			cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
 			cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", tc.env, "ADANEXT_IPC_STATE="+cfg.StateDir)
 			stdout, err := cmd.StdoutPipe()
@@ -223,7 +223,7 @@ func TestAnUnreadableHolderRecordReportsAnUnknownHolder(t *testing.T) {
 }
 
 func TestADeadCoordinatorLockIsRecoveredAndALiveOneReportsItsIdentity(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "helper"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "helper"}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
 	cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", "ADANEXT_IPC_STATE="+cfg.StateDir)
 	stdout, err := cmd.StdoutPipe()
@@ -277,7 +277,7 @@ func TestALockWithReusedOrMissingPIDIsRecovered(t *testing.T) {
 		{"missing PID", 99999999},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{StateDir: t.TempDir(), Name: "stale"}
+			cfg := Config{StateDir: ownerOnlyDir(t), Name: "stale"}
 			body, err := json.Marshal(map[string]any{"pid": tc.pid, "created": "0"})
 			if err != nil {
 				t.Fatal(err)
@@ -306,4 +306,15 @@ func TestALockWithReusedOrMissingPIDIsRecovered(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ownerOnlyDir is a t.TempDir made 0700, as Ada makes its state directory: under umask 022
+// testing makes it 0755, which Acquire refuses.
+func ownerOnlyDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

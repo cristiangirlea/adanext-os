@@ -2,6 +2,9 @@ package ipc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -15,7 +18,7 @@ import (
 )
 
 func TestEndpointTokenIsPrivateAndReplacedOnRestart(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "token-rotation"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "token-rotation"}
 	var previous []byte
 	for range 2 {
 		lock, err := Acquire(cfg)
@@ -52,7 +55,7 @@ func TestEndpointTokenIsPrivateAndReplacedOnRestart(t *testing.T) {
 }
 
 func TestDialRefusesAnEndpointWithTheWrongToken(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "wrong-token"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "wrong-token"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -85,9 +88,10 @@ func TestDialRefusesAnEndpointWithTheWrongToken(t *testing.T) {
 }
 
 func TestListenerClosesMalformedAndSilentClientsBeforeHTTP(t *testing.T) {
-	for _, input := range []string{"garbage\n", ""} {
-		t.Run(input, func(t *testing.T) {
-			cfg := Config{StateDir: t.TempDir(), Name: "bad-client"}
+	request := "GET / HTTP/1.1\r\nHost: adad\r\n\r\n"
+	for name, input := range map[string]string{"raw request": request, "garbage": "garbage\n" + request, "silent": ""} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Config{StateDir: ownerOnlyDir(t), Name: "bad-client"}
 			lock, err := Acquire(cfg)
 			if err != nil {
 				t.Fatal(err)
@@ -98,12 +102,10 @@ func TestListenerClosesMalformedAndSilentClientsBeforeHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer l.Close()
-			go func() {
-				c, e := l.Accept()
-				if e == nil {
-					c.Close()
-				}
-			}()
+			// A real server: only the listener's handshake stands between a raw request and an answer.
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "answered") })}
+			defer server.Close()
+			go server.Serve(l)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			c, err := dial(ctx, cfg)
@@ -116,10 +118,9 @@ func TestListenerClosesMalformedAndSilentClientsBeforeHTTP(t *testing.T) {
 			if input != "" {
 				io.WriteString(c, input)
 			}
-			var b [1]byte
-			_, err = c.Read(b[:])
-			if err == nil {
-				t.Fatal("client was not closed")
+			got, err := io.ReadAll(c)
+			if len(got) != 0 {
+				t.Fatalf("a client without the handshake got %q", got)
 			}
 			if e, ok := err.(net.Error); ok && e.Timeout() {
 				t.Fatalf("connection was not closed: %v", err)
@@ -132,7 +133,7 @@ func TestListenerClosesMalformedAndSilentClientsBeforeHTTP(t *testing.T) {
 }
 
 func TestHTTPWorksAfterEndpointAuthentication(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "http-auth"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "http-auth"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -191,5 +192,122 @@ func TestCloseReturnsOnlyAfterTheAcceptLoopHasExited(t *testing.T) {
 	}
 	if err := a.Close(); err != nil {
 		t.Fatalf("second Close = %v", err)
+	}
+}
+
+// flakyListener fails its first accepts the way a listener out of descriptors
+// does, then hands over the connections it is given.
+type flakyListener struct {
+	net.Listener
+	failures int
+	conns    chan net.Conn
+	closed   chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	calls    []time.Time
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	l.calls = append(l.calls, time.Now())
+	fail := len(l.calls) <= l.failures
+	l.mu.Unlock()
+	if fail {
+		return nil, errors.New("accept: too many open files")
+	}
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *flakyListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func TestListenerRetriesAFailedAcceptWithBackoffAndKeepsServing(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+	flaky := &flakyListener{failures: 3, conns: make(chan net.Conn, 1), closed: make(chan struct{})}
+	a := authenticateListener(flaky, key)
+	defer a.Close()
+	server, client := net.Pipe()
+	defer client.Close()
+	flaky.conns <- server
+	proved := make(chan error, 1)
+	go func() {
+		nonce := make([]byte, 32)
+		rand.Read(nonce)
+		if _, err := io.WriteString(client, "ADANEXT1 "+hex.EncodeToString(nonce)+"\n"); err != nil {
+			proved <- err
+			return
+		}
+		line := make([]byte, 65)
+		if _, err := io.ReadFull(client, line); err != nil {
+			proved <- err
+			return
+		}
+		if string(line[:64]) != hex.EncodeToString(endpointMAC(key, nonce)) {
+			proved <- errors.New("wrong proof")
+			return
+		}
+		proved <- nil
+	}()
+	accepted := make(chan error, 1)
+	go func() {
+		c, err := a.Accept()
+		if c != nil {
+			c.Close()
+		}
+		accepted <- err
+	}()
+	select {
+	case err := <-accepted:
+		if err != nil {
+			t.Fatalf("a failed accept ended the listener: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the listener did not hand over the connection after failed accepts")
+	}
+	if err := <-proved; err != nil {
+		t.Fatal(err)
+	}
+	flaky.mu.Lock()
+	calls := append([]time.Time(nil), flaky.calls...)
+	flaky.mu.Unlock()
+	for i := 1; i < 4; i++ {
+		if gap := calls[i].Sub(calls[i-1]); gap < 4*time.Millisecond {
+			t.Fatalf("accept %d retried after %v, without backing off", i, gap)
+		}
+	}
+}
+
+func TestCloseDuringAcceptBackoffReturnsPromptlyAsClosed(t *testing.T) {
+	flaky := &flakyListener{failures: 1 << 30, conns: make(chan net.Conn), closed: make(chan struct{})}
+	a := authenticateListener(flaky, make([]byte, 32))
+	// After nine failed accepts the backoff is at its 1 s cap.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+		flaky.mu.Lock()
+		calls := len(flaky.calls)
+		flaky.mu.Unlock()
+		if calls >= 9 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d accepts in 10 s", calls)
+		}
+	}
+	start := time.Now()
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > 300*time.Millisecond {
+		t.Fatalf("Close waited %v for the accept backoff", took)
+	}
+	if _, err := a.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Accept after Close = %v", err)
 	}
 }

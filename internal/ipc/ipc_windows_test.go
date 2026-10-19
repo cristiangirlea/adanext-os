@@ -20,7 +20,7 @@ import (
 )
 
 func TestPipeDescriptorGrantsOnlyTheCurrentUser(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "descriptor"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "descriptor"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestPipeOwnerSIDAllowsOnlyTheCurrentUser(t *testing.T) {
 }
 
 func TestDialRefusesAPipeWhenTheExpectedSIDChanges(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "sid-check"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "sid-check"}
 	current := pipeCheckSID
 	pipeCheckSID = func() (string, error) { return "S-1-5-18", nil }
 	defer func() { pipeCheckSID = current }()
@@ -159,7 +159,7 @@ func TestDialRefusesAPipeWhenTheExpectedSIDChanges(t *testing.T) {
 }
 
 func TestDialRefusesAPipeWhenOnlyTheOwnerSIDChanges(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "owner-check"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "owner-check"}
 	readOwner := pipeReadOwnerSID
 	pipeReadOwnerSID = func(net.Conn) (string, error) { return "S-1-5-18", nil }
 	defer func() { pipeReadOwnerSID = readOwner }()
@@ -194,7 +194,7 @@ func TestDialRefusesAPipeWhenOnlyTheOwnerSIDChanges(t *testing.T) {
 }
 
 func TestALiveWindowsHolderReturnsWithoutStaleRetry(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "helper"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "helper"}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
 	cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", "ADANEXT_IPC_STATE="+cfg.StateDir)
 	stdout, err := cmd.StdoutPipe()
@@ -230,7 +230,7 @@ func TestALiveWindowsHolderReturnsWithoutStaleRetry(t *testing.T) {
 }
 
 func TestWindowsRetryReportsTheHolderAfterTheRecordChanges(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "helper"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "helper"}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
 	cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", "ADANEXT_IPC_REPLACE_RECORD=1", "ADANEXT_IPC_STATE="+cfg.StateDir)
 	stdout, err := cmd.StdoutPipe()
@@ -322,7 +322,7 @@ func TestWindowsRetryReportsTheHolderAfterTheRecordChanges(t *testing.T) {
 }
 
 func TestAStaleWindowsLockIsRetriedUntilItsKernelLockClears(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "helper"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "helper"}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldsCoordinatorLock$")
 	cmd.Env = append(os.Environ(), "ADANEXT_IPC_HELPER=1", "ADANEXT_IPC_STALE_RECORD=1", "ADANEXT_IPC_STATE="+cfg.StateDir)
 	stdout, err := cmd.StdoutPipe()
@@ -347,8 +347,8 @@ func TestAStaleWindowsLockIsRetriedUntilItsKernelLockClears(t *testing.T) {
 }
 
 func TestAStateDirectoryJunctionIsRefusedOnWindows(t *testing.T) {
-	target := t.TempDir()
-	path := filepath.Join(t.TempDir(), "junction")
+	target := ownerOnlyDir(t)
+	path := filepath.Join(ownerOnlyDir(t), "junction")
 	if output, err := exec.Command("cmd", "/c", "mklink", "/J", path, target).CombinedOutput(); err != nil {
 		t.Fatalf("create junction: %v: %s", err, output)
 	}
@@ -393,8 +393,8 @@ func (d irregularDir) Mode() os.FileMode {
 func (d irregularDir) IsDir() bool { return d.Mode().IsDir() }
 
 func TestALockSymlinkIsRefusedWithoutChangingItsTargetOnWindows(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(t.TempDir(), "target")
+	dir := ownerOnlyDir(t)
+	target := filepath.Join(ownerOnlyDir(t), "target")
 	if err := os.WriteFile(target, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -447,8 +447,8 @@ type handleConn struct{ net.Conn }
 func (handleConn) Fd() uintptr { return 0 }
 
 func TestAStateDirectorySymlinkIsRefusedOnWindows(t *testing.T) {
-	target := t.TempDir()
-	path := filepath.Join(t.TempDir(), "link")
+	target := ownerOnlyDir(t)
+	path := filepath.Join(ownerOnlyDir(t), "link")
 	if err := os.Symlink(target, path); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestAStateDirectorySymlinkIsRefusedOnWindows(t *testing.T) {
 }
 
 func TestASecondListenOnTheSameNameFails(t *testing.T) {
-	firstLock, err := Acquire(Config{StateDir: t.TempDir(), Name: "second"})
+	firstLock, err := Acquire(Config{StateDir: ownerOnlyDir(t), Name: "second"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestASecondListenOnTheSameNameFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	secondLock, err := Acquire(Config{StateDir: t.TempDir(), Name: "second"})
+	secondLock, err := Acquire(Config{StateDir: ownerOnlyDir(t), Name: "second"})
 	if err != nil {
 		t.Fatal(err)
 	}

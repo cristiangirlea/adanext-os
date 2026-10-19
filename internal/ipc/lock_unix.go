@@ -60,6 +60,11 @@ func openLockDir(path string) (*lockDir, error) {
 	if err == nil {
 		err = checkStateDirInfo(path, info)
 	}
+	// Clients read the token only from a 0700 directory. One the user chose may be their
+	// home or a project, so it is refused rather than changed.
+	if err == nil && info.Mode().Perm() != 0700 {
+		err = fmt.Errorf("ipc: state directory %q must be mode 0700; run chmod 700 %q", path, path)
+	}
 	if err != nil {
 		dir.Close()
 		return nil, err

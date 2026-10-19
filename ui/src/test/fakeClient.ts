@@ -8,6 +8,11 @@ export class FakeClient implements AdaClient {
   listeners = new Map<string, (message: StreamMessage) => void>();
   unsubscribed: string[] = [];
   refuse: Partial<Record<keyof AdaClient, Error>> = {};
+  // While hold is set, getTask answers with the task as it was asked for, once released.
+  hold = false;
+  inFlight = 0;
+  maxInFlight = 0;
+  private held: (() => void)[] = [];
 
   constructor(tasks: Task[] = []) {
     this.tasks = tasks;
@@ -31,7 +36,22 @@ export class FakeClient implements AdaClient {
   }
   async getTask(id: string): Promise<Task> {
     this.check("getTask");
-    return this.find(id);
+    this.calls.push(`getTask:${id}`);
+    const task = this.find(id);
+    this.inFlight++;
+    this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    try {
+      if (this.hold) await new Promise<void>((resolve) => this.held.push(resolve));
+      return task;
+    } finally {
+      this.inFlight--;
+    }
+  }
+  // release answers every held read and says how many there were.
+  release(): number {
+    const held = this.held.splice(0);
+    for (const resolve of held) resolve();
+    return held.length;
   }
   async ready(id: string, revision: number): Promise<Task> {
     this.check("ready");

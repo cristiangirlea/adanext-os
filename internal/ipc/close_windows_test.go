@@ -16,7 +16,7 @@ import (
 func TestClosingThePipeListenerWhileClientsConnectNeverHangs(t *testing.T) {
 	for iteration := 0; iteration < 200; iteration++ {
 		t.Run(fmt.Sprintf("iteration_%d", iteration), func(t *testing.T) {
-			cfg := Config{StateDir: t.TempDir(), Name: fmt.Sprintf("close-%d-%d", os.Getpid(), iteration)}
+			cfg := Config{StateDir: ownerOnlyDir(t), Name: fmt.Sprintf("close-%d-%d", os.Getpid(), iteration)}
 			lock, err := Acquire(cfg)
 			if err != nil {
 				t.Fatal(err)
