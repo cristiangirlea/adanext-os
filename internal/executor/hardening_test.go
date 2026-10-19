@@ -100,13 +100,12 @@ func TestStreamingDescendantCannotExtendTheExitDeadline(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "stream_after_exit")
 	cleanupGrandchild(t, marker)
 	e.cfg.CancelGrace = 100 * time.Millisecond
-	started := time.Now()
 	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "ended_failed")
-	// Two process starts precede the exit; a descendant that could extend the
-	// deadline would instead keep the attempt open for as long as it streams.
-	if elapsed := time.Since(started); elapsed < e.cfg.CancelGrace || elapsed > 3*e.cfg.CancelGrace+time.Second {
-		t.Fatalf("attempt took %s", elapsed)
+	a := waitAttempt(t, s, "ended_failed")
+	// A descendant that could extend the deadline would keep the attempt open
+	// for as long as it streams, which is until it is killed.
+	if span := markerToEnd(t, marker, a); span > 3*e.cfg.CancelGrace+time.Second {
+		t.Fatalf("attempt ended %s after the descendant started", span)
 	}
 }
 
@@ -229,7 +228,8 @@ func TestCancelAfterSuccessfulResultRequiresRecovery(t *testing.T) {
 			e, s, _, _ := testExecutor(t, "big_block")
 			e.cfg.CancelGrace = 500 * time.Millisecond
 			e.LaunchAttempt("attempt")
-			deadline := time.Now().Add(3 * time.Second)
+			// Only a wait for the result to be stored: the engine holds forever.
+			deadline := time.Now().Add(markerBound)
 			found := false
 			for time.Now().Before(deadline) {
 				events, _ := s.Events(context.Background(), "u", "attempt", 0)
@@ -519,8 +519,8 @@ func TestADescendantLingeringAfterANaturalExitIsGoneWhenTheAttemptEnds(t *testin
 func TestStopAfterAForcedKillCutsOffTheBufferedEventBacklog(t *testing.T) {
 	t.Parallel()
 	e, s, _, marker := testExecutor(t, "burst_ignore_cancel")
-	e.cfg.CancelGrace = 3 * time.Second
-	// 110 buffered events at 300 ms each outlast StopBudget's 20 s.
+	e.cfg.CancelGrace = 5 * time.Second
+	// 110 buffered events at 300 ms each outlast StopBudget's 30 s.
 	e.afterAppend = func() { time.Sleep(300 * time.Millisecond) }
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "running")

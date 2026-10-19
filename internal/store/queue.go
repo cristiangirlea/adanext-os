@@ -112,9 +112,16 @@ func cancelQueued(ctx context.Context, tx *sql.Tx, taskID string, expectedRevisi
 	}
 	if attemptState == "launching" {
 		// Recorded with the decision: an engine that accepts and returns ok
-		// before the executor's cancel runs still cannot end the task ok.
-		if err := appendCancelEvent(ctx, tx, attemptID, reason); err != nil {
+		// before the executor's cancel runs still cannot end the task ok. One
+		// cancel event is enough, however many retries reach here.
+		var recorded int
+		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE attempt=? AND kind='cancel'", attemptID).Scan(&recorded); err != nil {
 			return "", err
+		}
+		if recorded == 0 {
+			if err := appendCancelEvent(ctx, tx, attemptID, reason); err != nil {
+				return "", err
+			}
 		}
 		return "", fmt.Errorf("%w: task %s", ErrAttemptLaunched, taskID)
 	}

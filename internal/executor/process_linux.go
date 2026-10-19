@@ -113,27 +113,26 @@ func stopTree(signal func(int, syscall.Signal) error, root int, created string) 
 		if !grew {
 			break
 		}
-		stopped := make(map[int]bool)
-		for _, record := range current {
-			if !stopped[record.group] {
-				stopped[record.group] = true
-				_ = signal(-record.group, syscall.SIGSTOP)
-			}
-		}
+		signalGroups(signal, current, syscall.SIGSTOP)
 	}
 	return tree
 }
 
-// killTree kills each group through a member that is still the process
-// stopTree found, so a group id is never signalled on its number alone.
+// killTree kills each group of the tree stopTree found.
 func killTree(signal func(int, syscall.Signal) error, tree map[int]processRecord) {
-	killed := make(map[int]bool)
+	signalGroups(signal, tree, syscall.SIGKILL)
+}
+
+// signalGroups signals each group once, through a member that is still the
+// process scanned, so a group id is never signalled on its number alone.
+func signalGroups(signal func(int, syscall.Signal) error, tree map[int]processRecord, sig syscall.Signal) {
+	done := make(map[int]bool)
 	for pid, record := range tree {
 		current, err := readProcessRecord(pid)
-		if err != nil || current.created != record.created || killed[current.group] {
+		if err != nil || current.created != record.created || done[current.group] {
 			continue
 		}
-		killed[current.group] = true
-		_ = signal(-current.group, syscall.SIGKILL)
+		done[current.group] = true
+		_ = signal(-current.group, sig)
 	}
 }

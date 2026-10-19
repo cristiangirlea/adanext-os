@@ -40,13 +40,19 @@ func (s *processSupervisor) close() {
 
 func (s *processSupervisor) kill(cmd *exec.Cmd) error {
 	pid := cmd.Process.Pid
+	if processCreated(pid) != s.created {
+		// Reaped, the pid may name another process: only the engine's own
+		// handle is safe, and close still ends what the engine left.
+		return cmd.Process.Kill()
+	}
 	// Stopped first, the engine forks nothing while its tree is scanned.
 	_ = s.signal(-pid, syscall.SIGSTOP)
 	tree := stopTree(s.signal, pid, s.created)
 	err := s.signal(-pid, syscall.SIGKILL)
 	killTree(s.signal, tree)
 	if err != nil {
-		// The group kill failed (the engine left its group): kill the engine itself.
+		// A session leader cannot leave its group, so the engine was reaped
+		// since the check: its own handle reports that.
 		err = cmd.Process.Kill()
 	}
 	return err

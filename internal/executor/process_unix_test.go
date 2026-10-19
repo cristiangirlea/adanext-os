@@ -45,6 +45,7 @@ func startSupervised(t *testing.T, script string) (*exec.Cmd, *processSupervisor
 
 func TestAFailedGroupKillFallsBackToKillingTheEngineItself(t *testing.T) {
 	cmd, s, marker, waited := startSupervised(t, "grandchild_hold")
+	cleanupGrandchild(t, marker)
 	waitMarker(t, marker, "child:")
 	// The engine has left its group, say: every group signal fails.
 	s.signal = func(pid int, sig syscall.Signal) error {
@@ -60,5 +61,29 @@ func TestAFailedGroupKillFallsBackToKillingTheEngineItself(t *testing.T) {
 	case <-waited:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the engine survived a kill whose group signal failed")
+	}
+}
+
+func TestAKillOfAPidNoLongerTheEngineSignalsNoGroup(t *testing.T) {
+	cmd, s, marker, waited := startSupervised(t, "grandchild_hold")
+	cleanupGrandchild(t, marker)
+	waitMarker(t, marker, "child:")
+	// The pid now names another process, say: its group is not the engine's.
+	s.created = "reused"
+	var sent []int
+	s.signal = func(pid int, sig syscall.Signal) error {
+		sent = append(sent, pid)
+		return nil
+	}
+	if err := s.kill(cmd); err != nil {
+		t.Fatalf("kill = %v", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("signals sent by pid alone: %v", sent)
+	}
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine survived the fallback kill")
 	}
 }
