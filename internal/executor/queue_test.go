@@ -427,6 +427,46 @@ func TestAStopRecordedWhileTheAttemptIsLaunchingIsHonouredWhenTheEngineAccepts(t
 	release()
 }
 
+func TestAMemberCancelWhileTheAttemptIsLaunchingIsHonouredWhenTheEngineAccepts(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "gated_ok")
+	e.cfg.CancelGrace = naturalExitGrace
+	ctx := context.Background()
+	release := pauseCancel(t, e)
+	e.LaunchAttempt("attempt")
+	// The engine waits to accept: the member's cancel finds the attempt
+	// launching, commits as the API's does, and hands the task to the executor.
+	waitMarker(t, marker, "start:")
+	task, err := s.Task(ctx, "u", "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Do(ctx, "u", "cancel-task", "cancel", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.CancelQueued(ctx, "task", task.Revision, "withdrawn by u")
+		if errors.Is(err, store.ErrAttemptLaunched) {
+			return []byte("ok"), nil
+		}
+		return nil, fmt.Errorf("cancel of a launching attempt = %v", err)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.CancelTask("task")
+	openGate(t, marker+".accept")
+	openGate(t, marker+".finish")
+	a := waitAttemptID(t, s, "attempt", "canceled", "ended_ok", "recovery_required")
+	if a.State == "ended_ok" {
+		t.Fatal("the attempt ended ok after a member canceled it while it was launching")
+	}
+	task, err = s.Task(ctx, "u", "task")
+	if err != nil || (task.State != store.Canceled && task.State != store.RecoveryRequired) {
+		t.Fatalf("task = %+v: %v", task, err)
+	}
+	if kinds := eventKinds(t, s, "attempt"); strings.Join(kinds, ",") != "cancel,result" {
+		t.Fatalf("events = %v", kinds)
+	}
+	release()
+}
+
 // cancelQueued is the API's withdrawal of a preparing task at the revision it
 // read. A launch that moved the task since makes that revision stale, so the
 // cancel re-reads the task and retries at its current revision, a few times.

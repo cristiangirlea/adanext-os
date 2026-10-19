@@ -69,6 +69,75 @@ func TestPreparingToCanceledIsRefusedOnceTheAttemptLeftPending(t *testing.T) {
 	}
 }
 
+func TestACancelThatFindsTheAttemptLaunchingRecordsItForTheAccept(t *testing.T) {
+	s := openTestStore(t)
+	seedQueue(t, s)
+	execute(t, s, "UPDATE attempts SET state='launching' WHERE id='a'")
+	// The API commits the transaction that found the attempt launched.
+	err := s.write(ctx, "u", func(tx *Tx) error {
+		_, err := tx.CancelQueued(ctx, "t", 2, "withdrawn by u")
+		if !errors.Is(err, ErrAttemptLaunched) {
+			t.Errorf("cancel queued after launch = %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.Events(ctx, "u", "a", 0)
+	if err != nil || len(events) != 1 || events[0].Kind != "cancel" || !strings.Contains(string(events[0].Payload), `"reason":"withdrawn by u"`) {
+		t.Fatalf("events = %+v: %v", events, err)
+	}
+	err = s.write(ctx, "u", func(tx *Tx) error {
+		canceled, err := tx.CancelRecorded(ctx, "a")
+		if err == nil && !canceled {
+			t.Error("the accept would not see the member's cancel")
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.Task(ctx, "u", "t")
+	if err != nil || task.State != Preparing || task.Revision != 2 {
+		t.Fatalf("task = %+v: %v", task, err)
+	}
+}
+
+func TestRepeatedMemberCancelsOfALaunchingAttemptRecordOneEvent(t *testing.T) {
+	s := openTestStore(t)
+	seedQueue(t, s)
+	execute(t, s, "UPDATE attempts SET state='launching' WHERE id='a'")
+	// Each retry with a fresh idempotency key reaches the store again.
+	for _, reason := range []string{"withdrawn by u", "withdrawn again by u"} {
+		err := s.write(ctx, "u", func(tx *Tx) error {
+			if _, err := tx.CancelQueued(ctx, "t", 2, reason); !errors.Is(err, ErrAttemptLaunched) {
+				t.Errorf("cancel queued after launch = %v", err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := s.Events(ctx, "u", "a", 0)
+	if err != nil || len(events) != 1 || !strings.Contains(string(events[0].Payload), `"reason":"withdrawn by u"`) {
+		t.Fatalf("events = %+v: %v", events, err)
+	}
+	// The owner's stop still records its own reason.
+	err = s.write(ctx, "u", func(tx *Tx) error {
+		_, err := tx.StopWork(ctx, 0, "coordinator stopped by the owner")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err = s.Events(ctx, "u", "a", 0)
+	if err != nil || len(events) != 2 || events[1].Kind != "cancel" || !strings.Contains(string(events[1].Payload), "stopped by the owner") {
+		t.Fatalf("events after the stop = %+v: %v", events, err)
+	}
+}
+
 func TestCancelQueuedNeedsTheRevisionAndMembership(t *testing.T) {
 	s := openTestStore(t)
 	seedQueue(t, s)

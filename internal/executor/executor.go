@@ -407,6 +407,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	var exited, killRequested bool
 	var exitErr error
 	processDone := make(chan struct{})
+	var timerMu sync.Mutex
+	var stdoutClosedBecause string
+	var stdoutCutOff bool
 	kill := func() {
 		processMu.Lock()
 		killed := !exited && supervisor.kill(cmd) == nil
@@ -415,11 +418,15 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		}
 		processMu.Unlock()
 		if killed {
+			// The lines still buffered are cut off, as after a cancel behind an exited engine.
+			timerMu.Lock()
+			stdoutClosedBecause = "the engine was killed after the grace period"
+			stdoutCutOff = true
+			timerMu.Unlock()
 			_ = stdout.Close()
 		}
 	}
 	var rs readState
-	var timerMu sync.Mutex
 	var closeTimer, killTimer, exitTimer *time.Timer
 	shutdownStarted := false
 	shutdownStopped := false
@@ -459,14 +466,13 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	// the next check closes stdout whatever arrives, and the kill timer no
 	// longer applies to an exited engine. That close is also a cut-off for the
 	// lines the reader has already buffered: each would cost a store write,
-	// and enough of them would hold the stop past its budget.
-	var stdoutClosedBecause string
-	var stdoutCutOff bool
+	// and enough of them would hold the stop past its budget. A forced kill
+	// cuts them off the same way.
 	var checkAfterExit func()
 	checkAfterExit = func() {
 		timerMu.Lock()
 		defer timerMu.Unlock()
-		if shutdownStopped {
+		if shutdownStopped || stdoutCutOff {
 			return
 		}
 		n, blocked := rs.afterExit()
@@ -743,9 +749,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		if _, err := tx.ExecContext(ctx, "UPDATE attempts SET state='running',run_id=? WHERE id=?", answer.RunID, a.ID); err != nil {
 			return err
 		}
-		// A stop recorded while the attempt was launching is honoured in the
-		// same transaction, so a result the engine returns before the cancel
-		// below reaches it cannot end the task ok.
+		// A stop or a member's cancel recorded while the attempt was launching
+		// is honoured in the same transaction, so a result the engine returns
+		// before the cancel below reaches it cannot end the task ok.
 		canceled, err := tx.CancelRecorded(ctx, a.ID)
 		if err != nil || !canceled {
 			return err
@@ -763,8 +769,8 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	for {
 		m, line, err := next("", true)
 		if err == nil && cutOff() {
-			// A line still buffered after a cancel or Stop closed stdout
-			// behind the exited engine is cut off, not ingested.
+			// A line still buffered after a forced kill, or after a cancel or
+			// Stop closed stdout behind the exited engine, is cut off.
 			err = os.ErrClosed
 		}
 		if err != nil {

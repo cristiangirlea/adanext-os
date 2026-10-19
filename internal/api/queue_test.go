@@ -241,9 +241,10 @@ func TestCancelOfALaunchingAttemptIsHandedToTheExecutor(t *testing.T) {
 	if err != nil || a.State != "launching" {
 		t.Fatalf("attempt = %+v: %v", a, err)
 	}
+	// Not withdrawn: the cancel is only recorded, for the accept to honour.
 	events, err := f.s.Events(ctx, "alice", attempt, 0)
-	if err != nil || len(events) != 0 {
-		t.Fatalf("a launching attempt was withdrawn: %+v, %v", events, err)
+	if err != nil || len(events) != 1 || events[0].Kind != "cancel" || !bytes.Contains(events[0].Payload, []byte(`"reason":"withdrawn by alice"`)) {
+		t.Fatalf("events = %+v: %v", events, err)
 	}
 }
 

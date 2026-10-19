@@ -101,13 +101,12 @@ func TestStreamingDescendantCannotExtendTheExitDeadline(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "stream_after_exit")
 	cleanupGrandchild(t, marker)
 	e.cfg.CancelGrace = 100 * time.Millisecond
-	started := time.Now()
 	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "ended_failed")
-	// Two process starts precede the exit; a descendant that could extend the
-	// deadline would instead keep the attempt open for as long as it streams.
-	if elapsed := time.Since(started); elapsed < e.cfg.CancelGrace || elapsed > 3*e.cfg.CancelGrace+time.Second {
-		t.Fatalf("attempt took %s", elapsed)
+	a := waitAttempt(t, s, "ended_failed")
+	// A descendant that could extend the deadline would keep the attempt open
+	// for as long as it streams, which is until it is killed.
+	if span := markerToEnd(t, marker, a); span > 3*e.cfg.CancelGrace+time.Second {
+		t.Fatalf("attempt ended %s after the descendant started", span)
 	}
 }
 
@@ -230,7 +229,8 @@ func TestCancelAfterSuccessfulResultRequiresRecovery(t *testing.T) {
 			e, s, _, _ := testExecutor(t, "big_block")
 			e.cfg.CancelGrace = 500 * time.Millisecond
 			e.LaunchAttempt("attempt")
-			deadline := time.Now().Add(3 * time.Second)
+			// Only a wait for the result to be stored: the engine holds forever.
+			deadline := time.Now().Add(markerBound)
 			found := false
 			for time.Now().Before(deadline) {
 				events, _ := s.Events(context.Background(), "u", "attempt", 0)
@@ -489,6 +489,80 @@ func TestPartialLineAfterASuccessfulResultFailsTheAttempt(t *testing.T) {
 		t.Fatalf("task = %+v: %v", task, err)
 	}
 	errorEventContains(t, s, "truncated protocol line")
+}
+
+func TestADescendantLingeringAfterANaturalExitIsGoneWhenTheAttemptEnds(t *testing.T) {
+	t.Parallel()
+	e, s, _, marker := testExecutor(t, "ok_lingering_child")
+	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = naturalExitGrace
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	var identity string
+	for _, line := range strings.Split(string(data), "\n") {
+		if _, err := fmt.Sscanf(line, "child:%d:%s", &pid, &identity); err == nil {
+			break
+		}
+	}
+	if pid == 0 {
+		t.Fatalf("descendant did not record itself: %s", data)
+	}
+	if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
+		t.Fatalf("descendant outlived its attempt: %v", err)
+	}
+}
+
+func TestStopAfterAForcedKillCutsOffTheBufferedEventBacklog(t *testing.T) {
+	t.Parallel()
+	e, s, _, marker := testExecutor(t, "burst_ignore_cancel")
+	e.cfg.CancelGrace = 5 * time.Second
+	// 110 buffered events at 300 ms each outlast StopBudget's 30 s.
+	e.afterAppend = func() { time.Sleep(300 * time.Millisecond) }
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "running")
+	deadline := time.Now().Add(20 * time.Second)
+	for !slices.Contains(markerLines(t, marker), "burst") {
+		if time.Now().After(deadline) {
+			t.Fatal("engine did not write its burst")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The engine ignores the cancel, so the stop ends in a forced kill while
+	// the reader's buffer still holds most of the burst.
+	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
+	defer cancel()
+	start := time.Now()
+	if err := e.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	// The kill comes two grace periods into the stop; the check after the
+	// engine's exit would cut the backlog off only a grace period later.
+	if elapsed := time.Since(start); elapsed >= 3*e.cfg.CancelGrace-time.Second {
+		t.Fatalf("stop took %s: the backlog was not cut off at the kill", elapsed)
+	}
+	a, err := s.AttemptByID(context.Background(), "attempt")
+	if err != nil || a.Ended == "" {
+		t.Fatalf("attempt = %+v: %v", a, err)
+	}
+	errorEventContains(t, s, "stdout closed: the engine was killed")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := 0
+	for _, event := range events {
+		if event.Kind == "text" {
+			persisted++
+		}
+	}
+	if persisted >= 111 {
+		t.Fatalf("all %d buffered events were persisted after the kill", persisted)
+	}
 }
 
 func TestOneFailureRecordsOneCause(t *testing.T) {
