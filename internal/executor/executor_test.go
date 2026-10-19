@@ -1132,21 +1132,63 @@ func TestFatalErrorAndResultAreBothStored(t *testing.T) {
 	}
 }
 
-func TestEngineEnvironmentIsAllowListed(t *testing.T) {
-	t.Setenv("SECRET_TEST_VAR", "must-not-leak")
+func TestEngineEnvironmentCarriesTheCLIsSignInsAndNoKeys(t *testing.T) {
+	windowsKeys := []string{"USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERNAME", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432", "ProgramData", "ALLUSERSPROFILE", "SystemDrive", "PUBLIC", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "COMPUTERNAME", "PSModulePath"}
+	unixKeys := []string{"HOME", "USER", "LOGNAME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"}
+	allowed := []string{"PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "LANG", "LC_ALL", "LC_CTYPE", "CLAUDE_CONFIG_DIR", "CODEX_HOME"}
+	refused := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY", "FOO_TOKEN", "ADANEXT_STATE_DIR", "ADA_SECRET", "SECRET_TEST_VAR"}
+	if runtime.GOOS == "windows" {
+		allowed, refused = append(allowed, windowsKeys...), append(refused, unixKeys...)
+	} else {
+		allowed, refused = append(allowed, unixKeys...), append(refused, windowsKeys...)
+	}
 	e, s, _, marker := testExecutor(t, "happy")
 	e.cfg.CancelGrace = naturalExitGrace
+	// Set after the test's temp dir exists: TEMP, TMP and TMPDIR may be among them.
+	for _, key := range allowed {
+		if os.Getenv(key) == "" {
+			t.Setenv(key, t.TempDir())
+		}
+	}
+	for _, key := range refused {
+		t.Setenv(key, "must-not-leak")
+	}
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
+	var names []string
 	for _, line := range markerLines(t, marker) {
-		if !strings.HasPrefix(line, "env:") {
-			continue
+		if strings.HasPrefix(line, "env:") {
+			names = strings.Split(strings.TrimPrefix(line, "env:"), ",")
 		}
-		for _, name := range strings.Split(strings.TrimPrefix(line, "env:"), ",") {
-			if !contains([]string{"PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "HRN_HOME", "ADA_FAKE_ENGINE", "ADA_FAKE_MARKER", "GORACE"}, name) {
-				t.Fatalf("unexpected environment variable %s", name)
-			}
+	}
+	for _, key := range allowed {
+		if !contains(names, key) {
+			t.Errorf("%s did not reach the engine: %v", key, names)
 		}
+	}
+	for _, name := range names {
+		if !contains(allowed, name) && !contains([]string{"HRN_HOME", "ADA_FAKE_ENGINE", "ADA_FAKE_MARKER", "GORACE"}, name) {
+			t.Errorf("unexpected environment variable %s", name)
+		}
+		if contains(refused, name) {
+			t.Errorf("refused variable %s reached the engine", name)
+		}
+	}
+}
+
+func TestEngineEnvironmentRefusesKeysTokensAndAdasOwnVariables(t *testing.T) {
+	for _, key := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "FOO_API_KEY", "FOO_TOKEN", "ADANEXT_STATE_DIR", "ADA_SECRET"} {
+		if !refusedKey(key) {
+			t.Errorf("%s is not refused", key)
+		}
+	}
+	for _, key := range engineEnvironmentKeys(runtime.GOOS) {
+		if refusedKey(key) {
+			t.Errorf("allow-listed %s is refused", key)
+		}
+	}
+	if contains(engineEnvironmentKeys("windows"), "HOME") || contains(engineEnvironmentKeys("linux"), "USERPROFILE") {
+		t.Error("an allow-list carries the other system's home")
 	}
 }
 
@@ -1184,10 +1226,20 @@ func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The post-exit check closed stdout under the descendant: the ok result
+	// stands, with no cause and no recovery.
+	result := false
 	for _, event := range events {
 		if strings.Contains(string(event.Payload), "engine was killed after the grace period") {
 			t.Fatalf("exited parent marked killed: %+v", event)
 		}
+		if event.Kind == "executor_error" || event.Kind == "recovery" {
+			t.Fatalf("ok result after a closed stdout recorded %s: %s", event.Kind, event.Payload)
+		}
+		result = result || event.Kind == "result" && strings.Contains(string(event.Payload), `"status":"ok"`)
+	}
+	if !result {
+		t.Fatalf("no ok result: %+v", events)
 	}
 }
 
