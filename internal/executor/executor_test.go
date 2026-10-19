@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -318,7 +320,7 @@ func TestHelperFakeEngine(t *testing.T) {
 	}
 	if script == "child_stdout" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
-		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
 		child.Stdout = os.Stdout
 		if err := child.Start(); err != nil {
 			os.Exit(3)
@@ -379,6 +381,7 @@ func TestHelperFakeEngine(t *testing.T) {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
 		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild")
 		if script == "child_stderr" {
+			child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
 			child.Stderr = os.Stderr
 		} else {
 			child.Stdout = os.Stdout
@@ -450,6 +453,9 @@ func TestHelperFakeEngine(t *testing.T) {
 	}
 	if script == "delayed_exit" {
 		time.Sleep(20 * time.Millisecond)
+	}
+	if script == "slow_storage" {
+		mark("exiting")
 	}
 	os.Exit(0)
 }
@@ -597,9 +603,22 @@ func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
 }
 
 func TestResultBeforeNaturalExitWithSlowStorageEndsOK(t *testing.T) {
-	e, s, _, _ := testExecutor(t, "slow_storage")
-	e.cfg.CancelGrace = 100 * time.Millisecond
-	e.afterAppend = func() { time.Sleep(3 * e.cfg.CancelGrace) }
+	e, s, _, marker := testExecutor(t, "slow_storage")
+	e.cfg.CancelGrace = naturalExitGrace
+	// The first stored event holds the store until the engine is exiting,
+	// then for longer than a whole grace period: the result is read well
+	// after the exit, and only time blocked in reads counts against it.
+	var stall sync.Once
+	e.afterAppend = func() {
+		stall.Do(func() {
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+				if data, err := os.ReadFile(marker); err == nil && slices.Contains(strings.Split(string(data), "\n"), "exiting") {
+					break
+				}
+			}
+			time.Sleep(3 * naturalExitGrace / 2)
+		})
+	}
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
@@ -1019,6 +1038,9 @@ func TestProtocolViolationsRecordCause(t *testing.T) {
 
 func TestProtocolViolationClosesStdinBeforeKilling(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "violation_eof")
+	// Stdin closes after one grace period and the engine exits on it; the
+	// kill after two is never meant to be reached.
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
 	if !strings.Contains(strings.Join(markerLines(t, marker), "\n"), "stdin closed") {
@@ -1086,11 +1108,12 @@ func TestStderrIsCappedAndPrivate(t *testing.T) {
 func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "child_stdout")
 	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	a := waitAttempt(t, s, "ended_ok")
 	waitGrandchildMarker(t, marker)
-	// The descendant holds stdout for two seconds after recording itself; the
-	// attempt ends a grace period after the engine's exit instead.
+	// The descendant holds stdout until it is killed; the attempt ends a
+	// grace period or two after the engine's exit instead.
 	if span := markerToEnd(t, marker, a); span > 3*e.cfg.CancelGrace+time.Second {
 		t.Fatalf("executor waited %s for descendant stdout", span)
 	}
@@ -1182,7 +1205,9 @@ func TestStderrDescendantFitsStopBudget(t *testing.T) {
 func TestExitedEngineWithDescendantStderrEndsOK(t *testing.T) {
 	e, s, _, marker := testExecutor(t, "child_stderr")
 	cleanupGrandchild(t, marker)
-	e.cfg.CancelGrace = 100 * time.Millisecond
+	// The descendant holds stderr until it is killed, so the wait delay of
+	// one grace period ends the wait.
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
@@ -1211,7 +1236,7 @@ func TestRecordCauseReportsAppendFailure(t *testing.T) {
 
 func TestMalformedLineDrainsBurstWithoutKill(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "malformed_burst")
-	e.cfg.CancelGrace = 500 * time.Millisecond
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
 	errorEventContains(t, s, "malformed protocol line")

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,11 +23,15 @@ func processIdentity(pid int) (string, error) {
 
 // waitProcessGone waits until the process with this pid and identity has
 // exited, so it no longer holds its working directory. A process that is
-// already gone, or whose pid now names another process, has exited.
+// already gone (OpenProcess finds no such pid), or whose pid now names another
+// process, has exited; any other open error is reported.
 func waitProcessGone(pid int, identity string, timeout time.Duration) error {
 	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 	defer windows.CloseHandle(handle)
 	var created, exited, kernel, user windows.Filetime
