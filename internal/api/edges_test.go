@@ -239,6 +239,7 @@ type drainWriter struct {
 	stalled  bool
 	opened   chan struct{} // closed once the retry line is written
 	reason   chan struct{} // closed once the stop's frame is written
+	stalling chan struct{} // closed when a stalled write begins
 	timedOut chan struct{} // closed when a stalled write hits its deadline
 	mu       sync.Mutex
 	body     bytes.Buffer
@@ -248,7 +249,7 @@ type drainWriter struct {
 var stopFrame = []byte("id: 1\nevent: cancel\ndata: {\"reason\":\"owner stop\"}\n\n")
 
 func newDrainWriter(stalled bool) *drainWriter {
-	return &drainWriter{header: http.Header{}, stalled: stalled, opened: make(chan struct{}), reason: make(chan struct{}), timedOut: make(chan struct{})}
+	return &drainWriter{header: http.Header{}, stalled: stalled, opened: make(chan struct{}), reason: make(chan struct{}), stalling: make(chan struct{}), timedOut: make(chan struct{})}
 }
 
 func (w *drainWriter) Header() http.Header { return w.header }
@@ -267,6 +268,7 @@ func (w *drainWriter) Write(p []byte) (int, error) {
 	deadline := w.deadline
 	w.mu.Unlock()
 	if w.stalled && bytes.HasPrefix(p, []byte("id: ")) {
+		close(w.stalling)
 		<-time.After(time.Until(deadline)) // a client that never reads: the connection's deadline ends the write
 		close(w.timedOut)
 		return 0, os.ErrDeadlineExceeded
@@ -288,19 +290,22 @@ func TestADrainUnderBudgetContentionReachesEveryHealthyStreamDespiteAStalledOne(
 	attemptForLimits(t, f)
 	hub := f.hub
 	hub.PollInterval, hub.HeartbeatInterval = time.Hour, time.Hour // only the drain sends
-	hub.BudgetBytes = 2 * pageBytes                                // two readers at a time for sixteen streams
+	hub.BudgetBytes = pageBytes + 4096                             // one reader's page at a time for sixteen streams
 	hub.WriteDeadline = 500 * time.Millisecond
 	h := &handler{store: f.s, hub: hub, auth: func(*http.Request) (string, error) { return "alice", nil }}
 	writers := make([]*drainWriter, 16) // a user's whole allowance; the last never reads
 	ended := make([]chan struct{}, len(writers))
-	for i := range writers {
+	open := func(i int) {
 		writers[i], ended[i] = newDrainWriter(i == len(writers)-1), make(chan struct{})
 		req := httptest.NewRequest("GET", "/v1/attempts/limits-attempt/events", nil)
 		req.SetPathValue("id", "limits-attempt")
 		req.Header.Set("Accept", "text/event-stream")
 		go func() { h.events(writers[i], req); close(ended[i]) }()
 	}
-	for i, w := range writers {
+	for i := range writers[:len(writers)-1] {
+		open(i)
+	}
+	for i, w := range writers[:len(writers)-1] {
 		select {
 		case <-w.opened:
 		case <-time.After(5 * time.Second):
@@ -311,6 +316,19 @@ func TestADrainUnderBudgetContentionReachesEveryHealthyStreamDespiteAStalledOne(
 	if err := f.s.AppendEvent(context.Background(), "alice", store.Event{Attempt: "limits-attempt", Seq: 1, Kind: "cancel", Payload: json.RawMessage(`{"reason":"owner stop"}`)}); err != nil {
 		t.Fatal(err)
 	}
+	// The stalled stream opens last, so its first send reads the stop and
+	// holds its page reservation through a stalled write before the drain
+	// wakes any healthy stream: it is never the one served last.
+	open(len(writers) - 1)
+	stalled := writers[len(writers)-1]
+	select {
+	case <-stalled.stalling:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled stream never began its write")
+	}
+	stalled.mu.Lock()
+	stalledUntil := stalled.deadline
+	stalled.mu.Unlock()
 	type drain struct {
 		took  time.Duration
 		ended int // healthy streams already ended when Drain returned
@@ -329,20 +347,21 @@ func TestADrainUnderBudgetContentionReachesEveryHealthyStreamDespiteAStalledOne(
 		}
 		drained <- d
 	}()
-	within := time.After(hub.WriteDeadline)
+	// Every healthy stream is served while the stalled write still holds its
+	// reservation: a full page held there would leave them no budget.
+	within := time.After(time.Until(stalledUntil))
 	for i, w := range writers[:len(writers)-1] {
 		select {
 		case <-w.reason:
 		case <-within:
-			t.Fatalf("stream %d had no stop reason within the deadline", i)
+			t.Fatalf("stream %d had no stop reason while the stalled write held its reservation", i)
 		}
 		select {
 		case <-ended[i]:
 		case <-within:
-			t.Fatalf("stream %d did not end within the deadline", i)
+			t.Fatalf("stream %d did not end while the stalled write held its reservation", i)
 		}
 	}
-	stalled := writers[len(writers)-1]
 	select {
 	case <-ended[len(writers)-1]:
 	case <-time.After(2*hub.WriteDeadline + time.Second):
@@ -361,5 +380,5 @@ func TestADrainUnderBudgetContentionReachesEveryHealthyStreamDespiteAStalledOne(
 	case <-time.After(hub.WriteDeadline + time.Second):
 		t.Fatal("drain did not return")
 	}
-	waitHubReleased(t, hub, "alice", time.Now().Add(time.Second), 2*pageBytes)
+	waitHubReleased(t, hub, "alice", time.Now().Add(time.Second), pageBytes+4096)
 }
