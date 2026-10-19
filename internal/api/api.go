@@ -30,6 +30,8 @@ var (
 	errEngineUnavailable = errors.New("engine unavailable")
 	errQueueFull         = errors.New("queue full")
 	errShuttingDown      = errors.New("shutting down")
+	errSnapshotRequired  = errors.New("snapshot required")
+	errUnbornBase        = errors.New("unborn base")
 )
 
 // maxQueuedPerUser is the queue limit of the decisions log (2026-10-14, #9):
@@ -208,7 +210,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "queue_full": "queue full", "forbidden": "forbidden"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit"}[code]
 	if status == 500 {
 		writeInternalError(w, errors.New("unspecified internal error"))
 		return
@@ -253,6 +255,10 @@ func storeError(w http.ResponseWriter, err error) {
 		writeError(w, 409, "queue_full")
 	case errors.Is(err, errShuttingDown):
 		writeError(w, 503, "shutting_down")
+	case errors.Is(err, errSnapshotRequired):
+		writeError(w, 409, "snapshot_required")
+	case errors.Is(err, errUnbornBase):
+		writeError(w, 409, "unborn_base")
 	default:
 		writeInternalError(w, err)
 	}
@@ -328,6 +334,7 @@ type taskJSON struct {
 	Revision  int64            `json:"revision"`
 	Created   string           `json:"created"`
 	Updated   string           `json:"updated"`
+	Snapshot  string           `json:"snapshot,omitempty"` // the source snapshot the task's workspace is built from
 	Attempt   *taskAttemptJSON `json:"attempt"`
 	// QueuePosition is the task's 1-based place among the pending attempts of
 	// all users while it is queued; absent otherwise. Only GET reports it.
@@ -346,7 +353,7 @@ type startedTaskJSON struct {
 }
 
 func taskValue(t store.Task) taskJSON {
-	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated}
+	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated, Snapshot: t.Snapshot}
 	if a := t.Attempt; a.ID != "" {
 		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition}
 		// Keep the existing top-level field for /v1 clients.
@@ -437,6 +444,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		Project   string `json:"project"`
 		Objective string `json:"objective"`
 		Criteria  string `json:"criteria"`
+		Snapshot  string `json:"snapshot"`
 	}
 	if err := decode(body, &input); err != nil || input.Project == "" || input.Objective == "" {
 		writeError(w, 400, "bad_request")
@@ -448,9 +456,17 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return 0, nil, err
 		}
+		// The task's workspace is built from this snapshot when it starts.
+		var snapshot any
+		if input.Snapshot != "" {
+			if err := tx.RequireSnapshot(r.Context(), input.Project, input.Snapshot); err != nil {
+				return 0, nil, err
+			}
+			snapshot = input.Snapshot
+		}
 		at := time.Now().UTC().Format(time.RFC3339Nano)
-		_, err = tx.ExecContext(r.Context(), "INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated) VALUES(?,?,?,?,?,'draft',0,?,?)", id, input.Project, user, input.Objective, input.Criteria, at, at)
-		return 201, taskValue(store.Task{ID: id, Project: input.Project, CreatedBy: user, Objective: input.Objective, AcceptanceCriteria: input.Criteria, State: store.Draft, Revision: 0, Created: at, Updated: at}), err
+		_, err = tx.ExecContext(r.Context(), "INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,snapshot) VALUES(?,?,?,?,?,'draft',0,?,?,?)", id, input.Project, user, input.Objective, input.Criteria, at, at, snapshot)
+		return 201, taskValue(store.Task{ID: id, Project: input.Project, CreatedBy: user, Objective: input.Objective, AcceptanceCriteria: input.Criteria, State: store.Draft, Revision: 0, Created: at, Updated: at, Snapshot: input.Snapshot}), err
 	})
 }
 
@@ -556,9 +572,9 @@ func (h *handler) taskMutation(w http.ResponseWriter, r *http.Request, change fu
 			return 0, nil, err
 		}
 		changed = true
-		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated FROM tasks WHERE id=?", id)
+		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,COALESCE(snapshot,'') FROM tasks WHERE id=?", id)
 		var task store.Task
-		err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
+		err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot)
 		return 200, taskValue(task), err
 	})
 	return id, ok && changed
@@ -736,10 +752,21 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		if current != store.Ready {
 			return 0, nil, store.ErrInvalidTransition
 		}
+		// An imported project's task runs in a worktree built from its
+		// snapshot; a project with no source (only test seeds) keeps the
+		// executor's scratch directory.
+		src, err := tx.TaskSource(r.Context(), id)
+		if err != nil {
+			return 0, nil, err
+		}
+		if src.Imported && src.Snapshot == "" {
+			return 0, nil, errSnapshotRequired
+		}
+		if src.Snapshot != "" && src.BaseCommit == "" {
+			return 0, nil, errUnbornBase
+		}
 		// The start queues when another attempt is launching or running: the
 		// executor launches pending attempts one at a time in creation order.
-		// The snapshot is revalidated at launch, not here; there is no
-		// snapshot before M3, so that hook lives with the launch.
 		queued, err := tx.QueuedAttempts(r.Context(), user)
 		if err != nil {
 			return 0, nil, err
@@ -758,9 +785,9 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return 0, nil, err
 		}
-		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated FROM tasks WHERE id=?", id)
+		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,COALESCE(snapshot,'') FROM tasks WHERE id=?", id)
 		var task store.Task
-		err = row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated)
+		err = row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot)
 		return 200, startedTaskJSON{taskValue(task), attemptID}, err
 	})
 	if ok && attemptID != "" && h.exec.Runner != nil {

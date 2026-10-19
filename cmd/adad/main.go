@@ -301,8 +301,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	stop := &coordinatorStop{requested: make(chan struct{})}
 	admission := &api.Admission{}
 	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Writer: artifacts, Owner: ownerAccount, Stopper: stop, Admission: admission}
-	// Without a usable git adad still serves; only inspection answers git_unavailable.
+	// Without a usable git adad still serves; only inspection answers
+	// git_unavailable, and an imported project's attempt fails.
 	mirrors := filepath.Join(opts.stateDir, "inspect")
+	var workspaces *source.Workspaces
 	_ = os.RemoveAll(mirrors) // mirrors an earlier coordinator did not finish removing
 	if git, err := source.Resolve(ctx, filepath.Join(opts.stateDir, "git")); err != nil {
 		fmt.Fprintln(stderr, "adad: inspection unavailable:", err)
@@ -310,6 +312,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	} else {
 		inspector := &source.Inspector{Git: git, MirrorRoot: mirrors, Config: source.DefaultConfigFiles(git.Path)}
 		execution.Inspector, execution.Capturer = inspector, inspector
+		workspaces = &source.Workspaces{Inspector: inspector, Root: filepath.Join(opts.stateDir, "projects")}
 	}
 	var local *executor.Executor
 	var stopOnce sync.Once
@@ -326,7 +329,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return stopErr
 	}
 	if opts.enginePath != "" && opts.engineHash != "" {
-		local = executor.New(executor.Config{EnginePath: opts.enginePath, EngineSHA256: opts.engineHash, StateDir: opts.stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: opts.concurrency})
+		local = executor.New(executor.Config{EnginePath: opts.enginePath, EngineSHA256: opts.engineHash, StateDir: opts.stateDir, Artifacts: artifacts, Store: s, Hub: hub, Generation: generation, Concurrency: opts.concurrency, Workspaces: workspaces})
 		stop.local = local
 		execution.EngineSHA256, execution.Runner = opts.engineHash, local
 		defer func() {

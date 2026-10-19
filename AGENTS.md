@@ -18,7 +18,7 @@ taking a slice, and don't reopen a recorded decision.
 | `internal/api/` | Versioned HTTP API and event subscriptions. |
 | `internal/store/` | SQLite state, schema migrations, and task records. |
 | `internal/ipc/` | Private local listener and singleton lock. |
-| `internal/source/` | Reading a user's repository: the git runner, the layout, config and index read in Go, the mirror git directory, inspection with its blockers, and the capture a snapshot takes. |
+| `internal/source/` | Reading a user's repository: the git runner, the layout, config and index read in Go, the mirror git directory, inspection with its blockers, the capture a snapshot takes, and Ada's clone of each project with the attempts' worktrees and their manifests. |
 | `engine/engine.json` | The Harness revision Ada runs. Change it only in a slice that says why. |
 | `ui/` | The React and TypeScript app both shells load. It reaches `adad` only through `AdaClient` (`ui/src/client/api.ts`); the adapters under `ui/src/client/adapters/` are the only modules that may touch the bridge or the network. |
 | `desktop/` | The Electron shell: main (the bridge to `adad` over its pipe or socket, the Node SSE client) and preload. Versions are pinned; the full layout arrives in M4. |

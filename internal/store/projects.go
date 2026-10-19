@@ -166,11 +166,17 @@ func (tx *Tx) RecordSnapshot(ctx context.Context, snap Snapshot) (Snapshot, erro
 // and an inaccessible project are both ErrNotFound. A snapshot and its files
 // commit together and never change, so the two reads need no transaction.
 func (s *Store) Snapshot(ctx context.Context, userID, projectID, snapshotID string) (Snapshot, error) {
+	return s.readSnapshot(ctx, "JOIN project_members m ON m.project=s.project AND m.user=?", []any{userID}, snapshotID, projectID)
+}
+
+// readSnapshot reads a snapshot of projectID; join, with its arguments,
+// limits who may read it, and is empty for the trusted executor.
+func (s *Store) readSnapshot(ctx context.Context, join string, joinArgs []any, snapshotID, projectID string) (Snapshot, error) {
 	snap := Snapshot{ID: snapshotID, Project: projectID, Untracked: []SnapshotFile{}}
 	err := s.db.QueryRowContext(ctx, `SELECT s.base_commit,s.fingerprint,s.staged_patch,staged.size,s.unstaged_patch,unstaged.size,s.created_by,s.created
-		FROM source_snapshots s JOIN project_members m ON m.project=s.project AND m.user=?
+		FROM source_snapshots s `+join+`
 		JOIN artifacts staged ON staged.hash=s.staged_patch JOIN artifacts unstaged ON unstaged.hash=s.unstaged_patch
-		WHERE s.id=? AND s.project=?`, userID, snapshotID, projectID).Scan(&snap.BaseCommit, &snap.Fingerprint, &snap.Staged.Hash, &snap.Staged.Size, &snap.Unstaged.Hash, &snap.Unstaged.Size, &snap.CreatedBy, &snap.Created)
+		WHERE s.id=? AND s.project=?`, append(joinArgs, snapshotID, projectID)...).Scan(&snap.BaseCommit, &snap.Fingerprint, &snap.Staged.Hash, &snap.Staged.Size, &snap.Unstaged.Hash, &snap.Unstaged.Size, &snap.CreatedBy, &snap.Created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Snapshot{}, ErrNotFound
 	}

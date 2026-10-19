@@ -156,39 +156,46 @@ func (r *Inspection) stopped() bool {
 }
 
 func (in *Inspector) inspect(ctx context.Context, path, mirror string) (Inspection, error) {
+	r, _, err := in.inspectMirror(ctx, path, mirror)
+	return r, err
+}
+
+// inspectMirror is inspect that also returns what the mirror was built from;
+// nil when a blocker stopped the inspection before the mirror was written.
+func (in *Inspector) inspectMirror(ctx context.Context, path, mirror string) (Inspection, *mirrorSource, error) {
 	r := newInspection()
 	if !filepath.IsAbs(path) {
-		return r, fmt.Errorf("path %q is not absolute", path)
+		return r, nil, fmt.Errorf("path %q is not absolute", path)
 	}
 	root, err := filepath.EvalSymlinks(filepath.Clean(path))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			r.Identity.Path = filepath.Clean(path)
 			r.block(BlockNotRepository, r.Identity.Path)
-			return r, nil
+			return r, nil, nil
 		}
-		return r, err
+		return r, nil, err
 	}
 	r.Identity.Path = root
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		r.block(BlockNotRepository, root)
-		return r, nil
+		return r, nil, nil
 	}
 	l, b := readLayout(root)
 	r.Identity.GitDir, r.Identity.CommonDir = l.gitDir, l.commonDir
 	if b != nil {
 		r.block(b.Code, b.Paths...)
-		return r, nil
+		return r, nil, nil
 	}
 
 	repo, err := readConfigFile(l.commonDir, filepath.Join(l.commonDir, "config"))
 	if err != nil {
-		return r, err
+		return r, nil, err
 	}
 	if repo.boolean("extensions.worktreeConfig") {
 		wt, err := readConfigFile(l.gitDir, filepath.Join(l.gitDir, "config.worktree"))
 		if err != nil {
-			return r, err
+			return r, nil, err
 		}
 		repo.merge(wt)
 	}
@@ -196,7 +203,7 @@ func (in *Inspector) inspect(ctx context.Context, path, mirror string) (Inspecti
 	for _, file := range append(append([]string{}, in.Config.System...), in.Config.Global...) {
 		c, err := readConfigFile("", file)
 		if err != nil {
-			return r, err
+			return r, nil, err
 		}
 		merged.merge(c)
 	}
@@ -204,47 +211,47 @@ func (in *Inspector) inspect(ctx context.Context, path, mirror string) (Inspecti
 	hashSize := r.checkConfig(repo)
 	r.Identity.Remotes = append(r.Identity.Remotes, remotes(merged)...)
 	if r.stopped() {
-		return r, nil
+		return r, nil, nil
 	}
 
 	indexData, indexTime, idx, err := readIndex(l.gitDir, hashSize)
 	if err != nil {
-		return r, err
+		return r, nil, err
 	}
 	r.checkIndex(idx, repo)
 	r.checkOperations(l.gitDir)
 	r.Identity.Head, r.Identity.Branch, err = resolveHead(l, hashSize)
 	if err != nil {
-		return r, err
+		return r, nil, err
 	}
 	r.Identity.Detached = r.Identity.Branch == "" && r.Identity.Head != ""
 	if r.stopped() {
-		return r, nil
+		return r, nil, nil
 	}
 
-	src := mirrorSource{layout: l, repo: repo, merged: merged, files: in.Config, index: indexData, indexModTime: indexTime}
+	src := mirrorSource{layout: l, repo: repo, merged: merged, files: in.Config, index: indexData, indexModTime: indexTime, head: r.Identity.Head}
 	if err := writeMirror(mirror, src); err != nil {
-		return r, fmt.Errorf("build mirror: %w", err)
+		return r, nil, fmt.Errorf("build mirror: %w", err)
 	}
 	out, err := in.Git.run(ctx, mirror, root, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--no-renames")
 	if err != nil {
-		return r, err
+		return r, nil, err
 	}
 	r.Status = parseStatus(out)
 	if r.Identity.Head != "" {
 		out, err := in.Git.run(ctx, mirror, root, "log", "-n", "20", "--no-decorate", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e", "HEAD", "--")
 		if err != nil {
-			return r, err
+			return r, nil, err
 		}
 		r.History = parseLog(out)
 	}
 	links := r.checkLinks(root, idx)
 	if err := r.checkLFS(root, l.commonDir, idx, links); err != nil {
-		return r, err
+		return r, nil, err
 	}
 	r.Files = instructionFiles(root)
 	r.Fingerprint = fingerprint(root, r.Identity.Head, idx, r.Status, links)
-	return r, nil
+	return r, &src, nil
 }
 
 // checkConfig records the repository config's blockers and returns the
