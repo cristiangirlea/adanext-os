@@ -405,6 +405,7 @@ func TestResultRecoveryStorageFailureFinalizesAttempt(t *testing.T) {
 }
 
 func TestStopEndsADescendantFeedingValidEventsFasterThanStoragePersistsThem(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "valid_stream_after_exit")
 	cleanupGrandchild(t, marker)
 	e.cfg.CancelGrace = naturalExitGrace
@@ -439,6 +440,7 @@ func TestStopEndsADescendantFeedingValidEventsFasterThanStoragePersistsThem(t *t
 }
 
 func TestStopAfterTheEngineExitsCutsOffTheBufferedEventBacklog(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "burst_before_exit")
 	e.cfg.CancelGrace = naturalExitGrace
 	// 110 buffered events at 300 ms each outlast StopBudget's 30 s.
@@ -480,6 +482,7 @@ func TestStopAfterTheEngineExitsCutsOffTheBufferedEventBacklog(t *testing.T) {
 }
 
 func TestPartialLineAfterASuccessfulResultFailsTheAttempt(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "ok_partial_tail_hold")
 	cleanupGrandchild(t, marker)
 	e.cfg.CancelGrace = naturalExitGrace
