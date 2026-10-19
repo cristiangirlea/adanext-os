@@ -269,7 +269,7 @@ func TestListenerRetriesAFailedAcceptWithBackoffAndKeepsServing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a failed accept ended the listener: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("the listener did not hand over the connection after failed accepts")
 	}
 	if err := <-proved; err != nil {

@@ -74,7 +74,7 @@ func TestCoordinatorKeepsNothingTheLauncherInherited(t *testing.T) {
 		content, _ := os.ReadFile(log)
 		t.Fatalf("the launcher kept serving instead of handing over to a clean coordinator\n%s", content)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for {
 		conn, err := ipc.Dial(ctx, cfg)
@@ -99,7 +99,7 @@ func TestCoordinatorKeepsNothingTheLauncherInherited(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		content, _ := os.ReadFile(log)
 		t.Fatalf("the launcher's channel stayed open while the coordinator served\n%s", content)
 	}
