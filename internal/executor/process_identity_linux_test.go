@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func processIdentity(pid int) (string, error) {
@@ -23,4 +24,19 @@ func processIdentity(pid int) (string, error) {
 		return "", fmt.Errorf("process has exited")
 	}
 	return fields[19], nil // field 22, starttime
+}
+
+// waitProcessGone waits until the process with this pid and identity has
+// exited. A pid that is gone, a zombie, or another process has exited.
+func waitProcessGone(pid int, identity string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if current, err := processIdentity(pid); err != nil || current != identity {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("process %d still running after %s", pid, timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

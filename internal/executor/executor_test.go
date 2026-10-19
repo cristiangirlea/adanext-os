@@ -512,7 +512,7 @@ func testExecutor(t *testing.T, script string) (*Executor, *store.Store, string,
 // would kill the engine, which the test never means to reach: it is long
 // enough that a loaded machine's slow exit does not reach it either, and an
 // engine that exits costs none of it.
-const naturalExitGrace = 2 * time.Second
+const naturalExitGrace = 5 * time.Second
 
 // markerToEnd is how long after the marker's last write the attempt recorded
 // its end. That write is the engine, or the descendant it starts, recording
@@ -1124,6 +1124,12 @@ func cleanupGrandchild(t *testing.T, marker string) {
 			}
 			if child, err := os.FindProcess(pid); err == nil {
 				_ = child.Kill()
+			}
+			// A kill only starts the exit: until it ends, the descendant keeps
+			// its working directory under the test's temp dir, which Windows
+			// then refuses to remove.
+			if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
+				t.Error(err)
 			}
 		}
 	})
