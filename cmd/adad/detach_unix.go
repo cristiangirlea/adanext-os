@@ -28,28 +28,44 @@ func detachFromJob(args []string) (bool, error) {
 
 // Go opens its own descriptors close-on-exec, so marking them again changes nothing.
 func closeInheritedOnExec() {
-	if dir, err := os.Open("/dev/fd"); err == nil {
+	markInheritedOnExec("/dev/fd", closeRangeOnExec, syscall.CloseOnExec)
+}
+
+// markInheritedOnExec marks every descriptor above stderr: close_range where the kernel
+// has it, else what the listing names, else every number the limit allows.
+func markInheritedOnExec(listing string, closeRange func() bool, mark func(int)) {
+	if closeRange() {
+		return
+	}
+	if dir, err := os.Open(listing); err == nil {
 		names, err := dir.Readdirnames(-1)
 		dir.Close()
+		listed := false
 		if err == nil {
 			for _, name := range names {
 				if fd, err := strconv.Atoi(name); err == nil && fd > 2 {
-					syscall.CloseOnExec(fd)
+					mark(fd)
+					listed = true
 				}
 			}
+		}
+		// FreeBSD without fdescfs lists only 0-2: such a listing is not complete.
+		if listed {
 			return
 		}
 	}
-	// Without a descriptor listing, mark every number the limit allows.
 	var limit syscall.Rlimit
 	last := uint64(1 << 16)
-	if syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit) == nil && limit.Cur < last {
-		last = limit.Cur
+	if syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit) == nil && uint64(limit.Cur) < last {
+		last = uint64(limit.Cur)
 	}
 	for fd := 3; uint64(fd) < last; fd++ {
-		syscall.CloseOnExec(fd)
+		mark(fd)
 	}
 }
+
+// detachDir is where the coordinator runs, so it keeps no directory of the launcher's busy.
+func detachDir() string { return "/" }
 
 func detachWith(args []string, start func(*exec.Cmd) error) (bool, error) {
 	executable, err := os.Executable()
@@ -57,6 +73,7 @@ func detachWith(args []string, start func(*exec.Cmd) error) (bool, error) {
 		return false, err
 	}
 	cmd := exec.Command(executable, append(append([]string{}, args...), "-detach=false")...)
+	cmd.Dir = detachDir()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := start(cmd); err != nil {
 		return false, fmt.Errorf("cannot detach adad from the desktop: %w", err)

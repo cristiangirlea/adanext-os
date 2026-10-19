@@ -15,7 +15,7 @@ import (
 )
 
 func TestSocketAndDirectoryBelongOnlyToTheOwner(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "permissions"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "permissions"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func TestSocketAndDirectoryBelongOnlyToTheOwner(t *testing.T) {
 func TestUnsafeSocketDirectoryIsRefusedByListenAndDial(t *testing.T) {
 	for _, kind := range []string{"wide mode", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
-			cfg := Config{StateDir: t.TempDir(), Name: "unsafe"}
+			cfg := Config{StateDir: ownerOnlyDir(t), Name: "unsafe"}
 			path := filepath.Join(cfg.StateDir, "run")
 			if kind == "wide mode" {
 				if err := os.Mkdir(path, 0755); err != nil {
@@ -59,7 +59,7 @@ func TestUnsafeSocketDirectoryIsRefusedByListenAndDial(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				if err := os.Symlink(t.TempDir(), path); err != nil {
+				if err := os.Symlink(ownerOnlyDir(t), path); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -93,7 +93,7 @@ func TestSocketDirectoryOwnedByAnotherUserIsRefused(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("changing directory ownership requires root")
 	}
-	cfg := Config{StateDir: t.TempDir(), Name: "foreign"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "foreign"}
 	dir := filepath.Join(cfg.StateDir, "run")
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestSocketDirectoryOwnedByAnotherUserIsRefused(t *testing.T) {
 }
 
 func TestListenReplacesAnUnservedStaleSocket(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "stale"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "stale"}
 	dir := filepath.Join(cfg.StateDir, "run")
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestListenReplacesAnUnservedStaleSocket(t *testing.T) {
 }
 
 func TestListenRefusesANonSocketEndpoint(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "occupied"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "occupied"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -164,10 +164,10 @@ func TestListenRefusesANonSocketEndpoint(t *testing.T) {
 }
 
 func TestDifferentStateDirsWithSameNameKeepBothSockets(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", ownerOnlyDir(t))
 	configs := []Config{
-		{StateDir: t.TempDir(), Name: "shared"},
-		{StateDir: t.TempDir(), Name: "shared"},
+		{StateDir: ownerOnlyDir(t), Name: "shared"},
+		{StateDir: ownerOnlyDir(t), Name: "shared"},
 	}
 	for i, cfg := range configs {
 		lock, err := Acquire(cfg)
@@ -205,7 +205,7 @@ func TestDifferentStateDirsWithSameNameKeepBothSockets(t *testing.T) {
 }
 
 func TestListenAndDialNameAUnixSocketPathThatIsTooLong(t *testing.T) {
-	cfg := Config{StateDir: filepath.Join(t.TempDir(), strings.Repeat("a", 108)), Name: "long"}
+	cfg := Config{StateDir: filepath.Join(ownerOnlyDir(t), strings.Repeat("a", 108)), Name: "long"}
 	path := filepath.Join(cfg.StateDir, "run", cfg.Name+".sock")
 	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
 		t.Fatal(err)
@@ -228,7 +228,7 @@ func TestListenAndDialNameAUnixSocketPathThatIsTooLong(t *testing.T) {
 }
 
 func TestDialRefusesAServerWhenTheExpectedUIDChanges(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "uid-check"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "uid-check"}
 	// The listener's accept goroutine reads the seam: swap it before Listen
 	// and restore it only after Close has waited for that goroutine.
 	old := currentPeerUID
@@ -254,8 +254,8 @@ func TestDialRefusesAServerWhenTheExpectedUIDChanges(t *testing.T) {
 }
 
 func TestXDGRuntimeDirDoesNotChangeSocketPath(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	cfg := Config{StateDir: t.TempDir(), Name: "location"}
+	t.Setenv("XDG_RUNTIME_DIR", ownerOnlyDir(t))
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "location"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +273,7 @@ func TestXDGRuntimeDirDoesNotChangeSocketPath(t *testing.T) {
 }
 
 func TestCloseDoesNotRemoveReplacementSocket(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "replacement"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "replacement"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +309,7 @@ func TestCloseDoesNotRemoveReplacementSocket(t *testing.T) {
 }
 
 func TestCloseRemovesItsSocketWhileTheListenerIsOpen(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "close-order"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "close-order"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)

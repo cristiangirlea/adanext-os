@@ -3,13 +3,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -20,9 +23,9 @@ import (
 
 func init() {
 	if log := os.Getenv("ADA_DETACH_HELPER_LOG"); log != "" {
-		output, err := os.OpenFile(log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			os.Exit(3)
+		output := openDetachHelper(log)
+		if os.Getenv("ADA_DETACH_BROKER_HOLD") != "" {
+			beforeBroker = func() { time.Sleep(2 * time.Second) }
 		}
 		if !slices.Contains(os.Args, "-detach=false") && os.Getenv("ADA_DETACH_NO_JOB") == "" {
 			job, err := windows.CreateJobObject(nil, nil)
@@ -46,7 +49,7 @@ func init() {
 			// The launcher owns the only handle. Its exit destroys the job and
 			// kills anything that failed to break away, just like a desktop job.
 		}
-		fmt.Fprintf(output, "helper pid=%d args=%v\n", os.Getpid(), os.Args[1:])
+		logDetachHelper(output)
 		os.Exit(run(context.Background(), os.Args[1:], output, output))
 	}
 }
@@ -65,7 +68,8 @@ func TestDetachedCoordinatorServesOutsideTheLauncherJob(t *testing.T) {
 
 // A desktop outside any job still hands adad its inheritable handles (Node spawns with
 // inheritance on), such as the pipes its own launcher reads. The coordinator must not keep
-// them: the launcher's output closes while the coordinator serves.
+// them: the launcher's output closes while the coordinator serves. The launcher breaks away
+// from the test's own job, so a probe that skipped the re-exec outside a job would be caught.
 func TestCoordinatorOutsideAnyJobKeepsNothingTheLauncherInherited(t *testing.T) {
 	testDetachedCoordinator(t, noJob)
 }
@@ -78,29 +82,32 @@ func testDetachedCoordinator(t *testing.T, launcher launcherJob) {
 	}
 	log := filepath.Join(dir, "detach.log")
 	name := testEndpointName(t)
-	cmd := exec.Command(os.Args[0], "-detach", "-state-dir", dir, "-name", name)
+	// A trailing "--" must not turn the re-exec's -detach=false into an argument.
+	cmd := exec.Command(os.Args[0], "-detach", "-state-dir", dir, "-name", name, "--")
 	cmd.Env = append(os.Environ(), "ADA_DETACH_HELPER_LOG="+log)
 	switch launcher {
 	case jobDeniesBreakaway:
 		cmd.Env = append(cmd.Env, "ADA_DETACH_DENY=1")
 	case noJob:
 		cmd.Env = append(cmd.Env, "ADA_DETACH_NO_JOB=1")
+		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_BREAKAWAY_FROM_JOB}
 	}
 	cfg := ipc.Config{StateDir: dir, Name: name}
 	// The launcher's output reaches EOF only when no process holds its pipe.
-	type result struct {
-		out []byte
-		err error
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		if launcher == noJob && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			t.Skip("this test's job forbids breakaway, so the launcher cannot start outside a job")
+		}
+		t.Fatal(err)
 	}
-	launched := make(chan result, 1)
-	go func() {
-		out, err := cmd.CombinedOutput()
-		launched <- result{out, err}
-	}()
+	launched := make(chan error, 1)
+	go func() { launched <- cmd.Wait() }()
 	select {
-	case r := <-launched:
-		if r.err != nil {
-			t.Fatalf("launcher: %v %s", r.err, r.out)
+	case err := <-launched:
+		if err != nil {
+			t.Fatalf("launcher: %v %s", err, out.Bytes())
 		}
 	case <-time.After(15 * time.Second):
 		stopCoordinator(t, cfg)
@@ -121,7 +128,70 @@ func testDetachedCoordinator(t *testing.T, launcher launcherJob) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	var running *ipc.AlreadyRunningError
+	if _, err := ipc.Acquire(cfg); !errors.As(err, &running) || running.PID == cmd.Process.Pid {
+		stopCoordinator(t, cfg)
+		t.Fatalf("the launcher itself serves: %v", err)
+	}
+	assertServedFromTheRoot(t, log)
 	stopCoordinator(t, cfg)
+}
+
+// The broker can take seconds; the launcher's output must not wait for it.
+func TestBrokerPathReleasesTheLaunchersOutputBeforeTheBroker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "detach.log")
+	cfg := ipc.Config{StateDir: dir, Name: testEndpointName(t)}
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	cmd := exec.Command(os.Args[0], "-detach", "-state-dir", dir, "-name", cfg.Name)
+	cmd.Env = append(os.Environ(), "ADA_DETACH_HELPER_LOG="+log, "ADA_DETACH_DENY=1", "ADA_DETACH_BROKER_HOLD=1")
+	cmd.Stdout, cmd.Stderr = write, write
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	write.Close()
+	eof := make(chan time.Time, 1)
+	go func() { io.Copy(io.Discard, read); eof <- time.Now() }()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	var closed time.Time
+	select {
+	case closed = <-eof:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the launcher's output stayed open")
+	}
+	if err := <-exited; err != nil {
+		content, _ := os.ReadFile(log)
+		t.Fatalf("launcher: %v\n%s", err, content)
+	}
+	held := time.Since(closed)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		conn, err := ipc.Dial(ctx, cfg)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		if ctx.Err() != nil {
+			content, _ := os.ReadFile(log)
+			t.Fatalf("detached coordinator did not serve: %v\n%s", err, content)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stopCoordinator(t, cfg)
+	// The broker is held for 2 s: output closed before it, not at the launcher's exit.
+	if held < time.Second {
+		content, _ := os.ReadFile(log)
+		t.Fatalf("the launcher held its output until the broker returned (closed %v before exit)\n%s", held, content)
+	}
 }
 
 func TestDesktopJobWithoutBreakawayUsesTheOwnerProcessBroker(t *testing.T) {
@@ -141,6 +211,9 @@ func TestDesktopDetachmentRequiresBreakawayAndNeverFallsBackIntoTheJob(t *testin
 		}
 		if !slices.Contains(cmd.Args, "-detach=false") {
 			t.Fatal("the re-exec would detach again", cmd.Args)
+		}
+		if cmd.Dir == "" || cmd.Dir != detachDir() || len(cmd.Dir) != 3 {
+			t.Fatalf("the coordinator would keep the launcher's directory, not the system drive's root: %q", cmd.Dir)
 		}
 		return nil
 	})

@@ -108,6 +108,10 @@ func (l *Lock) Listen() (net.Listener, error) {
 	if l.file == nil {
 		return nil, errors.New("ipc: coordinator lock is not held")
 	}
+	// Clients refuse a token anywhere else, so a coordinator never serves unreachable.
+	if err := checkTokenDir(l.cfg.StateDir); err != nil {
+		return nil, err
+	}
 	key, err := newEndpointToken(l.cfg.StateDir)
 	if err != nil {
 		return nil, err

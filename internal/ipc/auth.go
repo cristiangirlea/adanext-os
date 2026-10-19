@@ -79,7 +79,11 @@ func Dial(ctx context.Context, cfg Config) (net.Conn, error) {
 		return nil, err
 	}
 	fail := func() (net.Conn, error) { c.Close(); return nil, fmt.Errorf("ipc: endpoint authentication failed") }
-	key, err := os.ReadFile(filepath.Join(cfg.StateDir, "adad.token"))
+	if err := checkTokenDir(cfg.StateDir); err != nil {
+		c.Close()
+		return nil, err
+	}
+	key, err := readToken(cfg.StateDir)
 	if err != nil || len(key) != 32 {
 		return fail()
 	}
@@ -132,15 +136,28 @@ func authenticateListener(l net.Listener, key []byte) *authenticatedListener {
 }
 func (a *authenticatedListener) acceptLoop() {
 	defer close(a.loopEnd)
+	var delay time.Duration
 	for {
 		c, err := a.Listener.Accept()
 		if err != nil {
+			// Only a closed listener ends the loop; anything else, such as running
+			// out of descriptors, is retried with backoff as http.Server does.
+			if !errors.Is(err, net.ErrClosed) {
+				delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+				select {
+				case <-a.done:
+					return
+				case <-time.After(delay):
+					continue
+				}
+			}
 			a.mu.Lock()
 			a.err = err
 			a.mu.Unlock()
 			a.shutdown()
 			return
 		}
+		delay = 0
 		a.mu.Lock()
 		select {
 		case <-a.done:

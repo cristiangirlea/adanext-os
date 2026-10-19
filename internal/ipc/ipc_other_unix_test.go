@@ -11,7 +11,7 @@ import (
 )
 
 func TestListenAndDialExplainUnsupportedPeerChecks(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "unsupported"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "unsupported"}
 	want := "ipc: peer credential checks are not supported on " + runtime.GOOS
 	if listener, err := listen(cfg); err == nil || !strings.Contains(err.Error(), want) {
 		if listener != nil {
@@ -28,7 +28,7 @@ func TestListenAndDialExplainUnsupportedPeerChecks(t *testing.T) {
 }
 
 func TestListenAndDialNameAnOverlongSocketPathOnThisUnixSystem(t *testing.T) {
-	cfg := Config{StateDir: filepath.Join(t.TempDir(), strings.Repeat("a", 104)), Name: "long"}
+	cfg := Config{StateDir: filepath.Join(ownerOnlyDir(t), strings.Repeat("a", 104)), Name: "long"}
 	path := filepath.Join(cfg.StateDir, "run", cfg.Name+".sock")
 	if listener, err := listen(cfg); err == nil || !strings.Contains(err.Error(), path) {
 		if listener != nil {

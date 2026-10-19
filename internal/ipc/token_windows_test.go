@@ -11,7 +11,7 @@ import (
 )
 
 func TestTokenDescriptorGrantsOnlyTheOwnerWithoutInheritedACEs(t *testing.T) {
-	cfg := Config{StateDir: t.TempDir(), Name: "token-descriptor"}
+	cfg := Config{StateDir: ownerOnlyDir(t), Name: "token-descriptor"}
 	lock, err := Acquire(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -53,5 +53,22 @@ func TestTokenDescriptorGrantsOnlyTheOwnerWithoutInheritedACEs(t *testing.T) {
 	owner, _, err := sd.Owner()
 	if err != nil || owner == nil || owner.String() != sid {
 		t.Fatal("token has another owner")
+	}
+}
+
+// A hung start holds its log open; the owner can still read what it wrote.
+func TestTheStartupLogCanBeReadWhileItIsHeld(t *testing.T) {
+	dir := ownerOnlyDir(t)
+	f, err := OpenStartupLog(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("adad: still starting"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, StartupLogName))
+	if err != nil || string(content) != "adad: still starting" {
+		t.Fatalf("start-up log %q %v", content, err)
 	}
 }
