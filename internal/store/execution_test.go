@@ -29,6 +29,7 @@ func TestVersionThreeAttemptMigratesForwardWithEmptyMode(t *testing.T) {
 	execute(t, s, "DROP TABLE coordinator")
 	execute(t, s, "DROP TABLE workspaces")
 	execute(t, s, "ALTER TABLE tasks DROP COLUMN snapshot")
+	execute(t, s, "DROP TABLE snapshot_paths")
 	execute(t, s, "DROP TABLE snapshot_untracked")
 	execute(t, s, "DROP TABLE source_snapshots")
 	execute(t, s, "DROP TABLE project_sources")
@@ -118,7 +119,7 @@ func TestVersionFourAddsModeAndCoordinatorWithoutChangingOldAttempt(t *testing.T
 	s := openTestStore(t)
 	seed(t, s)
 	var version int
-	if err := s.db.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil || version != 6 {
+	if err := s.db.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil || version != 7 {
 		t.Fatalf("version = %d: %v", version, err)
 	}
 	var mode string

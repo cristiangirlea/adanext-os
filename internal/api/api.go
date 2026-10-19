@@ -91,6 +91,12 @@ type Capturer interface {
 	Capture(ctx context.Context, path string, sel source.Selection) (source.Capture, error)
 }
 
+// Drifter compares a repository with what a snapshot recorded of it;
+// *source.Inspector satisfies it.
+type Drifter interface {
+	Drift(ctx context.Context, path string, base source.Baseline) (source.Drift, error)
+}
+
 // ArtifactWriter stores content by its hash; *artifact.Store satisfies it.
 // Its lock is the store's lifecycle lock, shared with the executor.
 type ArtifactWriter interface {
@@ -125,6 +131,7 @@ type Execution struct {
 	Stopper      Stopper            // nil when there is no coordinator lifecycle to stop (tests).
 	Inspector    Inspector          // nil when git is missing or too old
 	Capturer     Capturer           // nil with Inspector
+	Drifter      Drifter            // nil with Inspector
 	Writer       ArtifactWriter     // stores snapshot content; nil until the artifact store opens
 	// GitUnavailable is why Inspector is nil, the message of git_unavailable.
 	GitUnavailable string
@@ -156,6 +163,7 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/projects", h.importProject)
 	mux.HandleFunc("POST /v1/projects/{id}/snapshots", h.snapshot)
 	mux.HandleFunc("GET /v1/projects/{id}/snapshots/{sid}", h.getSnapshot)
+	mux.HandleFunc("GET /v1/projects/{id}/drift", h.drift)
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
 	mux.HandleFunc("GET /v1/attempts/{id}/artifacts/{hash}", h.artifact)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

@@ -121,7 +121,21 @@ type Snapshot struct {
 	ID, Project, BaseCommit, Fingerprint string
 	Staged, Unstaged                     ArtifactRef
 	Untracked                            []SnapshotFile
+	State                                *SnapshotState // nil for a snapshot taken before migration 0007
 	CreatedBy, Created                   string
+}
+
+// SnapshotState is what a snapshot recorded of the original for drift: its
+// branch, empty when detached, and its fingerprint's per-path entries.
+type SnapshotState struct {
+	Branch string
+	Paths  []SnapshotPath
+}
+
+type SnapshotPath struct {
+	Path      string
+	Untracked bool
+	Entry     string
 }
 
 // RecordSnapshot records a snapshot of an imported project for the
@@ -147,9 +161,20 @@ func (tx *Tx) RecordSnapshot(ctx context.Context, snap Snapshot) (Snapshot, erro
 		return Snapshot{}, err
 	}
 	snap.CreatedBy, snap.Created = tx.userID, now()
-	if _, err := tx.tx.ExecContext(ctx, "INSERT INTO source_snapshots(id,project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created) VALUES(?,?,?,?,?,?,?,?)",
-		snap.ID, snap.Project, snap.BaseCommit, snap.Fingerprint, snap.Staged.Hash, snap.Unstaged.Hash, snap.CreatedBy, snap.Created); err != nil {
+	var branch sql.NullString
+	if snap.State != nil {
+		branch = sql.NullString{String: snap.State.Branch, Valid: true}
+	}
+	if _, err := tx.tx.ExecContext(ctx, "INSERT INTO source_snapshots(id,project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created,branch) VALUES(?,?,?,?,?,?,?,?,?)",
+		snap.ID, snap.Project, snap.BaseCommit, snap.Fingerprint, snap.Staged.Hash, snap.Unstaged.Hash, snap.CreatedBy, snap.Created, branch); err != nil {
 		return Snapshot{}, err
+	}
+	if snap.State != nil {
+		for _, p := range snap.State.Paths {
+			if _, err := tx.tx.ExecContext(ctx, "INSERT INTO snapshot_paths(snapshot,path,untracked,entry) VALUES(?,?,?,?)", snap.ID, p.Path, p.Untracked, p.Entry); err != nil {
+				return Snapshot{}, err
+			}
+		}
 	}
 	for _, f := range snap.Untracked {
 		if err := reference(f.Artifact, "untracked:"+f.Path); err != nil {
@@ -169,14 +194,30 @@ func (s *Store) Snapshot(ctx context.Context, userID, projectID, snapshotID stri
 	return s.readSnapshot(ctx, "JOIN project_members m ON m.project=s.project AND m.user=?", []any{userID}, snapshotID, projectID)
 }
 
+// NewestSnapshot reads the project's most recent snapshot for a member;
+// ErrNotFound when there is none or the project is not the user's.
+func (s *Store) NewestSnapshot(ctx context.Context, userID, projectID string) (Snapshot, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT s.id FROM source_snapshots s JOIN project_members m ON m.project=s.project AND m.user=?
+		WHERE s.project=? ORDER BY s.rowid DESC LIMIT 1`, userID, projectID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Snapshot{}, ErrNotFound
+	}
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return s.Snapshot(ctx, userID, projectID, id)
+}
+
 // readSnapshot reads a snapshot of projectID; join, with its arguments,
 // limits who may read it, and is empty for the trusted executor.
 func (s *Store) readSnapshot(ctx context.Context, join string, joinArgs []any, snapshotID, projectID string) (Snapshot, error) {
 	snap := Snapshot{ID: snapshotID, Project: projectID, Untracked: []SnapshotFile{}}
-	err := s.db.QueryRowContext(ctx, `SELECT s.base_commit,s.fingerprint,s.staged_patch,staged.size,s.unstaged_patch,unstaged.size,s.created_by,s.created
+	var branch sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT s.base_commit,s.fingerprint,s.staged_patch,staged.size,s.unstaged_patch,unstaged.size,s.created_by,s.created,s.branch
 		FROM source_snapshots s `+join+`
 		JOIN artifacts staged ON staged.hash=s.staged_patch JOIN artifacts unstaged ON unstaged.hash=s.unstaged_patch
-		WHERE s.id=? AND s.project=?`, append(joinArgs, snapshotID, projectID)...).Scan(&snap.BaseCommit, &snap.Fingerprint, &snap.Staged.Hash, &snap.Staged.Size, &snap.Unstaged.Hash, &snap.Unstaged.Size, &snap.CreatedBy, &snap.Created)
+		WHERE s.id=? AND s.project=?`, append(joinArgs, snapshotID, projectID)...).Scan(&snap.BaseCommit, &snap.Fingerprint, &snap.Staged.Hash, &snap.Staged.Size, &snap.Unstaged.Hash, &snap.Unstaged.Size, &snap.CreatedBy, &snap.Created, &branch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Snapshot{}, ErrNotFound
 	}
@@ -195,5 +236,21 @@ func (s *Store) readSnapshot(ctx context.Context, join string, joinArgs []any, s
 		}
 		snap.Untracked = append(snap.Untracked, f)
 	}
-	return snap, rows.Err()
+	if err := rows.Err(); err != nil || !branch.Valid {
+		return snap, err
+	}
+	snap.State = &SnapshotState{Branch: branch.String, Paths: []SnapshotPath{}}
+	paths, err := s.db.QueryContext(ctx, "SELECT path,untracked,entry FROM snapshot_paths WHERE snapshot=? ORDER BY path", snapshotID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer paths.Close()
+	for paths.Next() {
+		var p SnapshotPath
+		if err := paths.Scan(&p.Path, &p.Untracked, &p.Entry); err != nil {
+			return Snapshot{}, err
+		}
+		snap.State.Paths = append(snap.State.Paths, p)
+	}
+	return snap, paths.Err()
 }

@@ -309,6 +309,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		return
 	}
 	work, workspace, err := e.prepare(a, active, work)
+	if mismatch, ok := errors.AsType[*artifactMismatch](err); ok {
+		// Checked before anything is applied: the worktree holds none of it.
+		e.recoverWorkspace(a, snapshotMismatch, mismatch.Error())
+		return
+	}
 	if err != nil {
 		e.fail(a, fmt.Errorf("workspace: %w", err))
 		return
@@ -370,11 +375,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		if e.beforeCheck != nil {
 			e.beforeCheck(a.ID)
 		}
-		if reason := e.checkWorkspace(a); reason != "" {
+		if reason, mismatch := e.checkWorkspace(a); reason != "" {
 			stdin.Close()
 			stdout.Close()
 			stdoutWriter.Close()
-			e.recoverWorkspace(a, reason)
+			e.recoverWorkspace(a, reason, mismatch)
 			return
 		}
 	}

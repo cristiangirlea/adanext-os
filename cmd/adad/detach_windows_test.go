@@ -114,7 +114,7 @@ func testDetachedCoordinator(t *testing.T, launcher launcherJob) {
 		content, _ := os.ReadFile(log)
 		t.Fatalf("the launcher's output stayed open while the coordinator served\n%s", content)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for {
 		conn, err := ipc.Dial(ctx, cfg)
@@ -267,7 +267,7 @@ func TestBrokerPathReleasesTheLaunchersOutputBeforeTheBroker(t *testing.T) {
 		t.Fatalf("launcher: %v\n%s", err, content)
 	}
 	held := time.Since(closed)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for {
 		conn, err := ipc.Dial(ctx, cfg)

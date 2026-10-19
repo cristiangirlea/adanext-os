@@ -290,7 +290,7 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		captureError(w, source.ErrSourceChanged)
 		return
 	}
-	snap := store.Snapshot{Project: project, BaseCommit: c.Inspection.Identity.Head, Fingerprint: c.Inspection.Fingerprint}
+	snap := store.Snapshot{Project: project, BaseCommit: c.Inspection.Identity.Head, Fingerprint: c.Inspection.Fingerprint, State: snapshotState(c.Inspection)}
 	if snap.ID, err = newID(); err != nil {
 		writeInternalError(w, err)
 		return
@@ -301,6 +301,15 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeCached(w, cached)
+}
+
+// snapshotState is what a snapshot keeps of its inspection for drift.
+func snapshotState(r source.Inspection) *store.SnapshotState {
+	state := &store.SnapshotState{Branch: r.Identity.Branch, Paths: make([]store.SnapshotPath, 0, len(r.Paths))}
+	for _, p := range r.Paths {
+		state.Paths = append(state.Paths, store.SnapshotPath{Path: p.Path, Untracked: p.Untracked, Entry: p.Entry})
+	}
+	return state
 }
 
 // storeSnapshot writes the capture's content and records the snapshot that
@@ -384,4 +393,59 @@ func (h *handler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, snapshotValue(snap))
+}
+
+// drift inspects the original of a member's project again and compares it
+// with the project's newest snapshot. It stores nothing.
+func (h *handler) drift(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.actor(w, r)
+	if !ok {
+		return
+	}
+	project := r.PathValue("id")
+	src, err := h.store.ProjectSource(r.Context(), user, project)
+	if errors.Is(err, store.ErrNoSource) {
+		writeJSON(w, 409, errorBody{"no_source", "the project has no imported repository"})
+		return
+	}
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	snap, err := h.store.NewestSnapshot(r.Context(), user, project)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, 409, errorBody{"no_snapshot", "the project has no snapshot to compare with"})
+		return
+	}
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if snap.State == nil {
+		writeJSON(w, 409, errorBody{"snapshot_outdated", "the newest snapshot was taken before drift was recorded; take a new one"})
+		return
+	}
+	if h.exec.Drifter == nil {
+		h.gitUnavailable(w)
+		return
+	}
+	base := source.Baseline{BaseCommit: snap.BaseCommit, Branch: snap.State.Branch, Paths: make([]source.PathEntry, 0, len(snap.State.Paths))}
+	for _, p := range snap.State.Paths {
+		base.Paths = append(base.Paths, source.PathEntry{Path: p.Path, Untracked: p.Untracked, Entry: p.Entry})
+	}
+	d, err := h.exec.Drifter.Drift(r.Context(), src.Path, base)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	// Another repository now stands at the imported path; with none read,
+	// the blocker says so.
+	if d.Path != src.Path || d.CommonDir != "" && d.CommonDir != src.CommonDir {
+		captureError(w, source.ErrSourceChanged)
+		return
+	}
+	writeJSON(w, 200, struct {
+		Snapshot string `json:"snapshot"`
+		source.Drift
+	}{snap.ID, d})
 }

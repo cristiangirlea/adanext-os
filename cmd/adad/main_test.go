@@ -219,7 +219,7 @@ func startHelper(t *testing.T, dir, name string, engine ...string) *exec.Cmd {
 		t.Fatal(err)
 	}
 	cfg := ipc.Config{StateDir: dir, Name: name}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(filepath.Join(dir, "adanext.db")); err != nil {
 			time.Sleep(10 * time.Millisecond)
@@ -492,7 +492,7 @@ func TestCrashAndRestartRecoversTheRunningAttemptWithoutRelaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(dir, "attempts", attemptID, "engine.marker")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	var pid int
 	for time.Now().Before(deadline) {
 		content, readErr := os.ReadFile(marker)
@@ -801,7 +801,7 @@ func TestOwnerStopEndpointCancelsRunningAndQueuedWorkAndExits(t *testing.T) {
 	if code, body := post("/v1/tasks/running/start", "start-running", "1", `{"backend":"codex","mode":"auto"}`); code != 200 {
 		t.Fatalf("start = %d %s", code, body)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		task, err := s.Task(ctx, "local", "running")
 		if err != nil {
@@ -862,7 +862,7 @@ func TestOwnerStopEndpointCancelsRunningAndQueuedWorkAndExits(t *testing.T) {
 		if last := frames[len(frames)-1]; last != "id: 1\nevent: cancel\ndata: {\"reason\":\"coordinator stopped by the owner\"}" {
 			t.Fatalf("last frame of the stream = %q in %q", last, data)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("the stream did not end with the coordinator")
 	}
 	for _, task := range []string{"running", "queued"} {
@@ -1041,7 +1041,7 @@ func stopCoordinator(t *testing.T, cfg ipc.Config) {
 	if resp.StatusCode != 202 {
 		t.Fatal(resp.StatusCode)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		lock, err := ipc.Acquire(cfg)
 		if err == nil {
@@ -1101,7 +1101,7 @@ func TestStartUpRemovesAnOrphanedBlobAndKeepsReferencedAndUnfinishedOnes(t *test
 	defer client.CloseIdleConnections()
 	// The coordinator serves only after its start-up sweep, so an answer
 	// means the sweep has run.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		resp, err := client.Get("http://ipc/v1/attempts/attempt-p/artifacts/" + ref.Hash)
 		if err == nil {

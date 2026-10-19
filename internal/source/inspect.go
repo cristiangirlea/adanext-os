@@ -97,6 +97,16 @@ type Inspection struct {
 	Files       []string  `json:"files"`
 	Fingerprint string    `json:"fingerprint"`
 	Blockers    []Blocker `json:"blockers"`
+	// Paths are the fingerprint's per-path entries, which a snapshot keeps for drift.
+	Paths []PathEntry `json:"-"`
+}
+
+// PathEntry is one changed or untracked path's part of the fingerprint: its
+// index entries and its state on disk, hashed as Entry.
+type PathEntry struct {
+	Path      string
+	Untracked bool
+	Entry     string
 }
 
 // Inspector inspects repositories with a resolved git, building each mirror
@@ -128,7 +138,7 @@ func newInspection() Inspection {
 	return Inspection{
 		Identity: Identity{Remotes: []Remote{}},
 		Status:   Status{Staged: []Change{}, Unstaged: []Change{}, Untracked: []string{}, Unmerged: []string{}},
-		History:  []Commit{}, Files: []string{}, Blockers: []Blocker{},
+		History:  []Commit{}, Files: []string{}, Blockers: []Blocker{}, Paths: []PathEntry{},
 	}
 }
 
@@ -250,7 +260,7 @@ func (in *Inspector) inspectMirror(ctx context.Context, path, mirror string) (In
 		return r, nil, err
 	}
 	r.Files = instructionFiles(root)
-	r.Fingerprint = fingerprint(root, r.Identity.Head, idx, r.Status, links)
+	r.Fingerprint, r.Paths = fingerprint(root, r.Identity.Head, idx, r.Status, links)
 	return r, &src, nil
 }
 
@@ -714,21 +724,10 @@ func instructionFiles(root string) []string {
 
 // fingerprint hashes HEAD, the index entries without their stat data, and
 // each changed or untracked path's mode, size and content as Lstat sees it.
-func fingerprint(root, head string, idx *index, st Status, links map[string]bool) string {
-	h := sha256.New()
-	field := func(parts ...string) {
-		for _, p := range parts {
-			var n [binary.MaxVarintLen64]byte
-			h.Write(n[:binary.PutUvarint(n[:], uint64(len(p)))])
-			io.WriteString(h, p)
-		}
-	}
-	field("head", head)
-	for _, e := range idx.entries {
-		flags := fmt.Sprintf("%t,%t,%t", e.assumeValid, e.skipWork, e.intentToAdd)
-		field("entry", e.path, strconv.FormatUint(uint64(e.mode), 8), hex.EncodeToString(e.oid), strconv.Itoa(e.stage), flags)
-	}
-	seen := map[string]bool{}
+// It also returns each of those paths' entries, its index entries and its
+// state hashed apart, in path order.
+func fingerprint(root, head string, idx *index, st Status, links map[string]bool) (string, []PathEntry) {
+	seen, untracked := map[string]bool{}, map[string]bool{}
 	var paths []string
 	add := func(p string) {
 		if !seen[p] {
@@ -739,18 +738,49 @@ func fingerprint(root, head string, idx *index, st Status, links map[string]bool
 	for _, c := range append(append([]Change{}, st.Staged...), st.Unstaged...) {
 		add(c.Path)
 	}
+	for _, p := range st.Untracked {
+		untracked[p] = true
+	}
 	for _, p := range append(append([]string{}, st.Untracked...), st.Unmerged...) {
 		add(p)
 	}
 	sort.Strings(paths)
+	h := sha256.New()
+	field(h, "head", head)
+	own := map[string][][]string{}
+	for _, e := range idx.entries {
+		flags := fmt.Sprintf("%t,%t,%t", e.assumeValid, e.skipWork, e.intentToAdd)
+		f := []string{"entry", e.path, strconv.FormatUint(uint64(e.mode), 8), hex.EncodeToString(e.oid), strconv.Itoa(e.stage), flags}
+		field(h, f...)
+		if seen[e.path] {
+			own[e.path] = append(own[e.path], f)
+		}
+	}
+	entries := make([]PathEntry, 0, len(paths))
 	for _, p := range paths {
 		state := []string{"under a link"}
 		if !underLink(links, path.Dir(p)) {
 			state = pathState(filepath.Join(root, filepath.FromSlash(p)))
 		}
-		field(append([]string{"path", p}, state...)...)
+		f := append([]string{"path", p}, state...)
+		field(h, f...)
+		one := sha256.New()
+		for _, e := range own[p] {
+			field(one, e...)
+		}
+		field(one, f...)
+		entries = append(entries, PathEntry{Path: p, Untracked: untracked[p], Entry: hex.EncodeToString(one.Sum(nil))})
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil)), entries
+}
+
+// field writes each part to h with its length before it.
+func field(h io.Writer, parts ...string) {
+	for _, p := range parts {
+		var n [binary.MaxVarintLen64]byte
+		h.Write(n[:binary.PutUvarint(n[:], uint64(len(p)))])
+		io.WriteString(h, p)
+	}
 }
 
 func pathState(full string) []string {

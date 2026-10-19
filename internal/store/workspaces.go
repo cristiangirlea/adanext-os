@@ -39,17 +39,18 @@ func (tx *Tx) TaskSource(ctx context.Context, taskID string) (TaskSource, error)
 
 // AttemptSource is what the trusted executor prepares an attempt from: its
 // task's project and that project's imported path, empty when it has none,
-// and the task's snapshot, nil when it has none.
+// the task's revision, and the task's snapshot, nil when it has none.
 type AttemptSource struct {
 	Project, Task, SourcePath string
+	TaskRevision              int64
 	Snapshot                  *Snapshot
 }
 
 func (s *Store) AttemptSource(ctx context.Context, attemptID string) (AttemptSource, error) {
 	var src AttemptSource
 	var path, snapshot sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT t.project,t.id,p.canonical_path,t.snapshot FROM attempts a JOIN tasks t ON t.id=a.task
-		LEFT JOIN project_sources p ON p.project=t.project WHERE a.id=?`, attemptID).Scan(&src.Project, &src.Task, &path, &snapshot)
+	err := s.db.QueryRowContext(ctx, `SELECT t.project,t.id,p.canonical_path,t.snapshot,t.revision FROM attempts a JOIN tasks t ON t.id=a.task
+		LEFT JOIN project_sources p ON p.project=t.project WHERE a.id=?`, attemptID).Scan(&src.Project, &src.Task, &path, &snapshot, &src.TaskRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AttemptSource{}, ErrNotFound
 	}
@@ -68,30 +69,40 @@ func (s *Store) AttemptSource(ctx context.Context, attemptID string) (AttemptSou
 }
 
 // Workspace is an attempt's worktree as recorded: its manifest's fields and
-// the manifest's hash.
+// the manifest's hash. A row from before manifest version 2 reads its task
+// revision and generation as -1, which no attempt has.
 type Workspace struct {
 	Attempt, Project, Task, Snapshot, BaseCommit, Branch, Path string
 	ManifestVersion                                            int
+	TaskRevision, Generation                                   int64
 	ManifestHash, Executor, Policy, Created                    string
 }
 
-const workspaceColumns = "attempt,project,task,snapshot,base_commit,branch,path,manifest_version,manifest_hash,executor,policy,created"
+const workspaceColumns = "attempt,project,task,snapshot,base_commit,branch,path,manifest_version,task_revision,ownership_generation,manifest_hash,executor,policy,created"
 
 // RecordWorkspace records an attempt's prepared worktree; an attempt has one.
 func (tx *Tx) RecordWorkspace(ctx context.Context, w Workspace) (Workspace, error) {
 	w.Created = now()
-	_, err := tx.tx.ExecContext(ctx, "INSERT INTO workspaces("+workspaceColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-		w.Attempt, w.Project, w.Task, w.Snapshot, w.BaseCommit, w.Branch, w.Path, w.ManifestVersion, w.ManifestHash, w.Executor, w.Policy, w.Created)
+	_, err := tx.tx.ExecContext(ctx, "INSERT INTO workspaces("+workspaceColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		w.Attempt, w.Project, w.Task, w.Snapshot, w.BaseCommit, w.Branch, w.Path, w.ManifestVersion, w.TaskRevision, w.Generation, w.ManifestHash, w.Executor, w.Policy, w.Created)
 	return w, err
 }
 
 // Workspace reads an attempt's recorded worktree for the trusted executor.
 func (s *Store) Workspace(ctx context.Context, attemptID string) (Workspace, error) {
 	var w Workspace
+	var revision, generation sql.NullInt64
 	err := s.db.QueryRowContext(ctx, "SELECT "+workspaceColumns+" FROM workspaces WHERE attempt=?", attemptID).Scan(
-		&w.Attempt, &w.Project, &w.Task, &w.Snapshot, &w.BaseCommit, &w.Branch, &w.Path, &w.ManifestVersion, &w.ManifestHash, &w.Executor, &w.Policy, &w.Created)
+		&w.Attempt, &w.Project, &w.Task, &w.Snapshot, &w.BaseCommit, &w.Branch, &w.Path, &w.ManifestVersion, &revision, &generation, &w.ManifestHash, &w.Executor, &w.Policy, &w.Created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Workspace{}, ErrNotFound
+	}
+	w.TaskRevision, w.Generation = -1, -1
+	if revision.Valid {
+		w.TaskRevision = revision.Int64
+	}
+	if generation.Valid {
+		w.Generation = generation.Int64
 	}
 	return w, err
 }

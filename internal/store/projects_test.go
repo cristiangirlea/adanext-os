@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -164,7 +165,7 @@ func TestAVersionFourStoreMigratesForwardKeepingItsProjects(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	path := s.path
-	for _, query := range []string{"DROP TABLE workspaces", "ALTER TABLE tasks DROP COLUMN snapshot", "DROP TABLE snapshot_untracked", "DROP TABLE source_snapshots", "DROP TABLE project_sources", "DELETE FROM schema_migrations WHERE version>=5", "PRAGMA user_version=4"} {
+	for _, query := range []string{"DROP TABLE snapshot_paths", "DROP TABLE workspaces", "ALTER TABLE tasks DROP COLUMN snapshot", "DROP TABLE snapshot_untracked", "DROP TABLE source_snapshots", "DROP TABLE project_sources", "DELETE FROM schema_migrations WHERE version>=5", "PRAGMA user_version=4"} {
 		execute(t, s, query)
 	}
 	if err := s.Close(); err != nil {
@@ -176,7 +177,7 @@ func TestAVersionFourStoreMigratesForwardKeepingItsProjects(t *testing.T) {
 	}
 	defer upgraded.Close()
 	var version int
-	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
+	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
 		t.Fatalf("version %d: %v", version, err)
 	}
 	if _, err := upgraded.ProjectSource(ctx, "u", "p"); !errors.Is(err, ErrNoSource) {
@@ -184,5 +185,71 @@ func TestAVersionFourStoreMigratesForwardKeepingItsProjects(t *testing.T) {
 	}
 	if _, err := upgraded.Task(ctx, "u", "t"); err != nil {
 		t.Fatalf("an older task: %v", err)
+	}
+}
+
+func TestASnapshotKeepsItsBranchAndPathEntriesAndTheNewestIsReadForMembers(t *testing.T) {
+	s := openTestStore(t)
+	users(t, s, "alice", "bob")
+	for _, p := range []string{"p1", "p2"} {
+		if err := importAs(t, s, "alice", p, "/repo-"+p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.NewestSnapshot(ctx, "alice", "p1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no snapshot yet: %v", err)
+	}
+	first := testSnapshot()
+	first.State = &SnapshotState{Branch: "main", Paths: []SnapshotPath{{Path: "a.txt", Entry: hashOf('1')}, {Path: "n.txt", Untracked: true, Entry: hashOf('2')}}}
+	second := testSnapshot()
+	second.ID, second.State = "s2", &SnapshotState{Branch: "", Paths: []SnapshotPath{}}
+	legacy := testSnapshot()
+	legacy.ID, legacy.Project = "s3", "p2"
+	for _, snap := range []Snapshot{first, second, legacy} {
+		if err := s.write(ctx, "alice", func(tx *Tx) error { _, err := tx.RecordSnapshot(ctx, snap); return err }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.Snapshot(ctx, "alice", "p1", "s1")
+	if err != nil || got.State == nil || got.State.Branch != "main" || !slices.Equal(got.State.Paths, first.State.Paths) {
+		t.Fatalf("first = %+v, %v", got, err)
+	}
+	newest, err := s.NewestSnapshot(ctx, "alice", "p1")
+	if err != nil || newest.ID != "s2" || newest.State == nil || newest.State.Branch != "" || newest.State.Paths == nil || len(newest.State.Paths) != 0 {
+		t.Fatalf("newest = %+v, %v", newest, err)
+	}
+	if got, err := s.NewestSnapshot(ctx, "alice", "p2"); err != nil || got.ID != "s3" || got.State != nil {
+		t.Fatalf("a snapshot with no recorded state = %+v, %v", got, err)
+	}
+	if _, err := s.NewestSnapshot(ctx, "bob", "p1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a non-member: %v", err)
+	}
+}
+
+func TestAVersionSixStoreMigratesForwardWithItsSnapshotsAndWorkspacesUnbound(t *testing.T) {
+	s := openTestStore(t)
+	boundTask(t, s)
+	if err := s.write(ctx, "alice", func(tx *Tx) error { _, err := tx.RecordWorkspace(ctx, testWorkspace()); return err }); err != nil {
+		t.Fatal(err)
+	}
+	path := s.path
+	for _, query := range []string{"DROP TABLE snapshot_paths", "ALTER TABLE source_snapshots DROP COLUMN branch", "ALTER TABLE workspaces DROP COLUMN task_revision",
+		"ALTER TABLE workspaces DROP COLUMN ownership_generation", "DELETE FROM schema_migrations WHERE version=7", "PRAGMA user_version=6"} {
+		execute(t, s, query)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	if snap, err := upgraded.Snapshot(ctx, "alice", "p1", "s1"); err != nil || snap.State != nil {
+		t.Fatalf("an older snapshot: %+v, %v", snap, err)
+	}
+	// An older row binds no revision or generation, so it matches no attempt.
+	if w, err := upgraded.Workspace(ctx, "a1"); err != nil || w.TaskRevision != -1 || w.Generation != -1 {
+		t.Fatalf("an older workspace: %+v, %v", w, err)
 	}
 }
