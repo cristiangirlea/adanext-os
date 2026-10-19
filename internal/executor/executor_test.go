@@ -94,6 +94,19 @@ func TestHelperFakeEngine(t *testing.T) {
 			f.Close()
 		}
 	}
+	// awaitMarker waits until the marker holds what a descendant records, and
+	// fails the engine if it never does within markerBound.
+	awaitMarker := func(holds func(data string) bool) {
+		for deadline := time.Now().Add(markerBound); ; time.Sleep(time.Millisecond) {
+			if data, err := os.ReadFile(marker); err == nil && holds(string(data)) {
+				return
+			}
+			if time.Now().After(deadline) {
+				os.Exit(3)
+			}
+		}
+	}
+	hasChild := func(data string) bool { return strings.Contains(data, "child:") }
 	mark(script)
 	if script == "exit_immediately" {
 		os.Exit(23)
@@ -353,12 +366,7 @@ func TestHelperFakeEngine(t *testing.T) {
 		if script == "nested_tree" {
 			wantChildren = 2
 		}
-		for i := 0; i < 2000; i++ {
-			if data, err := os.ReadFile(marker); err == nil && strings.Count(string(data), "child:") >= wantChildren {
-				break
-			}
-			time.Sleep(time.Millisecond)
-		}
+		awaitMarker(func(data string) bool { return strings.Count(data, "child:") >= wantChildren })
 		if script == "stream_after_exit" || script == "slow_stream_after_exit" || script == "valid_stream_after_exit" {
 			os.Exit(0)
 		}
@@ -375,12 +383,7 @@ func TestHelperFakeEngine(t *testing.T) {
 			os.Exit(3)
 		}
 		// Wait until the child has written its identity before the parent exits.
-		for i := 0; i < 2000; i++ {
-			if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
-				break
-			}
-			time.Sleep(time.Millisecond)
-		}
+		awaitMarker(hasChild)
 		if script == "exit_with_child_stdout" {
 			os.Exit(0)
 		}
@@ -400,7 +403,7 @@ func TestHelperFakeEngine(t *testing.T) {
 	if script == "slow_storage" {
 		// Write the result only once the reader is stalled storing an earlier
 		// event, so it waits in the pipe rather than in the reader's buffer.
-		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		for deadline := time.Now().Add(markerBound); ; time.Sleep(10 * time.Millisecond) {
 			if _, err := os.Stat(marker + ".stored"); err == nil {
 				break
 			}
@@ -427,12 +430,7 @@ func TestHelperFakeEngine(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(3)
 		}
-		for i := 0; i < 2000; i++ {
-			if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
-				break
-			}
-			time.Sleep(time.Millisecond)
-		}
+		awaitMarker(hasChild)
 		os.Exit(0)
 	}
 	if script == "big_block" {
@@ -514,6 +512,12 @@ func testExecutor(t *testing.T, script string) (*Executor, *store.Store, string,
 // engine that exits costs none of it.
 const naturalExitGrace = 5 * time.Second
 
+// markerBound is how long a test, or the fake engine, waits for a descendant
+// to record itself or for a marker file to appear. It is a liveness bound that
+// fails when exceeded, not a timing assertion: a loaded machine can take
+// seconds to start a process, and the tests check their own timing.
+const markerBound = 30 * time.Second
+
 // markerToEnd is how long after the marker's last write the attempt recorded
 // its end. That write is the engine, or the descendant it starts, recording
 // itself, so the span leaves out the launch before it (the engine's hash, the
@@ -535,7 +539,12 @@ func markerToEnd(t *testing.T, marker string, a store.Attempt) time.Duration {
 func waitAttempt(t *testing.T, s *store.Store, want string) store.Attempt {
 	t.Helper()
 	// A liveness bound for a loaded machine; the tests assert their own timing.
-	deadline := time.After(30 * time.Second)
+	return waitAttemptWithin(t, s, want, 30*time.Second)
+}
+
+func waitAttemptWithin(t *testing.T, s *store.Store, want string, bound time.Duration) store.Attempt {
+	t.Helper()
+	deadline := time.After(bound)
 	for {
 		a, err := s.AttemptByID(context.Background(), "attempt")
 		if err != nil {
@@ -611,9 +620,13 @@ func TestResultBeforeNaturalExitWithSlowStorageEndsOK(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			for deadline := time.Now().Add(markerBound); ; time.Sleep(10 * time.Millisecond) {
 				if data, err := os.ReadFile(marker); err == nil && slices.Contains(strings.Split(string(data), "\n"), "exiting") {
 					break
+				}
+				if time.Now().After(deadline) {
+					t.Error("the engine never recorded that it was exiting")
+					return
 				}
 			}
 			time.Sleep(3 * naturalExitGrace / 2)
@@ -1162,7 +1175,7 @@ func cleanupGrandchild(t *testing.T, marker string) {
 
 func waitGrandchildMarker(t *testing.T, marker string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(markerBound)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(marker); err == nil && strings.Contains(string(data), "child:") {
 			return
