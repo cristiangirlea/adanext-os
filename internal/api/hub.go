@@ -18,7 +18,7 @@ type Hub struct {
 	streamTotal       int
 	budgetUsed        int
 	budgetQueue       []*budgetWaiter // readers waiting for budget, in arrival order
-	BudgetBytes       int
+	BudgetBytes       int             // 0 means 32 MiB; New refuses less than one page
 	WriteDeadline     time.Duration
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
@@ -119,6 +119,12 @@ func (h *Hub) reserveBytes(ctx context.Context, n int) bool {
 	}
 	h.grantLocked()
 	return false
+}
+
+func (h *Hub) closed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closedLocked()
 }
 
 func (h *Hub) closedLocked() bool {
