@@ -240,7 +240,7 @@ is M4.
   and a junction swapped in after inspection; each credential pattern is refused without
   `include_sensitive`; the original is byte-identical before and after; idempotency and
   membership as for the other mutations.
-- [ ] **M3.3 Managed clone and task workspaces.** `git clone --bare --no-local --no-hardlinks
+- [x] **M3.3 Managed clone and task workspaces** (#95: #97, 2026-10-19). `git clone --bare --no-local --no-hardlinks
   --template=` from the mirror, never from the original, into `<state>/projects/<id>/repo.git`,
   with `GIT_NO_LAZY_FETCH=1` and `-c transfer.bundleURI=false`, and its config replaced by Ada's;
   later imports rebuild the mirror and fetch from it the same way. Upload-pack therefore reads

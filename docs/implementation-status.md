@@ -9,7 +9,7 @@ are in `docs/backlog.md`.
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
-| M3 Project workspaces | in progress | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85 | M3.3 managed clone and task workspaces |
+| M3 Project workspaces | in progress | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97 | M3.4 drift and launch revalidation |
 | M4 First local workflow | not started | | |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -384,6 +384,29 @@ original's work tree byte for byte; every original file is hashed before and aft
 Not verified: Windows file symlinks (junctions cover Windows), macOS, a real patch over 64 MiB.
 Later: opening each path component through its parent's handle (M3.3), import authorization for
 more users (M4b), artifact origins when content repeats (#89).
+
+### M3.3 managed clone and task workspaces (2026-10-19, #95, PR #97)
+
+Migration 0006 (the nullable `tasks.snapshot` and the `workspaces` table), a task bound to a
+snapshot at creation, and Ada's bare clone of each imported project at
+`<state>/projects/<id>/repo.git`, cloned from a freshly built mirror on the first start that
+needs it and fetched the same way on every later one, under a per-project lock. Each attempt gets
+a worktree on `ada/<task>` at the snapshot's base with the imported changes committed as Ada, and
+a manifest the executor checks against the workspace row, its hash, the worktree's git directory
+and the branch's HEAD just before the engine starts; any difference moves the attempt to
+`recovery_required` and nothing is rebuilt. Branches named `ada` or `ada/*` in any case never
+reach the clone. The decisions are in the 2026-10-19 entry of the decisions log. Implementation
+and fix rounds ran as Claude Opus runs through hrn (`20261018-232512-8755a2`, fixes
+`20261019-022108-2c77ab`, `20261019-033845-327876` and the case-insensitive `ada` fix); the
+independent reviews, each also the security read, are on the pull request.
+
+Evidence at the commit that adds this section: `.hrn/check.sh` passed (`== windows exit 0, linux
+exit 0`), that is `bash scripts/check.sh` on Windows (all steps including the seven Playwright
+tests and the Windows-only test of a branch `Ada`; `-race` left to Linux) and `go vet`, `go test`
+and `go test -race` for every package in `golang:1.26` in Docker.
+
+Not verified: macOS, a real hrn run in a worktree, removal of worktrees and branches (M7), a
+task's second attempt (#98).
 
 ## Decisions log
 
@@ -1197,7 +1220,10 @@ more users (M4b), artifact origins when content repeats (#89).
   clone may still hold it through an earlier task's branch, else Prepare names it missing), so a
   detached or since-moved base reaches the clone (#79). The fetch runs with `--prune` and never
   takes or prunes the names `ada` and `ada/*`, which stay Ada's: a fresh clone deletes the
-  original's branches of those names. Before a fetch, lock files a killed clone or fetch left are
+  original's branches of those names. The match ignores case (a branch whose first component is
+  `ada` in any case, so `Ada` and `ADA/x` but not `adam`, `ada-x` or `feature/ada`), since on
+  NTFS and APFS a user's `Ada` shares a file or directory with Ada's `ada/<task>` and would make
+  every later fetch in the project fail. Before a fetch, lock files a killed clone or fetch left are
   removed, except under `refs/heads/ada/`, which only engines write; the limit is an engine whose
   exit nobody confirmed (`recovery_required`) still running git, whose `packed-refs.lock` can be
   removed. The clone has `gc.auto=0` and `maintenance.auto=false`, and fetches with

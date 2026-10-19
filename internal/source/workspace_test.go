@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -546,6 +548,41 @@ func TestAUserBranchNamedAdaNeverReachesTheClone(t *testing.T) {
 			}
 			if got := git(t, repo, "rev-parse", "refs/heads/ada/t1"); got != first.Head {
 				t.Fatalf("ada/t1 = %s, want %s", got, first.Head)
+			}
+		})
+	}
+}
+
+func TestAdaRefsNamesEveryBranchUnderAdaInAnyCase(t *testing.T) {
+	t.Parallel()
+	refs := []string{"refs/heads/Ada", "refs/heads/ADA", "refs/heads/ada", "refs/heads/ada/x", "refs/heads/ADA/x",
+		"refs/heads/adam", "refs/heads/ada-x", "refs/heads/feature/ada", "refs/heads/main"}
+	got := strings.Join(adaRefs(refs), " ")
+	if want := "refs/heads/Ada refs/heads/ADA refs/heads/ada refs/heads/ada/x refs/heads/ADA/x"; got != want {
+		t.Fatalf("adaRefs = %s, want %s", got, want)
+	}
+}
+
+func TestAUserBranchNamedAdaInAnotherCaseNeverReachesTheCloneOnWindows(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("the ref store is case-sensitive here")
+	}
+	for _, before := range []bool{true, false} {
+		t.Run(fmt.Sprint("before the first prepare: ", before), func(t *testing.T) {
+			t.Parallel()
+			dir := newRepo(t, nil)
+			w := newWorkspaces(t)
+			if before {
+				git(t, dir, "branch", "Ada")
+			}
+			mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+			if !before {
+				git(t, dir, "branch", "Ada")
+			}
+			mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "2")
+			if got := git(t, w.repo("p"), "for-each-ref", "--format=%(refname)", "refs/heads"); got != "refs/heads/ada/t1\nrefs/heads/ada/t2\nrefs/heads/main" {
+				t.Fatalf("the clone's branches:\n%s", got)
 			}
 		})
 	}

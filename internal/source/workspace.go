@@ -267,12 +267,20 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) err
 			return err
 		}
 	}
-	// refs/ada/head carries a detached HEAD no branch reaches; ada and ada/*
-	// are Ada's own names, which the fetch never takes and --prune leaves
-	// alone. --prune clears a deleted branch before a branch under its name
-	// arrives; --update-shallow takes new shallow roots of a shallow original.
+	branches, err := in.Git.run(ctx, mirror, "", "for-each-ref", "--format=%(refname)", "refs/heads")
+	if err != nil {
+		return err
+	}
+	// refs/ada/head carries a detached HEAD no branch reaches; ada and ada/*,
+	// in any case, are Ada's own names, which the fetch never takes and
+	// --prune leaves alone. --prune clears a deleted branch before a branch
+	// under its name arrives; --update-shallow takes new shallow roots of a
+	// shallow original.
 	args := []string{"fetch", "-q", "--prune", "--update-shallow", "--no-tags", "--no-write-fetch-head", "--no-auto-gc", "--no-recurse-submodules", "--", mirror,
 		"+refs/heads/*:refs/heads/*", "^refs/heads/ada", "^refs/heads/ada/*", "+refs/tags/*:refs/tags/*"}
+	for _, ref := range adaRefs(strings.Fields(string(branches))) {
+		args = append(args, "^"+ref)
+	}
 	if hasBase {
 		args = append(args, "+refs/ada/base:refs/ada/base")
 	}
@@ -288,20 +296,34 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) err
 	return nil
 }
 
-// dropAdaBranches deletes the original's branches named ada or ada/*, which
-// a fresh clone copies, so those names stay Ada's.
+// dropAdaBranches deletes the original's branches named ada or ada/* in any
+// case, which a fresh clone copies, so those names stay Ada's.
 func (w *Workspaces) dropAdaBranches(ctx context.Context, repo string) error {
 	g := w.Inspector.Git
-	out, err := g.run(ctx, repo, "", "for-each-ref", "--format=%(refname)", "refs/heads/ada")
+	out, err := g.run(ctx, repo, "", "for-each-ref", "--format=%(refname)", "refs/heads")
 	if err != nil {
 		return err
 	}
-	for _, ref := range strings.Fields(string(out)) {
+	for _, ref := range adaRefs(strings.Fields(string(out))) {
 		if _, err := g.run(ctx, repo, "", "update-ref", "--no-deref", "-d", ref); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// adaRefs returns the refs whose first component under refs/heads/ is ada in
+// any case: on a case-insensitive ref store a user's Ada or ADA/x shares a
+// file or directory with Ada's own ada/<task>.
+func adaRefs(refs []string) []string {
+	var ada []string
+	for _, ref := range refs {
+		first, _, _ := strings.Cut(strings.TrimPrefix(ref, "refs/heads/"), "/")
+		if strings.HasPrefix(ref, "refs/heads/") && strings.EqualFold(first, "ada") {
+			ada = append(ada, ref)
+		}
+	}
+	return ada
 }
 
 // removeLocks removes the lock files a killed clone or fetch left in the
