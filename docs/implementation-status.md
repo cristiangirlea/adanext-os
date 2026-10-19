@@ -1333,6 +1333,36 @@ task's second attempt (#98).
   after a natural exit, because a group id with no creation time to check could name another
   process. A tree walk through `sysctl` would lift this, but only a macOS runner could test it.
 
+- **2026-10-20, M4 in five slices.** M4 is `docs/backlog.md`'s M4.1 the real engine end to
+  end, M4.2 checks, M4.3 changes and review, M4.4 the workspace UI, and M4.5 demonstrations.
+  M4.1 comes first; M4.2 and M4.3 follow one at a time, since each touches the schema or the
+  API; M4.4 can start beside M4.2 and finishes after M4.3; M4.5 is last. The decisions they
+  need:
+  Check commands are declared per task (argv lists, a working directory inside the worktree, a
+  timeout) and are never discovered from the repository's scripts, as `docs/plan.md` section 3
+  already says of import: running a repository's package scripts is running its code.
+  Ada commits the agent's result as its own commit ("Agent changes", Ada's author) on
+  `ada/<task>` before any check runs, so a check result and a review each bind a commit and not
+  a work tree that can still change.
+  The same checks run once on the snapshot's imported-changes commit as a baseline, so a failure
+  that existed before the task is told apart from one the task introduced (plan section 3).
+  A review binds the reviewed commit and its check results; any later change to the branch
+  invalidates it, as #3 already says of the content hash.
+  Refine continues on `ada/<task>` from its tip as a new attempt of the same task, with the
+  findings in its prompt; the earlier attempt's worktree, which holds the branch, is removed
+  once its record is kept. This settles #98, and moves refinement from M7 to M4.3; the M3.3
+  entry's "M7 removes worktrees" now covers export only. Reason: one branch per task keeps the
+  lineage plain, and a second branch per attempt would make export choose between them.
+  The capability matrix is the pinned `hrn`'s accept and reject answers plus a static table
+  for what the engine cannot report (read-only enforcement, network, usage reporting), recorded
+  here when M4.1 lands. Mode `ask` stays refused until an engine protocol with approvals exists
+  (#7).
+  A folder enters only through Electron's dialog in main, which hands the path to `adad`; the
+  renderer never types one (#5).
+  Fonts (Source Sans 3, JetBrains Mono) are bundled; the app loads nothing remote.
+  The live runs of M4.1 are the first real claude and codex runs through `adad`, and with them
+  the live check of the #58 environment list.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
@@ -1371,3 +1401,6 @@ task's second attempt (#98).
     answer by exiting) goes to `recovery_required` with the result kept, until a reconcile flow
     exists; a cancel or a Stop the engine answers by exiting naturally ends the task `canceled`
     with the result kept.
+13. For M4.5 (decisions log, 2026-10-20): an Ubuntu machine with a desktop session Ada's
+    desktop app can open in, and a claude or codex CLI signed in there on the owner's plan, so
+    the Ubuntu demonstration can run. Say which machine.
