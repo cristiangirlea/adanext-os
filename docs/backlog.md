@@ -268,13 +268,80 @@ is M4.
   Acceptance: each kind of drift is reported, and an unchanged original reports none; a
   corrupted snapshot artifact or a stale manifest refuses the launch.
 
+## M4 First local workflow
+
+Five slices (decisions log, 2026-10-20). M4.1 first. M4.2 and M4.3 then one at a time, since
+each touches the schema or the API. M4.4 can start beside M4.2 on what the API already offers,
+and finishes after M4.3. M4.5 comes last.
+
+- [ ] **M4.1 The real engine, end to end.** `adad` finds the pinned engine, built by
+  `scripts/build-engine.sh` at `engine/engine.json`'s revision, in the app's directory or through
+  a flag. It checks the binary's SHA-256 against the recorded one and refuses any other. A
+  capability matrix per backend (claude, codex) and mode (readonly, auto, yolo; `ask` refused
+  until approvals exist, #7) says what each enforces: read-only, workspace writes and shell,
+  network, approvals, continuation, cancellation and usage reporting. It is built from the pinned
+  `hrn`'s accept and reject answers plus a static table recorded in the decisions log. A start
+  whose options the matrix refuses answers 409 `unsupported_options` before any preparation. The
+  API exposes the matrix for the UI. The engine runs with the environment of #58 (decisions log,
+  2026-10-19).
+  Evidence, on the owner's plans, small and gated, never an API key, the backend always named:
+  one real claude run and one real codex run in readonly mode through `adad` on a tiny fixture
+  repository on Windows, recorded with run ids, durations and the events received. This is also
+  the live check of the #58 allow-list.
+  Acceptance: the matrix refuses each unsupported combination; a wrong engine hash is refused;
+  the live runs are recorded.
+- [ ] **M4.2 Checks.** A task declares its check commands: argv lists, a working directory
+  inside the worktree, a timeout. They are never taken from the repository's package scripts.
+  After an attempt ends ok, Ada commits the agent's changes as one commit on `ada/<task>`
+  ("Agent changes", Ada's author). Then it runs each check in the worktree as a managed process
+  (the #58 environment, the executor's process-tree supervision, output capped into artifacts)
+  and records the command, the environment's keys, the tested commit, the exit code, the
+  duration and the log artifact. The same checks run once on the snapshot's imported-changes
+  commit as a baseline, so failures that already existed are told apart from new ones. The task
+  moves `running` -> `verifying` -> `awaiting_review`; failed checks are recorded, the task still
+  goes to `awaiting_review`, and is shown as failing. Any change to the branch after a check
+  invalidates that result. A forward migration adds checks and their results.
+  Acceptance: a check that passes, one that fails, one that times out, and one killed with its
+  process tree; a baseline failure told apart from a new one; a result invalidated by a later
+  edit; no check runs from a repository script unless the task declares it.
+- [ ] **M4.3 Changes and review.** `GET /v1/tasks/{id}/changes` returns the task's own changes,
+  the diff from the imported-changes commit to the agent-changes commit: the file list with
+  each file's status and patch, binary files marked, size-capped. Review actions as #3 says:
+  findings (any member); accept (the attempt's actor or a project owner), which records the
+  reviewed commit and its check results, so a later change invalidates it; and refine, a new
+  attempt on the same task that continues on `ada/<task>` from its tip, with the findings in its
+  prompt. The earlier attempt's worktree is removed once its record is kept, which settles #98.
+  Export stays in M7.
+  Acceptance: the diff matches git's for a text change, a binary file, a rename, a mode change
+  and a deletion; authority as #3 says; a stale review refused; refine starts a second attempt
+  that sees the first one's commits.
+- [ ] **M4.4 The workspace UI.** The plan's practical layout (`docs/plan.md` section 3) in `ui/`,
+  through `AdaClient` only. Left navigation: projects and active tasks. Main area: the task and
+  its activity, events rendered by kind instead of raw JSON. A resizable work area: Changes (a
+  diff viewer), Checks (results and logs), and Files (a read-only tree of the worktree); Preview
+  waits for M5. A status bar: branch, executor, backend and model, task state, Stop. The import
+  flow: a folder chosen through a typed Electron dialog in main, the only way a path enters (the
+  renderer never types one; main hands it to `adad`, #5); inspect; blockers shown with their
+  paths; the uncommitted changes offered ("Include these changes in the new feature branch"),
+  untracked files selectable and sensitive ones marked; the snapshot; then task creation with
+  objective, acceptance criteria, check commands, and backend, model and mode from the
+  capability matrix. Light theme by default and a dark mode; Source Sans 3 and JetBrains Mono
+  bundled, no remote fonts; keyboard navigation, visible focus, reduced motion. Read the
+  frontend-design skill first.
+  Acceptance: Vitest for the components; Playwright for the flow import -> task -> fake engine
+  -> checks -> changes -> accept; an accessibility pass.
+- [ ] **M4.5 Demonstrations.** The full flow with a real backend on Windows (the owner's PC)
+  and on Ubuntu, recorded in the status file as evidence with screenshots. Ubuntu needs a
+  desktop session and a signed-in claude or codex CLI there, an owner action ("Owner actions
+  pending").
+  Acceptance: both demonstrations recorded; the Playwright flow green in CI on both systems.
+
 ## Later milestones
 
 Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
 
 - **M3 Project workspaces:** broken into slices; see "M3 Project workspaces" above.
-- **M4 First local workflow:** desktop import, task, edit, checks, diff and review on Windows and
-  Ubuntu with a real backend.
+- **M4 First local workflow:** broken into slices; see "M4 First local workflow" above.
 - **M4c Editor integration, VS Code first:** an extension that is one more client of `adad`.
   The desktop's Node modules (find-or-start, handshake, event-stream client) move to a package
   both use; the extension finds `adad` from the installed desktop app or a setting, starts it if
