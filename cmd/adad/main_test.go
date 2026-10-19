@@ -1196,7 +1196,8 @@ func TestAStartDuringASignalDrivenStopIsRefused(t *testing.T) {
 		body, err := io.ReadAll(resp.Body)
 		return resp.StatusCode, body, err
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	// A liveness bound for a loaded machine; what the test proves is the refusal below.
+	deadline := time.Now().Add(30 * time.Second)
 	var body []byte
 	for {
 		code, b, err := start("running", "start-running")

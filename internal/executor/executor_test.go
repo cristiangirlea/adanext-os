@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -26,20 +28,6 @@ func TestHelperFakeEngine(t *testing.T) {
 	script := os.Getenv("ADA_FAKE_ENGINE")
 	if script == "" {
 		return
-	}
-	if script == "grandchild" {
-		identity, err := processIdentity(os.Getpid())
-		if err != nil {
-			os.Exit(3)
-		}
-		f, err := os.OpenFile(os.Getenv("ADA_FAKE_MARKER"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			os.Exit(3)
-		}
-		fmt.Fprintf(f, "child:%d:%s\n", os.Getpid(), identity)
-		f.Close()
-		time.Sleep(2 * time.Second)
-		os.Exit(0)
 	}
 	if script == "grandchild_stream" {
 		identity, _ := processIdentity(os.Getpid())
@@ -318,7 +306,7 @@ func TestHelperFakeEngine(t *testing.T) {
 	}
 	if script == "child_stdout" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
-		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
 		child.Stdout = os.Stdout
 		if err := child.Start(); err != nil {
 			os.Exit(3)
@@ -377,7 +365,7 @@ func TestHelperFakeEngine(t *testing.T) {
 	}
 	if script == "exit_with_child_stdout" || script == "child_stderr" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
-		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
 		if script == "child_stderr" {
 			child.Stderr = os.Stderr
 		} else {
@@ -410,7 +398,16 @@ func TestHelperFakeEngine(t *testing.T) {
 		return
 	}
 	if script == "slow_storage" {
-		time.Sleep(50 * time.Millisecond)
+		// Write the result only once the reader is stalled storing an earlier
+		// event, so it waits in the pipe rather than in the reader's buffer.
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(marker + ".stored"); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				os.Exit(3)
+			}
+		}
 	}
 	final := "done"
 	if script == "big" || script == "big_block" {
@@ -450,6 +447,9 @@ func TestHelperFakeEngine(t *testing.T) {
 	}
 	if script == "delayed_exit" {
 		time.Sleep(20 * time.Millisecond)
+	}
+	if script == "slow_storage" {
+		mark("exiting")
 	}
 	os.Exit(0)
 }
@@ -512,7 +512,7 @@ func testExecutor(t *testing.T, script string) (*Executor, *store.Store, string,
 // would kill the engine, which the test never means to reach: it is long
 // enough that a loaded machine's slow exit does not reach it either, and an
 // engine that exits costs none of it.
-const naturalExitGrace = 2 * time.Second
+const naturalExitGrace = 5 * time.Second
 
 // markerToEnd is how long after the marker's last write the attempt recorded
 // its end. That write is the engine, or the descendant it starts, recording
@@ -597,9 +597,28 @@ func TestResultBeforeNaturalExitAlwaysEndsOK(t *testing.T) {
 }
 
 func TestResultBeforeNaturalExitWithSlowStorageEndsOK(t *testing.T) {
-	e, s, _, _ := testExecutor(t, "slow_storage")
-	e.cfg.CancelGrace = 100 * time.Millisecond
-	e.afterAppend = func() { time.Sleep(3 * e.cfg.CancelGrace) }
+	t.Parallel()
+	e, s, _, marker := testExecutor(t, "slow_storage")
+	e.cfg.CancelGrace = naturalExitGrace
+	// The first stored event holds the store until the engine is exiting,
+	// then for longer than a whole grace period. The engine writes its result
+	// only once the stall has begun, so the result is read well after the
+	// exit, and only time blocked in reads counts against it.
+	var stall sync.Once
+	e.afterAppend = func() {
+		stall.Do(func() {
+			if err := os.WriteFile(marker+".stored", nil, 0600); err != nil {
+				t.Error(err)
+				return
+			}
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+				if data, err := os.ReadFile(marker); err == nil && slices.Contains(strings.Split(string(data), "\n"), "exiting") {
+					break
+				}
+			}
+			time.Sleep(3 * naturalExitGrace / 2)
+		})
+	}
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
@@ -1018,7 +1037,11 @@ func TestProtocolViolationsRecordCause(t *testing.T) {
 }
 
 func TestProtocolViolationClosesStdinBeforeKilling(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "violation_eof")
+	// Stdin closes after one grace period and the engine exits on it; the
+	// kill after two is never meant to be reached.
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
 	if !strings.Contains(strings.Join(markerLines(t, marker), "\n"), "stdin closed") {
@@ -1084,13 +1107,15 @@ func TestStderrIsCappedAndPrivate(t *testing.T) {
 }
 
 func TestDescendantHoldingStdoutDoesNotHangWait(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "child_stdout")
 	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	a := waitAttempt(t, s, "ended_ok")
 	waitGrandchildMarker(t, marker)
-	// The descendant holds stdout for two seconds after recording itself; the
-	// attempt ends a grace period after the engine's exit instead.
+	// The descendant holds stdout until it is killed; the attempt ends a
+	// grace period or two after the engine's exit instead.
 	if span := markerToEnd(t, marker, a); span > 3*e.cfg.CancelGrace+time.Second {
 		t.Fatalf("executor waited %s for descendant stdout", span)
 	}
@@ -1125,6 +1150,12 @@ func cleanupGrandchild(t *testing.T, marker string) {
 			if child, err := os.FindProcess(pid); err == nil {
 				_ = child.Kill()
 			}
+			// A kill only starts the exit: until it ends, the descendant keeps
+			// its working directory under the test's temp dir, which Windows
+			// then refuses to remove.
+			if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
+				t.Error(err)
+			}
 		}
 	})
 }
@@ -1142,14 +1173,16 @@ func waitGrandchildMarker(t *testing.T, marker string) {
 }
 
 func TestExitedEngineWithDescendantStdoutEndsPromptly(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "exit_with_child_stdout")
 	cleanupGrandchild(t, marker)
-	e.cfg.CancelGrace = 200 * time.Millisecond
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	a := waitAttempt(t, s, "ended_failed")
 	waitGrandchildMarker(t, marker)
 	// The engine exits once the descendant has recorded itself, and the
-	// descendant holds stdout for two seconds more.
+	// descendant holds stdout until it is killed; the attempt ends a grace
+	// period or two after the engine's exit instead.
 	if span := markerToEnd(t, marker, a); span > 3*e.cfg.CancelGrace+time.Second {
 		t.Fatalf("attempt ended %s after the descendant started", span)
 	}
@@ -1174,9 +1207,12 @@ func TestStderrDescendantFitsStopBudget(t *testing.T) {
 }
 
 func TestExitedEngineWithDescendantStderrEndsOK(t *testing.T) {
+	t.Parallel()
 	e, s, _, marker := testExecutor(t, "child_stderr")
 	cleanupGrandchild(t, marker)
-	e.cfg.CancelGrace = 100 * time.Millisecond
+	// The descendant holds stderr until it is killed, so the wait delay of
+	// one grace period ends the wait.
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_ok")
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
@@ -1205,7 +1241,7 @@ func TestRecordCauseReportsAppendFailure(t *testing.T) {
 
 func TestMalformedLineDrainsBurstWithoutKill(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "malformed_burst")
-	e.cfg.CancelGrace = 500 * time.Millisecond
+	e.cfg.CancelGrace = naturalExitGrace
 	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
 	errorEventContains(t, s, "malformed protocol line")
