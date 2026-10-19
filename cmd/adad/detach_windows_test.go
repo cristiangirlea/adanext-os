@@ -150,10 +150,61 @@ func stopDetachedCoordinator(t *testing.T, cfg ipc.Config) {
 	if !errors.As(err, &running) {
 		t.Fatalf("no coordinator holds the lock: %v", err)
 	}
+	// A failed stop must not leave the coordinator holding the state directory.
+	t.Cleanup(func() {
+		if t.Failed() {
+			if err := terminateProcess(running.PID, running.Created, 10*time.Second); err != nil {
+				t.Log(err)
+			}
+		}
+	})
 	stopCoordinator(t, cfg)
+	if running.PID <= 0 || running.Created == "" {
+		t.Fatalf("lock holder unknown: %v", running)
+	}
 	if err := waitProcessGone(running.PID, running.Created, 10*time.Second); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// terminateProcess ends the process with this pid and creation time and waits for it.
+// A pid that is unknown, gone or now names another process is left alone.
+func terminateProcess(pid int, created string, timeout time.Duration) error {
+	if pid <= 0 || created == "" {
+		return nil
+	}
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	if same, err := createdAt(handle, created); err != nil || !same {
+		return err
+	}
+	if err := windows.TerminateProcess(handle, 1); err != nil {
+		return err
+	}
+	event, err := windows.WaitForSingleObject(handle, uint32(timeout/time.Millisecond))
+	if err != nil {
+		return err
+	}
+	if event != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("process %d still running %s after it was terminated", pid, timeout)
+	}
+	return nil
+}
+
+// createdAt reports whether the process behind handle has this creation time, in the
+// lock's decimal FILETIME form.
+func createdAt(handle windows.Handle, created string) (bool, error) {
+	var creation, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(handle, &creation, &exited, &kernel, &user); err != nil {
+		return false, err
+	}
+	return fmt.Sprintf("%d", uint64(creation.HighDateTime)<<32|uint64(creation.LowDateTime)) == created, nil
 }
 
 // waitProcessGone waits until the process with this pid and creation time (as the
@@ -168,12 +219,8 @@ func waitProcessGone(pid int, created string, timeout time.Duration) error {
 		return err
 	}
 	defer windows.CloseHandle(handle)
-	var creation, exited, kernel, user windows.Filetime
-	if err := windows.GetProcessTimes(handle, &creation, &exited, &kernel, &user); err != nil {
+	if same, err := createdAt(handle, created); err != nil || !same {
 		return err
-	}
-	if fmt.Sprintf("%d", uint64(creation.HighDateTime)<<32|uint64(creation.LowDateTime)) != created {
-		return nil
 	}
 	event, err := windows.WaitForSingleObject(handle, uint32(timeout/time.Millisecond))
 	if err != nil {
