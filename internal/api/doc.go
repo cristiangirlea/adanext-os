@@ -17,7 +17,8 @@
 // bounded by the readers the budget admits at once (32 at the default 32 MiB).
 //
 // Refused streams. A stream refused after its headers are decided (429
-// too_many_streams, 503 shutting_down with Retry-After) is a JSON error with a
+// too_many_streams, 503 shutting_down or, when no budget frees within the
+// write deadline, 503 busy, both with Retry-After) is a JSON error with a
 // non-200 status. EventSource treats any non-200 as a fatal error, never reads
 // the body and ignores Retry-After; the browser adapter (M4b) must therefore
 // handle a refused open itself, backing off before a new EventSource, and must

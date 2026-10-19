@@ -140,6 +140,9 @@ type Execution struct {
 }
 
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
+	if hub != nil && hub.BudgetBytes > 0 && hub.BudgetBytes < pageBytes {
+		panic(fmt.Sprintf("api: a budget of %d bytes is below one page (%d)", hub.BudgetBytes, pageBytes))
+	}
 	h := &handler{store: s, hub: hub, auth: auth}
 	if len(execution) != 0 {
 		h.exec = execution[0]
@@ -218,7 +221,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit"}[code]
 	if status == 500 {
 		writeInternalError(w, errors.New("unspecified internal error"))
 		return
@@ -990,10 +993,22 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		}
 		defer release()
 	}
-	if !h.hub.reserveBytes(r.Context(), pageBytes) {
+	deadline := h.hub.WriteDeadline
+	if deadline <= 0 {
+		deadline = 10 * time.Second
+	}
+	// The first reservation waits no longer than a page's.
+	reserveCtx, cancel := context.WithTimeout(r.Context(), deadline)
+	got := h.hub.reserveBytes(reserveCtx, pageBytes)
+	cancel()
+	if !got {
 		if r.Context().Err() == nil {
 			w.Header().Set("Retry-After", "2")
-			writeError(w, 503, "shutting_down")
+			if h.hub.closed() {
+				writeError(w, 503, "shutting_down")
+			} else {
+				writeError(w, 503, "busy")
+			}
 		}
 		return
 	}
@@ -1020,10 +1035,6 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		rc := http.NewResponseController(w)
-		deadline := h.hub.WriteDeadline
-		if deadline <= 0 {
-			deadline = 10 * time.Second
-		}
 		if err := rc.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
 			return
 		}
@@ -1043,10 +1054,6 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		held = len(page)
 		w.Header().Set("Content-Type", "application/json")
 		rc := http.NewResponseController(w)
-		deadline := h.hub.WriteDeadline
-		if deadline <= 0 {
-			deadline = 10 * time.Second
-		}
 		_ = rc.SetWriteDeadline(time.Now().Add(deadline))
 		w.WriteHeader(200)
 		_, _ = w.Write(page)
@@ -1061,10 +1068,6 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(200)
 	rc := http.NewResponseController(w)
-	deadline := h.hub.WriteDeadline
-	if deadline <= 0 {
-		deadline = 10 * time.Second
-	}
 	write := func(page []byte) bool {
 		if err := rc.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
 			return false
