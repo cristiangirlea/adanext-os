@@ -102,6 +102,7 @@ func TestHelperFakeEngine(t *testing.T) {
 				return
 			}
 			if time.Now().After(deadline) {
+				fmt.Fprintln(os.Stderr, "a descendant never recorded itself")
 				os.Exit(3)
 			}
 		}
@@ -539,7 +540,9 @@ func markerToEnd(t *testing.T, marker string, a store.Attempt) time.Duration {
 func waitAttempt(t *testing.T, s *store.Store, want string) store.Attempt {
 	t.Helper()
 	// A liveness bound for a loaded machine; the tests assert their own timing.
-	return waitAttemptWithin(t, s, want, 30*time.Second)
+	// It outlasts markerBound so a fake engine that gives up waiting exits 3
+	// and that failure reaches the test before this wait does.
+	return waitAttemptWithin(t, s, want, 2*markerBound)
 }
 
 func waitAttemptWithin(t *testing.T, s *store.Store, want string, bound time.Duration) store.Attempt {
