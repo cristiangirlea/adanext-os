@@ -232,6 +232,18 @@ func TestHelperFakeEngine(t *testing.T) {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		os.Exit(0)
 	}
+	if script == "crash_with_child_stdout" {
+		// The engine fails before it answers the start, and its child keeps
+		// stdout open.
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
+		child.Stdout = os.Stdout
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		awaitMarker(hasChild)
+		os.Exit(7)
+	}
 	if script == "slow_accept" || script == "no_start_answer" {
 		for {
 			time.Sleep(time.Hour)
@@ -982,6 +994,7 @@ func TestStopBeforeAcceptanceInterruptsThePreparingTask(t *testing.T) {
 	case <-time.After(markerBound):
 		t.Fatal("the start was never written")
 	}
+	stopWork(t, e, s)
 	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
 	defer cancel()
 	if err := e.Stop(ctx); err != nil {
