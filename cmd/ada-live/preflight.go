@@ -125,26 +125,41 @@ var (
 	codexRefused  = regexp.MustCompile(`(?i)\b(model_providers|env_key|api_key|experimental_bearer_token|http_headers|env_http_headers)\b`)
 	codexLogin    = regexp.MustCompile(`(?i)\b(preferred_auth_method|forced_login_method)\s*=\s*(\w*)`)
 	codexProvider = regexp.MustCompile(`(?i)\bmodel_provider\s*=\s*([\w-]*)`)
-	codexEscape   = regexp.MustCompile(`\\[uU]`)
 	codexTable    = regexp.MustCompile(`^\s*\[\s*(mcp_servers|plugins)\.([A-Za-z0-9_-]+)\s*\]`)
 )
 
-// uncomment cuts a TOML comment: a # outside a string.
-func uncomment(line string) string {
-	var quote byte
+// tomlScanner cuts TOML comments line by line, carrying an open multi-line string to the next line.
+type tomlScanner struct{ quote string } // "", ", ', """ or '''
+
+// uncomment cuts a TOML comment, a # outside a string, and refuses a unicode escape in a basic
+// string, which could spell a refused key.
+func (s *tomlScanner) uncomment(line string) (string, error) {
 	for i := 0; i < len(line); i++ {
-		switch c := line[i]; {
-		case quote == '"' && c == '\\':
+		c := line[i]
+		switch {
+		case s.quote == "" && c == '#':
+			return line[:i], nil
+		case s.quote == "" && (c == '"' || c == '\''):
+			s.quote = string(c)
+			if triple := strings.Repeat(s.quote, 3); strings.HasPrefix(line[i:], triple) {
+				s.quote = triple
+				i += 2
+			}
+		case s.quote == "":
+		case s.quote[0] == '"' && c == '\\':
+			if i+1 < len(line) && (line[i+1] == 'u' || line[i+1] == 'U') {
+				return "", errors.New("the codex config holds a unicode escape, which could spell a refused key")
+			}
 			i++
-		case quote != 0 && c == quote:
-			quote = 0
-		case quote == 0 && (c == '"' || c == '\''):
-			quote = c
-		case quote == 0 && c == '#':
-			return line[:i]
+		case strings.HasPrefix(line[i:], s.quote):
+			i += len(s.quote) - 1
+			s.quote = ""
 		}
 	}
-	return line
+	if len(s.quote) == 1 {
+		s.quote = "" // a one-line string ends with its line
+	}
+	return line, nil
 }
 
 // codexConfig refuses, failing closed, a codex config.toml that could sign in with or send an API
@@ -153,13 +168,14 @@ func uncomment(line string) string {
 // servers and plugins it declares. Comments are skipped.
 func codexConfig(data []byte) ([]string, error) {
 	var found []string
+	var toml tomlScanner
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
-		line := uncomment(scanner.Text())
-		bare := strings.NewReplacer(`"`, "", "'", "").Replace(line)
-		if codexEscape.MatchString(line) {
-			return nil, errors.New("the codex config holds a unicode escape, which could spell a refused key")
+		line, err := toml.uncomment(scanner.Text())
+		if err != nil {
+			return nil, err
 		}
+		bare := strings.NewReplacer(`"`, "", "'", "").Replace(line)
 		if m := codexRefused.FindString(bare); m != "" {
 			return nil, fmt.Errorf("the codex config holds %s", m)
 		}
@@ -218,7 +234,8 @@ func managedClaudeSettings(goos string) []string {
 	return []string{"/etc/claude-code/managed-settings.json"}
 }
 
-// managedCodexConfigs are codex's system-wide config files on goos; Windows has none.
+// managedCodexConfigs are codex's system-wide config files on goos; Windows has none. The
+// managed_config.toml in codex's home is read on every OS besides these.
 func managedCodexConfigs(goos string) []string {
 	if goos == "windows" {
 		return nil

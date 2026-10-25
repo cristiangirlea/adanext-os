@@ -1476,7 +1476,7 @@ file becomes this section's evidence and the live check of the #58 environment l
   | network | unsupported in every mode | requested (readonly, auto: the sandbox keeps it off), unsupported (yolo) |
   | approvals | unsupported (#7) | unsupported (#7) |
   | continuation | unsupported until M6 | unsupported until M6 |
-  | cancellation | enforced by adad (process tree) | enforced by adad (process tree) |
+  | cancellation | enforced by adad on Windows and Linux (process tree), requested on macOS (process group) | enforced by adad on Windows and Linux (process tree), requested on macOS (process group) |
   | usage reporting | requested (turns, tokens, cost) | requested (tokens) |
   | model discovery | unsupported: a model is passed as given | unsupported |
   | time limit | enforced by hrn's timeout | enforced by hrn's timeout |

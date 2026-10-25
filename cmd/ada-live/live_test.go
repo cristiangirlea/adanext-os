@@ -162,6 +162,12 @@ func TestCodexConfigWithAnAPIKeyIsRefused(t *testing.T) {
 		"[mcp_servers.s]\nhttp_headers = { Authorization = \"Bearer k\" }\n": false,
 		"[mcp_servers.s]\nenv_http_headers = { \"X\" = \"Y\" }\n":            false,
 		"[mcp_servers.s.http_headers]\nAuthorization = \"Bearer k\"\n":       false,
+		// A backslash is an escape only in a basic string, as TOML reads it.
+		`[projects.'C:\Users\x']` + "\ntrust_level = \"trusted\"\n": true,
+		`command = "C:\\Users\\x"` + "\n":                           true,
+		// A multi-line string hides no # from the next line.
+		"profiles = { p = { d = \"\"\"\n#\"\"\", model_provider = \"oss\" } }\n": false,
+		"profiles = { p = { d = '''\n#''', model_provider = \"oss\" } }\n":       false,
 	} {
 		if _, err := codexConfig([]byte(config)); (err == nil) != ok {
 			t.Errorf("%q: %v", config, err)
@@ -248,6 +254,17 @@ func TestManagedSettingsGoThroughTheSameChecks(t *testing.T) {
 		if len(managedClaudeSettings(goos)) == 0 {
 			t.Errorf("%s: no managed claude settings path", goos)
 		}
+	}
+	// codex's home holds a managed config on every OS.
+	c.codexManaged = nil
+	if err := os.MkdirAll(c.codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.codexHome, "managed_config.toml"), []byte("model_provider = \"oss\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.preflight(context.Background(), planRunner{}, "codex", "cli", map[string]any{}); err == nil || !strings.Contains(err.Error(), "managed_config.toml") {
+		t.Fatalf("codex's managed config with another provider: %v", err)
 	}
 	if len(managedCodexConfigs("linux")) == 0 || len(managedCodexConfigs("darwin")) == 0 {
 		t.Error("no codex system config path")

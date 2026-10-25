@@ -129,6 +129,12 @@ func TestAnAttemptWhoseProviderWalkFailsOrIsTruncatedIsFlagged(t *testing.T) {
 			}
 			return source.ProviderState(root, providerWalkLimit)
 		}},
+		{"failed before", func(root string, limit int, after bool) (map[string]string, bool, error) {
+			if after {
+				return source.ProviderState(root, limit)
+			}
+			return nil, false, errors.New("unreadable")
+		}},
 		{"failed after", func(root string, limit int, after bool) (map[string]string, bool, error) {
 			if after {
 				return nil, false, errors.New("unreadable")

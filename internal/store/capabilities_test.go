@@ -89,3 +89,25 @@ func TestProviderChangesAreRecordedOnTheAttemptAndShownWithTheTask(t *testing.T)
 		t.Fatal("Flagged: nothing changed must not flag, an unfinished assessment must")
 	}
 }
+
+func TestAFinishedAttemptWithAWorkspaceAndNoAssessmentIsFlagged(t *testing.T) {
+	s := openTestStore(t)
+	boundTask(t, s)
+	if err := s.write(ctx, "alice", func(tx *Tx) error { _, err := tx.RecordWorkspace(ctx, testWorkspace()); return err }); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.Task(ctx, "alice", "t1")
+	if err != nil || !task.Attempt.Workspace || task.Attempt.ProviderFlagged() {
+		t.Fatalf("a pending attempt: %+v, %v", task.Attempt, err)
+	}
+	if err := s.write(ctx, "alice", func(tx *Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE attempts SET state='ended_ok',ended='now' WHERE id='a1'")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task, err = s.Task(ctx, "alice", "t1")
+	if err != nil || !task.Attempt.Workspace || task.Attempt.ProviderChanges != nil || !task.Attempt.ProviderFlagged() {
+		t.Fatalf("a finished attempt: %+v, %v", task.Attempt, err)
+	}
+}

@@ -330,11 +330,15 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	// Deferred before the supervisor's close, so it runs after the engine's whole tree has
 	// ended: no descendant can still change the worktree once its provider changes are recorded.
 	var providerBefore map[string]string
-	var providerUnknown, engineStarted bool
+	var providerWalked, providerUnknown, engineStarted bool
 	if workspace {
 		defer func() {
-			if engineStarted {
+			switch {
+			case engineStarted:
 				e.recordProviderChanges(a, work, providerBefore, providerUnknown)
+			case providerWalked && !providerUnknown:
+				// No engine ran in a fully walked worktree: it changed nothing.
+				e.saveProviderChanges(a, store.ProviderChanges{})
 			}
 		}()
 	}
@@ -397,7 +401,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		}
 		var err error
 		providerBefore, providerUnknown, err = e.providerState(work, providerWalkLimit)
-		providerUnknown = providerUnknown || err != nil
+		providerWalked, providerUnknown = true, providerUnknown || err != nil
 	}
 	maxTurns, timeout, err := e.cfg.Store.AttemptLimits(ctx, a.ID)
 	if err != nil {

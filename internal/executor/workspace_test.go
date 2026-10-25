@@ -283,7 +283,8 @@ func TestAMismatchedWorkspaceGoesToRecoveryRequiredAndIsNotRebuilt(t *testing.T)
 			e.LaunchAttempt("attempt")
 			waitAttemptPrepared(t, s, "recovery_required")
 			task, err := s.Task(context.Background(), "u", "task")
-			if err != nil || task.State != store.RecoveryRequired {
+			// A worktree that no longer matches stays flagged: nothing vouches for it.
+			if err != nil || task.State != store.RecoveryRequired || !task.Attempt.ProviderFlagged() {
 				t.Fatalf("task = %+v, %v", task, err)
 			}
 			events, err := s.Events(context.Background(), "u", "attempt", 0)
@@ -557,5 +558,12 @@ func TestTheEngineIsVerifiedAfterTheWorkspaceChecksJustBeforeItsLaunch(t *testin
 	waitAttemptPrepared(t, s, "ended_failed")
 	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("a replaced engine was launched: %v", err)
+	}
+	// No engine ran in the walked worktree: nothing to flag.
+	if changes := waitProviderChanges(t, s); changes.Flagged() {
+		t.Fatalf("changes = %+v", changes)
+	}
+	if task, err := s.Task(context.Background(), "u", "task"); err != nil || task.Attempt.ProviderFlagged() {
+		t.Fatalf("attempt = %+v, %v", task.Attempt, err)
 	}
 }

@@ -251,6 +251,11 @@ func (e *Executor) recordProviderChanges(a store.Attempt, work string, before ma
 	for _, c := range source.DiffProviderState(before, after) {
 		changes.Changes = append(changes.Changes, store.ProviderChange{Path: c.Path, Change: c.Change})
 	}
+	e.saveProviderChanges(a, changes)
+}
+
+// saveProviderChanges records an assessment on the attempt and tells its subscribers.
+func (e *Executor) saveProviderChanges(a store.Attempt, changes store.ProviderChanges) {
 	if err := e.owned(a.ID, func(tx *store.Tx) error { return tx.RecordProviderChanges(context.Background(), a.ID, changes) }); err != nil {
 		return
 	}

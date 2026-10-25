@@ -300,7 +300,8 @@ func (c *config) preflight(ctx context.Context, r runner, backend, cli string, r
 		if err := codexSignIn(status); err != nil {
 			return err
 		}
-		for _, name := range append([]string{filepath.Join(c.codexHome, "config.toml")}, c.codexManaged...) {
+		home := []string{filepath.Join(c.codexHome, "config.toml"), filepath.Join(c.codexHome, "managed_config.toml")}
+		for _, name := range append(home, c.codexManaged...) {
 			data, err := os.ReadFile(name)
 			if errors.Is(err, os.ErrNotExist) {
 				continue
