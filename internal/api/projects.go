@@ -167,6 +167,8 @@ type snapshotJSON struct {
 	Untracked   []snapshotFileJSON `json:"untracked"`
 	CreatedBy   string             `json:"created_by"`
 	Created     string             `json:"created"`
+	// ProviderConfiguration is what the worktree built from this snapshot holds of it; null before it was recorded.
+	ProviderConfiguration *store.ProviderConfiguration `json:"provider_configuration"`
 }
 
 func snapshotValue(s store.Snapshot) snapshotJSON {
@@ -174,7 +176,29 @@ func snapshotValue(s store.Snapshot) snapshotJSON {
 	for _, f := range s.Untracked {
 		files = append(files, snapshotFileJSON{f.Path, f.Mode, artifactJSON(f.Artifact)})
 	}
-	return snapshotJSON{s.ID, s.Project, s.BaseCommit, s.Fingerprint, artifactJSON(s.Staged), artifactJSON(s.Unstaged), files, s.CreatedBy, s.Created}
+	return snapshotJSON{s.ID, s.Project, s.BaseCommit, s.Fingerprint, artifactJSON(s.Staged), artifactJSON(s.Unstaged), files, s.CreatedBy, s.Created, s.ProviderConfiguration}
+}
+
+// maxProviderPaths bounds the provider paths a snapshot records; Count keeps the total.
+const maxProviderPaths = 100
+
+// snapshotProvider is the provider configuration a capture puts in a worktree: every tracked
+// provider path, and an untracked one only when the selection took it.
+func snapshotProvider(c source.Capture) *store.ProviderConfiguration {
+	selected := map[string]bool{}
+	for _, f := range c.Untracked {
+		selected[f.Path] = true
+	}
+	p := &store.ProviderConfiguration{Paths: []string{}}
+	for _, path := range c.Inspection.ProviderPaths {
+		if path.Untracked && !selected[path.Path] {
+			continue
+		}
+		if p.Count++; len(p.Paths) < maxProviderPaths {
+			p.Paths = append(p.Paths, path.Path)
+		}
+	}
+	return p
 }
 
 // validSelection refuses an oversized, duplicated or malformed list, and an
@@ -290,7 +314,7 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		captureError(w, source.ErrSourceChanged)
 		return
 	}
-	snap := store.Snapshot{Project: project, BaseCommit: c.Inspection.Identity.Head, Fingerprint: c.Inspection.Fingerprint, State: snapshotState(c.Inspection)}
+	snap := store.Snapshot{Project: project, BaseCommit: c.Inspection.Identity.Head, Fingerprint: c.Inspection.Fingerprint, State: snapshotState(c.Inspection), ProviderConfiguration: snapshotProvider(c)}
 	if snap.ID, err = newID(); err != nil {
 		writeInternalError(w, err)
 		return

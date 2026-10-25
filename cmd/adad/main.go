@@ -18,6 +18,7 @@ import (
 
 	"github.com/cristiangirlea/ada-os/internal/api"
 	"github.com/cristiangirlea/ada-os/internal/artifact"
+	"github.com/cristiangirlea/ada-os/internal/engine"
 	"github.com/cristiangirlea/ada-os/internal/executor"
 	"github.com/cristiangirlea/ada-os/internal/ipc"
 	"github.com/cristiangirlea/ada-os/internal/source"
@@ -67,6 +68,58 @@ func (c *coordinatorStop) StopWork() {
 	c.once.Do(func() { close(c.requested) })
 }
 
+// pinnedEngineSHA256 is the hash engine/engine.json, built into this binary, records for this
+// platform. Nothing beside the engine is read for it.
+func pinnedEngineSHA256() (string, error) {
+	pin, err := engine.Pinned()
+	if err != nil {
+		return "", err
+	}
+	return pin.Expected(runtime.GOOS, runtime.GOARCH)
+}
+
+// The test seams for the expected hash and the application's directory.
+var (
+	expectedEngineSHA256 = pinnedEngineSHA256
+	appDirectory         = func() (string, error) {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Dir(exe), nil
+	}
+)
+
+// resolveEngine finds the engine through -engine or in the application's directory and checks
+// its SHA-256 against the embedded one; an -engine-sha256 flag may only repeat that hash. With no
+// engine anywhere it returns no path, and adad serves without one.
+func resolveEngine(o *options) (path, hash string, err error) {
+	want, wantErr := expectedEngineSHA256()
+	if testEngineFlag && o.engineHash != "" {
+		want, wantErr = o.engineHash, nil
+	}
+	if o.engineHash != "" && (wantErr != nil || o.engineHash != want) {
+		return "", "", fmt.Errorf("-engine-sha256 %s is not the engine this adad was built for", o.engineHash)
+	}
+	dir := ""
+	if o.enginePath == "" {
+		if dir, err = appDirectory(); err != nil {
+			return "", "", fmt.Errorf("application directory: %w", err)
+		}
+	}
+	path, found, err := engine.Locate(o.enginePath, dir, runtime.GOOS)
+	if err != nil || !found {
+		return "", "", err
+	}
+	if wantErr != nil {
+		return "", "", wantErr
+	}
+	if err := engine.Verify(path, want); err != nil {
+		return "", "", err
+	}
+	return path, want, nil
+}
+
 func isLowerHex(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && hex.EncodeToString(decoded) == value
@@ -86,8 +139,8 @@ func parseFlags(args []string, output io.Writer) (*options, *flag.FlagSet, error
 	flags.StringVar(&o.stateDir, "state-dir", defaultStateDir(), "coordinator state directory")
 	flags.StringVar(&o.name, "name", "adad", "coordinator endpoint name")
 	flags.BoolVar(&o.detach, "detach", false, "keep neither the desktop's Windows job nor any handle or descriptor it inherited; re-exec before serving")
-	flags.StringVar(&o.enginePath, "engine", "", "pinned Harness engine path")
-	flags.StringVar(&o.engineHash, "engine-sha256", "", "pinned Harness engine SHA-256")
+	flags.StringVar(&o.enginePath, "engine", "", "pinned Harness engine path; default hrn in the application's directory")
+	flags.StringVar(&o.engineHash, "engine-sha256", "", "optional: the pinned engine's SHA-256 again, which must equal the one built into adad")
 	flags.IntVar(&o.concurrency, "concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")
 	flags.DurationVar(&o.preparingDeadline, "preparing-deadline", 2*time.Minute, "how long a launched engine has to say hello and accept the start before the attempt fails")
 	return o, flags, flags.Parse(args)
@@ -221,8 +274,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "adad: unexpected arguments")
 		return 2
 	}
-	if (opts.enginePath == "") != (opts.engineHash == "") || (opts.engineHash != "" && (len(opts.engineHash) != 64 || !isLowerHex(opts.engineHash))) {
-		fmt.Fprintln(stderr, "adad: -engine and -engine-sha256 must be paired; SHA-256 must be 64 lowercase hex characters")
+	if opts.engineHash != "" && (len(opts.engineHash) != 64 || !isLowerHex(opts.engineHash)) {
+		fmt.Fprintln(stderr, "adad: -engine-sha256 must be 64 lowercase hex characters")
 		return 2
 	}
 	if ctx.Err() != nil {
@@ -244,6 +297,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 	}
+	// Found and checked before serving: a wrong engine refuses the start rather than every launch.
+	enginePath, engineHash, err := resolveEngine(opts)
+	if err != nil {
+		return failBeforeLock(ipc.Config{StateDir: opts.stateDir, Name: opts.name}, stderr, "adad: engine:", err)
+	}
+	opts.enginePath, opts.engineHash = enginePath, engineHash
 	if err := os.MkdirAll(opts.stateDir, 0700); err != nil {
 		fmt.Fprintln(stderr, "adad: create state directory:", err)
 		return 1
@@ -344,7 +403,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		cfg.Artifacts, cfg.Store, cfg.Hub, cfg.Generation, cfg.Workspaces = artifacts, s, hub, generation, workspaces
 		local = executor.New(cfg)
 		stop.local = local
-		execution.EngineSHA256, execution.Runner = opts.engineHash, local
+		execution.EngineSHA256, execution.Runner, execution.Capabilities = opts.engineHash, local, local
 		defer func() {
 			if err := stopExecutor(); err != nil {
 				fmt.Fprintln(stderr, "adad: stop executor:", err)

@@ -20,7 +20,9 @@ case "$build" in "$root"/.hrn/e2e-bin.*) ;; *) echo "unexpected e2e build direct
 trap 'rm -rf -- "$build"' EXIT
 suffix=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) suffix=".exe";; esac
-go build -o "$build/adad$suffix" ./cmd/adad
+# The fakeengine build of adad takes the fake engine's hash from -engine-sha256; a release build
+# only ever trusts the pin embedded in it.
+go build -tags=fakeengine -o "$build/adad$suffix" ./cmd/adad
 go build -tags=fakeengine -o "$build/fakeengine$suffix" ./internal/executor/testdata/fakeengine
 go build -tags=fakeengine -o "$build/slowengine$suffix" ./desktop/e2e/slowengine
 go build -tags=fakeengine -o "$build/testseed$suffix" ./internal/store/testseed

@@ -114,13 +114,11 @@ func TestRunAcceptsEngineFlagsAndStopsWithItsContext(t *testing.T) {
 	}
 }
 
-func TestEngineFlagsRequirePairAndLowercaseSHA256(t *testing.T) {
+func TestAnEngineSHA256FlagMustBeLowercaseHex(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
 	}{
-		{"path only", []string{"-engine", "engine"}},
-		{"hash only", []string{"-engine-sha256", strings.Repeat("a", 64)}},
 		{"short hash", []string{"-engine", "engine", "-engine-sha256", "abc"}},
 		{"uppercase hash", []string{"-engine", "engine", "-engine-sha256", strings.Repeat("A", 64)}},
 		{"nonhex hash", []string{"-engine", "engine", "-engine-sha256", strings.Repeat("g", 64)}},

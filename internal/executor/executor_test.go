@@ -180,6 +180,8 @@ func TestHelperFakeEngine(t *testing.T) {
 		backend["options"] = []string{"mode", "effort"}
 	case "no_effort":
 		backend["options"] = []string{"mode", "model"}
+	case "with_limits":
+		backend["options"] = []string{"model", "mode", "effort", "timeout", "max_turns"}
 	}
 	line(1, "hello", hello)
 	if script == "hello_no_read" || script == "hello_partial_read" {
@@ -473,6 +475,12 @@ func TestHelperFakeEngine(t *testing.T) {
 				os.Exit(3)
 			}
 		}
+	}
+	if script == "write_provider" {
+		// The agent adds a project hook to its worktree.
+		cwd, _ := os.Getwd()
+		_ = os.MkdirAll(filepath.Join(cwd, ".claude"), 0o700)
+		_ = os.WriteFile(filepath.Join(cwd, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0o600)
 	}
 	final := "done"
 	if script == "big" || script == "big_block" {

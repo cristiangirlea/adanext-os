@@ -82,7 +82,7 @@ func TestVersionOneUnscopedCacheSurvivesMigrationWithoutProjectScope(t *testing.
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if err := upgraded.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != 7 {
+	if err := upgraded.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != 8 {
 		t.Fatalf("version %d: %v", version, err)
 	}
 	unexpected := func(*Tx) ([]byte, error) { t.Fatal("cached callback ran"); return nil, nil }

@@ -97,8 +97,12 @@ type Inspection struct {
 	Files       []string  `json:"files"`
 	Fingerprint string    `json:"fingerprint"`
 	Blockers    []Blocker `json:"blockers"`
+	// Findings are reported and do not block an import.
+	Findings []Finding `json:"findings"`
 	// Paths are the fingerprint's per-path entries, which a snapshot keeps for drift.
 	Paths []PathEntry `json:"-"`
+	// ProviderPaths are every provider configuration path, tracked or untracked, which a snapshot keeps.
+	ProviderPaths []ProviderPath `json:"-"`
 }
 
 // PathEntry is one changed or untracked path's part of the fingerprint: its
@@ -138,7 +142,7 @@ func newInspection() Inspection {
 	return Inspection{
 		Identity: Identity{Remotes: []Remote{}},
 		Status:   Status{Staged: []Change{}, Unstaged: []Change{}, Untracked: []string{}, Unmerged: []string{}},
-		History:  []Commit{}, Files: []string{}, Blockers: []Blocker{}, Paths: []PathEntry{},
+		History:  []Commit{}, Files: []string{}, Blockers: []Blocker{}, Findings: []Finding{}, Paths: []PathEntry{},
 	}
 }
 
@@ -248,6 +252,7 @@ func (in *Inspector) inspectMirror(ctx context.Context, path, mirror string) (In
 		return r, nil, err
 	}
 	r.Status = parseStatus(out)
+	r.findProvider(idx)
 	if r.Identity.Head != "" {
 		out, err := in.Git.run(ctx, mirror, root, "log", "-n", "20", "--no-decorate", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e", "HEAD", "--")
 		if err != nil {

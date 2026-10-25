@@ -71,7 +71,10 @@ func TestStartRecordsPolicyOnceAndRefusesUnknownFields(t *testing.T) {
 	if code, _ := f.request(t, "POST", path, "unknown", "1", []byte(`{"backend":"codex","mode":"auto","surprise":true}`)); code != 400 {
 		t.Fatalf("unknown field = %d", code)
 	}
-	for _, invalid := range []string{`{"backend":"codex","mode":"ask"}`, `{"backend":"","mode":"auto"}`, `{"backend":"codex"}`} {
+	if code, _ := f.request(t, "POST", path, "ask", "1", []byte(`{"backend":"codex","mode":"ask"}`)); code != 409 {
+		t.Fatalf("mode ask = %d, want the matrix's 409", code)
+	}
+	for _, invalid := range []string{`{"backend":"","mode":"auto"}`, `{"backend":"codex"}`, `{"backend":"codex","mode":"Auto!"}`} {
 		if code, _ := f.request(t, "POST", path, "invalid-"+invalid, "1", []byte(invalid)); code != 400 {
 			t.Fatalf("invalid policy %s = %d", invalid, code)
 		}
@@ -132,7 +135,7 @@ func TestStartRejectsInvalidBackendModelAndEffort(t *testing.T) {
 			t.Fatalf("body %q = %d %s", body, code, response)
 		}
 	}
-	if code, response := f.request(t, "POST", path, "valid", "1", []byte(`{"backend":"a_0-","model":"`+strings.Repeat("m", 128)+`","effort":"","mode":"auto"}`)); code != 200 {
+	if code, response := f.request(t, "POST", path, "valid", "1", []byte(`{"backend":"codex","model":"`+strings.Repeat("m", 128)+`","effort":"","mode":"auto"}`)); code != 200 {
 		t.Fatalf("valid body = %d %s", code, response)
 	}
 }

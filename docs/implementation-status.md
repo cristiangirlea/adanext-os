@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated 2026-10-19. Statuses: not started, in progress, implemented (code merged), verified
+Updated 2026-10-25. Statuses: not started, in progress, implemented (code merged), verified
 (evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
 are in `docs/backlog.md`.
 
@@ -10,7 +10,7 @@ are in `docs/backlog.md`.
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100 | M4 first local workflow |
-| M4 First local workflow | not started | | |
+| M4 First local workflow | in progress | Slices in `docs/backlog.md`; M4.1 (#112) code on `m4/real-engine` | M4.1 live runs (owner's plans, `cmd/ada-live`), then M4.2 |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
 | M6 Resume intelligence | not started | | |
@@ -407,6 +407,29 @@ and `go test -race` for every package in `golang:1.26` in Docker.
 
 Not verified: macOS, a real hrn run in a worktree, removal of worktrees and branches (M7), a
 task's second attempt (#98).
+
+### M4.1 the real engine, code (2026-10-25, #112)
+
+Implemented, not verified: the live runs are still to come. The engine pin carries the
+reproducible build's SHA-256 per platform, embedded into `adad`, which finds the engine through
+`-engine` or in its own directory and refuses any other hash; the capability matrix, served at
+`GET /v1/capabilities` and checked on every start (409 `unsupported_options`); starts' turn and
+time limits; provider configuration reported at inspection, on snapshots and tasks, and an
+attempt's changes to it flagged (migration 0008); and the opt-in live harness `cmd/ada-live`.
+The decisions and the static table are in the 2026-10-25 entry of the decisions log, with the
+reproducibility proof (the same five hashes from a Windows host and a Linux container).
+
+A dry run of the harness (`-dry-run`, no start and so no model call) on the owner's PC, with the
+pinned engine built by `build-engine.sh` and an `adad` built from this branch, recorded both
+CLIs' plan sign-ins (masked), their versions matching the table, the fixture's hook reported at
+inspection and on the task, and the readonly cells reading `requested`.
+
+Evidence at the commit that adds this section: `.hrn/check.sh` passed (`== windows exit 0, linux
+exit 0`), the seven desktop end-to-end tests included; `-race` ran in the Linux leg only.
+
+Not done here: the live claude and codex readonly runs (`ADANEXT_LIVE=1 go run ./cmd/ada-live
+-backend claude,codex -state-dir <dir> -engine .engine/hrn.exe -adad <adad.exe>`), whose results
+file becomes this section's evidence and the live check of the #58 environment list.
 
 ## Decisions log
 
@@ -1416,6 +1439,82 @@ task's second attempt (#98).
   command must show a plan sign-in, and its settings must hold no `apiKeyHelper` or key in
   `env`; the output is recorded with identifiers masked. Live runs are behind an explicit opt-in
   that CI never sets, with a turn and time cap.
+
+- **2026-10-25, M4.1 the real engine (#112).** Points the backlog entry left open.
+  Engine identity: `scripts/build-engine.sh` builds reproducibly (no cgo, `-trimpath`,
+  `-buildvcs=false`, `-ldflags=-buildid=`, the pinned toolchain, no user go env file, `GOFLAGS`
+  or `GOAMD64`-style tuning), so a new pin's hashes are produced by cross-building every target
+  from one host, `GOOS=<os> GOARCH=<arch> bash scripts/build-engine.sh <clean checkout>`, and
+  pasting each printed `pin entry` into `engine/engine.json`'s `sha256`; the script fails when a
+  build differs from a recorded hash. Proof at `8dd2659`: Windows 11 (go1.26.4 windows/amd64)
+  and a `golang:1.26` Linux container (go1.26.4 linux/amd64 via `GOTOOLCHAIN`) each built all
+  five targets from the same clean clone and got the same bytes: windows/amd64 `ceb7e138…`,
+  linux/amd64 `95a9c4ee…`, linux/arm64 `a9515453…`, darwin/amd64 `02c0a011…`, darwin/arm64
+  `4fb8ee2b…` (full values in the pin). The pin is embedded into `adad` (`engine/pin.go`,
+  `go:embed`); nothing beside the binary is read for it. `adad` finds the engine through
+  `-engine` or as `hrn`/`hrn.exe` in its own directory, hashes it before serving and refuses to
+  start on any other hash; with no engine anywhere it serves without one, as before.
+  `-engine-sha256` stays, for the desktop's launcher, but may only repeat the embedded hash.
+  Only the end-to-end test build of `adad` (`-tags=fakeengine`, built by `scripts/test-e2e.sh`)
+  takes the expected hash from that flag, to run its fake engine; the switch is a compile-time
+  constant, and no release build sets the tag (`TestAReleaseBuildNeverTakesTheExpectedHashFromAFlag`).
+  The capability matrix is `internal/engine`'s static table, recorded 2026-10-25 against
+  claude `2.1.284` and codex `0.163.0-alpha.11` (each CLI's own `--version` on the owner's PC).
+  Its sources, all at the pin: `internal/agent/claude.go` (readonly is `--permission-mode
+  plan`, auto `acceptEdits`, yolo `bypassPermissions`; `--max-turns`; options model, mode,
+  effort, timeout, max_turns, mcp), `internal/agent/codex.go` (readonly is `--sandbox
+  read-only`, auto `--sandbox workspace-write`, yolo `--dangerously-bypass-approvals-and-sandbox`;
+  options model, mode, effort, timeout), `internal/agent/cli.go` (the advertised capabilities),
+  `internal/execproto/protocol.go` (mode `ask` and any option a backend does not list are
+  rejected `unsupported`; `approvals: false`), `docs/exec-protocol.md`, and Harness's
+  `TestCLIStopsOnTimeout` for the time limit. The table:
+
+  | Row | claude | codex |
+  |---|---|---|
+  | read-only (readonly) | requested: plan mode, the CLI's rule, not a sandbox | requested: codex's read-only sandbox |
+  | workspace writes and shell (auto / yolo) | requested: acceptEdits / bypassPermissions, nothing keeps it in the worktree | requested: workspace-write sandbox / no sandbox |
+  | network | unsupported in every mode | requested (readonly, auto: the sandbox keeps it off), unsupported (yolo) |
+  | approvals | unsupported (#7) | unsupported (#7) |
+  | continuation | unsupported until M6 | unsupported until M6 |
+  | cancellation | enforced by adad (process tree) | enforced by adad (process tree) |
+  | usage reporting | requested (turns, tokens, cost) | requested (tokens) |
+  | model discovery | unsupported: a model is passed as given | unsupported |
+  | time limit | enforced by hrn's timeout | enforced by hrn's timeout |
+  | turn limit | requested: `--max-turns` | unsupported |
+  | checks (M4.2) | unsandboxed | unsandboxed |
+
+  Readonly cells name the live run that will show them; none is `enforced` by a CLI until a live
+  run has. Only the cells that depend on the CLI read `unverified` for another installed version
+  (or when no CLI or no version is found, or the engine's hello answers differently from the
+  table); what adad and hrn hold does not depend on the CLI. The installed version comes from
+  the engine's hello (which names the CLI it found) and the CLI's own `--version`, run directly
+  with the #58 environment and a 10 s timeout, never through a shell, so on Windows only an
+  `.exe` is run and a `.cmd` shim reads unverified; the probe is cached for five minutes.
+  `GET /v1/capabilities` serves it to any account of the coordinator, not only to members of a
+  project, since it is about the host and holds nothing of a project's. A start the matrix
+  refuses answers 409 `unsupported_options` before the transaction, so nothing is recorded,
+  prepared or cloned. A start may set `max_turns` and `timeout`, recorded on the attempt
+  (migration 0008) and sent to hrn only when set: the live run's caps go through `adad` this
+  way, and codex's missing turn limit is refused rather than ignored.
+  Provider configuration: any work-tree path through `.claude` or `.codex`, or named
+  `.mcp.json`, in any case. Inspection reports them as the non-blocking finding
+  `provider_configuration` (CLAUDE.md and AGENTS.md stay in the instruction files); a snapshot
+  records those its worktree will hold, and the task shows them. An attempt's changes are found
+  by walking its worktree, not through git, since an ignored `.claude/settings.local.json` is
+  loaded all the same: the provider files' contents (links by target, never followed) before the
+  engine starts and again after its whole process tree has ended, recorded on the attempt as
+  `provider_changes` with `provider_flagged`, which M4.3 marks in Changes and shows before a
+  refine. A walk past 200,000 entries or one that fails flags the attempt rather than passing it.
+  User-level configuration (plugins, MCP servers, `apiKeyHelper`, keys in `env`) is read only by
+  the live harness's preflight and never sent over the API.
+  The live harness is `cmd/ada-live`: it refuses unless `ADANEXT_LIVE=1`
+  (`TestTheHarnessRefusesWithoutTheOptIn`; `TestCINeverSetsTheLiveOptIn` reads the workflows and
+  `check.sh`), needs the backend named, caps each run at `-timeout` (default 3m, at most 10m) and
+  claude at `-max-turns` (default 3), refuses a sign-in that is not a plan
+  (`claude auth status`: `authMethod` claude.ai, first-party, a subscription; `codex login
+  status`: "Logged in using ChatGPT") or settings with an `apiKeyHelper`, a key or provider
+  switch in `env`, an API key in codex's config or `auth.json`, and writes its results with
+  identifiers masked under the state directory. `-dry-run` does everything but the start.
 
 ## Owner actions pending
 

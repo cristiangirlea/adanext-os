@@ -11,15 +11,16 @@ taking a slice, and don't reopen a recorded decision.
 
 | Path | Holds |
 |---|---|
-| `internal/engine/` | The pinned Harness engine: its source revision and the identity of a built binary. |
+| `internal/engine/` | The pinned Harness engine: its source revision, the identity of a built binary, and the capability matrix starts are checked against. |
 | `internal/artifact/` | Durable content-addressed artifacts and their filesystem boundary. |
 | `internal/executor/` | Local supervision of the pinned engine and attempt event ingestion. |
 | `cmd/adad/` | The coordinator process and its lifecycle. |
+| `cmd/ada-live/` | The opt-in live harness (`ADANEXT_LIVE=1`, never in CI): real readonly runs on the owner's plans. |
 | `internal/api/` | Versioned HTTP API and event subscriptions. |
 | `internal/store/` | SQLite state, schema migrations, and task records. |
 | `internal/ipc/` | Private local listener and singleton lock. |
-| `internal/source/` | Reading a user's repository: the git runner, the layout, config and index read in Go, the mirror git directory, inspection with its blockers, the capture a snapshot takes, and Ada's clone of each project with the attempts' worktrees and their manifests. |
-| `engine/engine.json` | The Harness revision Ada runs. Change it only in a slice that says why. |
+| `internal/source/` | Reading a user's repository: the git runner, the layout, config and index read in Go, the mirror git directory, inspection with its blockers and findings (provider configuration among them), the capture a snapshot takes, and Ada's clone of each project with the attempts' worktrees and their manifests. |
+| `engine/engine.json` | The Harness revision Ada runs and its build's SHA-256 per platform, embedded into `adad` by `engine/pin.go`. Change it only in a slice that says why. |
 | `ui/` | The React and TypeScript app both shells load. It reaches `adad` only through `AdaClient` (`ui/src/client/api.ts`); the adapters under `ui/src/client/adapters/` are the only modules that may touch the bridge or the network. |
 | `desktop/` | The Electron shell: main (the bridge to `adad` over its pipe or socket, the Node SSE client) and preload. Versions are pinned; the full layout arrives in M4. |
 | `scripts/check.sh` | Everything CI runs, in order. |

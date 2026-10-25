@@ -69,6 +69,11 @@ type Executor struct {
 	beforeRemove     func(hash string)               // Test seam between discard's reference check and its removal.
 	beforeCheck      func(attemptID string)          // Test seam between preparing the workspace and checking it before the engine starts.
 	beforeAnswer     func()                          // Test seam between the start write and the read of its answer.
+	versionArgs      []string                        // The CLIs' version command; tests run a helper instead.
+	versionTimeout   time.Duration
+	probeMu          sync.Mutex // One probe of the installed CLIs at a time.
+	probed           map[string]engine.Installed
+	probedAt         time.Time
 }
 
 func New(cfg Config) *Executor {
@@ -81,7 +86,7 @@ func New(cfg Config) *Executor {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 1
 	}
-	return &Executor{cfg: cfg, active: make(map[string]*active)}
+	return &Executor{cfg: cfg, active: make(map[string]*active), versionArgs: []string{"--version"}, versionTimeout: 10 * time.Second}
 }
 
 // StopBudget covers an ignored cancel (stdin closed after one CancelGrace, the
@@ -192,6 +197,7 @@ type message struct {
 	Backends  []struct {
 		Name      string   `json:"name"`
 		Available bool     `json:"available"`
+		Detail    string   `json:"detail"`
 		Modes     []string `json:"modes"`
 		Options   []string `json:"options"`
 		Approvals *bool    `json:"approvals"`
@@ -319,6 +325,17 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		e.fail(a, fmt.Errorf("workspace: %w", err))
 		return
 	}
+	// Deferred before the supervisor's close, so it runs after the engine's whole tree has
+	// ended: no descendant can still change the worktree once its provider changes are recorded.
+	var providerBefore map[string]string
+	var providerUnknown, engineStarted bool
+	if workspace {
+		defer func() {
+			if engineStarted {
+				e.recordProviderChanges(a, work, providerBefore, providerUnknown)
+			}
+		}()
+	}
 	stderr, err := os.OpenFile(filepath.Join(base, "engine.stderr"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		e.fail(a, fmt.Errorf("stderr: %w", err))
@@ -383,6 +400,17 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			e.recoverWorkspace(a, reason, mismatch)
 			return
 		}
+		var err error
+		providerBefore, providerUnknown, err = source.ProviderState(work, providerWalkLimit)
+		providerUnknown = providerUnknown || err != nil
+	}
+	maxTurns, timeout, err := e.cfg.Store.AttemptLimits(ctx, a.ID)
+	if err != nil {
+		stdin.Close()
+		stdout.Close()
+		stdoutWriter.Close()
+		e.fail(a, fmt.Errorf("attempt limits: %w", err))
+		return
 	}
 	if err := cmd.Start(); err != nil {
 		stdin.Close()
@@ -400,6 +428,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		e.fail(a, fmt.Errorf("process supervision: %w", err))
 		return
 	}
+	engineStarted = true
 	_ = stdoutWriter.Close()
 	defer stdout.Close()
 	var inputMu sync.Mutex
@@ -752,6 +781,21 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			return
 		}
 		task["effort"] = a.Effort
+	}
+	// Sent only when set: hrn counts a present field as set, even zero.
+	if maxTurns > 0 {
+		if !contains(options, "max_turns") {
+			abort(errors.New("max_turns unsupported"))
+			return
+		}
+		task["max_turns"] = maxTurns
+	}
+	if timeout != "" {
+		if !contains(options, "timeout") {
+			abort(errors.New("timeout unsupported"))
+			return
+		}
+		task["timeout"] = timeout
 	}
 	if err := write(map[string]any{"type": "start", "attempt_id": a.ID, "task": task}); err != nil {
 		abort(preparingCause(fmt.Errorf("start write: %w", err)))
