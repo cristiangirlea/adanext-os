@@ -1351,9 +1351,7 @@ task's second attempt (#98).
   (M3.3's walk); a link or reparse point on its path refuses the check. The timeout is at most
   30 minutes and the output at most 16 MiB per check, with at most 16 checks per task; output
   beyond the cap is read and discarded, the log marked truncated, and the check keeps running.
-  Before each check the worktree's tracked files must match the tested commit; checks run in a
-  fresh detached worktree at that commit, as the baseline does; a check that changes them binds
-  nothing from then on.
+  Checks run in a fresh detached worktree at the tested commit, as the baseline does; the check worktree's path is built from ids and its admin directory recorded at creation, so M4.3's removal applies to it; after each check its worktree's tracked files must still match that commit, and a check that changes them does not bind it. Later checks are unaffected.
   Ada commits the agent's result as its own commit ("Agent changes", Ada's author) on
   `ada/<task>` before any check runs, so a check result and a review each bind a commit and not
   a work tree that can still change. The agent had a shell as the user, so Ada trusts none of

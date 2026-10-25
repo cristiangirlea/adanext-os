@@ -324,15 +324,14 @@ and finishes after M4.3. M4.5 comes last.
   imported-changes commit. Commits the agent made itself are kept beneath Ada's commit; a
   rewritten or moved history moves the attempt to `recovery_required`.
   Running. Each check runs as a managed process in a fresh detached worktree at the tested
-  commit, as the baseline does, removed afterwards by the rules of M4.3's removal; nothing the
+  commit, as the baseline does, at `<state>/projects/<id>/checks/<attempt>/<run>`, a path built from ids, its admin directory recorded when it is created, and both removed afterwards by the rules of M4.3's removal; nothing the
   agent left outside the commit reaches a check, and the attempt's worktree is never changed by
   one. It runs under the executor's process-tree supervision, output capped into artifacts,
   with the #58 list minus `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and under the same never-passed
   rule. A check may name further variables taken from `adad`'s environment, recorded with the
   check; a never-passed one is refused. The working directory is resolved at run
   time through no-follow handles (M3.3's walk); a link or reparse point on its path refuses the
-  check. Before each check the worktree's tracked files must match the tested commit; a check
-  that changes them is recorded as such, and its result and later ones do not bind the commit.
+  check. After each check, the tracked files of the check's worktree must still match the tested commit; a check that changes them is recorded as such and its result does not bind the commit. Later checks start from their own fresh worktree and are unaffected.
   Ada records the command, the environment's keys, the tested commit, the exit code, the
   duration and the log artifact. The first `/v1` route that serves a check log checks
   membership on each read (#3).
@@ -352,7 +351,7 @@ and finishes after M4.3. M4.5 comes last.
   from a new one, and the baseline run again after a check's definition changes; a result
   invalidated by a later edit; a check that edits a tracked file recorded as such, binding
   nothing; no check runs from a repository script unless the task declares it; the check's
-  environment holds no credential-profile variable and no never-passed variable; a working
+  environment holds no credential-profile variable and no never-passed variable; a further variable the check names reaches it from `adad`'s environment, and naming a never-passed one is refused; a check's worktree and its admin directory are gone after the check, and a crash in between finishes on the next try; a working
   directory that the tested commit holds as a symlink to outside is refused; an ignored file the
   agent left in its worktree is absent from the check's worktree; a check that edits a tracked
   file leaves the attempt's worktree unchanged; a check
