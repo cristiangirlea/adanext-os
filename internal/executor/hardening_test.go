@@ -602,6 +602,32 @@ func TestOneFailureRecordsOneCause(t *testing.T) {
 	}
 }
 
+func TestAStreamEndedByAStopIsNotACause(t *testing.T) {
+	// The stop begins once the start is written; its shutdown closes stdin, on
+	// which the engine exits, and only then does the stream end.
+	e, s, _, _ := testExecutor(t, "exit_on_stdin_close")
+	e.cfg.CancelGrace = naturalExitGrace
+	e.beforeAnswer = e.StopWork
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "recovery_required")
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recoveries, causes []string
+	for _, event := range events {
+		switch event.Kind {
+		case "recovery":
+			recoveries = append(recoveries, string(event.Payload))
+		case "executor_error":
+			causes = append(causes, string(event.Payload))
+		}
+	}
+	if len(recoveries) != 1 || !strings.Contains(recoveries[0], "engine exit not confirmed") || len(causes) != 0 {
+		t.Fatalf("recoveries = %q, causes = %q, want one recovery and no cause", recoveries, causes)
+	}
+}
+
 func TestAPINotesListEveryEventKind(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "api", "doc.go"))
 	if err != nil {

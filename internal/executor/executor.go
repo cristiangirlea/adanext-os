@@ -68,6 +68,7 @@ type Executor struct {
 	afterRunning     func()                          // Test seam between storing the attempt running and accepting its events.
 	beforeRemove     func(hash string)               // Test seam between discard's reference check and its removal.
 	beforeCheck      func(attemptID string)          // Test seam between preparing the workspace and checking it before the engine starts.
+	beforeAnswer     func()                          // Test seam between the start write and the read of its answer.
 }
 
 func New(cfg Config) *Executor {
@@ -649,16 +650,27 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 		}
 	}
-	// One failure records one cause. An engine whose stream ended is exiting:
-	// its exit status joins the cause, recorded once it is known. Otherwise the
-	// cause is recorded before the shutdown, whose exit error it explains.
+	// One failure records one cause. A stream that ends once Ada has begun the
+	// shutdown (a Stop or a cancel) ends because of it: the stop or the cancel
+	// is the cause, recorded where it was asked, so the end records none. An
+	// engine whose stream ended by itself is exiting: its exit status joins the
+	// cause, recorded once it is known. Otherwise the cause is recorded before
+	// the shutdown, whose exit error it explains.
 	abort := func(cause error) {
-		causeRecorded := !errors.Is(cause, io.EOF) && e.recordCause(a, cause)
+		ownEnd := false
+		if errors.Is(cause, io.EOF) || errors.Is(cause, os.ErrClosed) {
+			select {
+			case <-active.cancel:
+				ownEnd = true
+			default:
+			}
+		}
+		causeRecorded := !ownEnd && !errors.Is(cause, io.EOF) && e.recordCause(a, cause)
 		_, killed, waitErr := drain()
 		if waitErr != nil && !killed && !causeRecorded {
 			cause = fmt.Errorf("%w; engine exit: %v", cause, waitErr)
 		}
-		e.failFinal(a, cause, causeRecorded, killed)
+		e.failFinal(a, cause, causeRecorded || ownEnd, killed)
 	}
 	var preparingExpired atomic.Bool
 	// Closing stdout fails the read of a missing hello or accepted; the
@@ -716,6 +728,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	if err := write(map[string]any{"type": "start", "attempt_id": a.ID, "task": task}); err != nil {
 		abort(preparingCause(fmt.Errorf("start write: %w", err)))
 		return
+	}
+	if e.beforeAnswer != nil {
+		e.beforeAnswer()
 	}
 	answer, _, err := next("", true)
 	if err != nil {

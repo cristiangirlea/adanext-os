@@ -228,6 +228,10 @@ func TestHelperFakeEngine(t *testing.T) {
 		line(2, "rejected", map[string]any{"attempt_id": input.AttemptID, "error": map[string]any{"code": "unsupported"}})
 		os.Exit(2)
 	}
+	if script == "exit_on_stdin_close" {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}
 	if script == "slow_accept" || script == "no_start_answer" {
 		for {
 			time.Sleep(time.Hour)
@@ -969,8 +973,15 @@ func cancelReached(t *testing.T, marker string) {
 
 func TestStopBeforeAcceptanceInterruptsThePreparingTask(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "slow_accept")
+	// The stop comes once the start is written, never before the engine runs.
+	written := make(chan struct{})
+	e.beforeAnswer = func() { close(written) }
 	e.LaunchAttempt("attempt")
-	waitAttempt(t, s, "launching")
+	select {
+	case <-written:
+	case <-time.After(markerBound):
+		t.Fatal("the start was never written")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), e.StopBudget())
 	defer cancel()
 	if err := e.Stop(ctx); err != nil {
@@ -985,8 +996,25 @@ func TestStopBeforeAcceptanceInterruptsThePreparingTask(t *testing.T) {
 		t.Fatalf("task = %+v: %v", task, err)
 	}
 	events, err := s.Events(context.Background(), "u", "attempt", 0)
-	if err != nil || len(events) < 2 || events[len(events)-2].Kind != "recovery" {
-		t.Fatalf("events = %+v: %v", events, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The engine never answers, so the stop kills it: whether its read then
+	// sees the end or the closed stdout, the end is the stop's and no cause.
+	var recoveries, errs []string
+	for _, event := range events {
+		switch event.Kind {
+		case "recovery":
+			recoveries = append(recoveries, string(event.Payload))
+		case "executor_error":
+			errs = append(errs, string(event.Payload))
+		}
+	}
+	if len(recoveries) != 1 || !strings.Contains(recoveries[0], "engine exit not confirmed") {
+		t.Fatalf("recoveries = %q, want one naming the unconfirmed exit", recoveries)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0], "engine was killed after the grace period") {
+		t.Fatalf("executor errors = %q, want only the kill marker", errs)
 	}
 }
 
