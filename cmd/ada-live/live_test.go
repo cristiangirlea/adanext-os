@@ -168,6 +168,15 @@ func TestCodexConfigWithAnAPIKeyIsRefused(t *testing.T) {
 		// A multi-line string hides no # from the next line.
 		"profiles = { p = { d = \"\"\"\n#\"\"\", model_provider = \"oss\" } }\n": false,
 		"profiles = { p = { d = '''\n#''', model_provider = \"oss\" } }\n":       false,
+		// One or two quotes may stand just before the closing three, as TOML 1.0 allows.
+		`profiles = { p = { d = """x"""", e = "#", model_provider = "oss" } }` + "\n":  false,
+		`profiles = { p = { d = '''x'''', e = "#", model_provider = "oss" } }` + "\n":  false,
+		`profiles = { p = { d = """x""""", e = "#", model_provider = "oss" } }` + "\n": false,
+		`profiles = { p = { d = '''x''''', e = "#", model_provider = "oss" } }` + "\n": false,
+		`d = """x""""` + "\n":  true,
+		`d = '''x''''` + "\n":  true,
+		`d = """x"""""` + "\n": true,
+		`d = '''x'''''` + "\n": true,
 	} {
 		if _, err := codexConfig([]byte(config)); (err == nil) != ok {
 			t.Errorf("%q: %v", config, err)

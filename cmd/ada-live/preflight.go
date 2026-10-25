@@ -152,7 +152,13 @@ func (s *tomlScanner) uncomment(line string) (string, error) {
 			}
 			i++
 		case strings.HasPrefix(line[i:], s.quote):
-			i += len(s.quote) - 1
+			n := len(s.quote)
+			if n == 3 { // up to two more quotes belong to the string, as TOML 1.0 allows
+				for n < 5 && i+n < len(line) && line[i+n] == s.quote[0] {
+					n++
+				}
+			}
+			i += n - 1
 			s.quote = ""
 		}
 	}
