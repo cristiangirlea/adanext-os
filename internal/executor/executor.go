@@ -68,6 +68,7 @@ type Executor struct {
 	afterRunning     func()                          // Test seam between storing the attempt running and accepting its events.
 	beforeRemove     func(hash string)               // Test seam between discard's reference check and its removal.
 	beforeCheck      func(attemptID string)          // Test seam between preparing the workspace and checking it before the engine starts.
+	beforeAnswer     func()                          // Test seam between the start write and the read of its answer.
 }
 
 func New(cfg Config) *Executor {
@@ -404,7 +405,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	var inputMu sync.Mutex
 	write := func(v any) error { inputMu.Lock(); defer inputMu.Unlock(); return json.NewEncoder(stdin).Encode(v) }
 	var processMu sync.Mutex
-	var exited, killRequested bool
+	var exited, killRequested, stdinClosedFirst bool
 	var exitErr error
 	processDone := make(chan struct{})
 	var timerMu sync.Mutex
@@ -437,7 +438,13 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			return
 		}
 		shutdownStarted = true
-		closeTimer = time.AfterFunc(e.cfg.CancelGrace, func() { _ = stdin.Close() })
+		closeTimer = time.AfterFunc(e.cfg.CancelGrace, func() {
+			// Whether Ada's close, not the engine, ended a live engine's input.
+			processMu.Lock()
+			stdinClosedFirst = !exited
+			processMu.Unlock()
+			_ = stdin.Close()
+		})
 		killTimer = time.AfterFunc(2*e.cfg.CancelGrace, kill)
 	}
 	stopShutdown := func() {
@@ -649,14 +656,47 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 		}
 	}
-	// One failure records one cause. An engine whose stream ended is exiting:
-	// its exit status joins the cause, recorded once it is known. Otherwise the
-	// cause is recorded before the shutdown, whose exit error it explains.
+	// ownEnd reports whether a stream that ended was ended by a recorded stop
+	// or cancel: Ada closed the live engine's stdin or killed it. That stop
+	// or cancel is the cause; a failed read counts as none recorded.
+	ownEnd := func(killed bool) bool {
+		select {
+		case <-active.cancel:
+		default:
+			return false
+		}
+		processMu.Lock()
+		closedFirst := stdinClosedFirst
+		processMu.Unlock()
+		if !killed && !closedFirst {
+			return false
+		}
+		recorded := false
+		_ = e.owned(a.ID, func(tx *store.Tx) error {
+			var err error
+			recorded, err = tx.CancelRecorded(context.Background(), a.ID)
+			return err
+		})
+		return recorded
+	}
+	// One failure records one cause. A stream that ended is decided once the
+	// engine has exited: the end of a recorded stop or cancel records none;
+	// otherwise the exit status, and why stdout was closed, join the cause.
+	// Any other cause is recorded before the shutdown, whose exit error it
+	// explains.
 	abort := func(cause error) {
-		causeRecorded := !errors.Is(cause, io.EOF) && e.recordCause(a, cause)
+		streamEnd := errors.Is(cause, io.EOF) || errors.Is(cause, os.ErrClosed)
+		causeRecorded := !streamEnd && e.recordCause(a, cause)
 		_, killed, waitErr := drain()
+		if streamEnd && ownEnd(killed) {
+			e.failFinal(a, cause, true, killed)
+			return
+		}
 		if waitErr != nil && !killed && !causeRecorded {
 			cause = fmt.Errorf("%w; engine exit: %v", cause, waitErr)
+		}
+		if reason := closedBecause(); streamEnd && reason != "" {
+			cause = fmt.Errorf("%w; stdout closed: %s", cause, reason)
 		}
 		e.failFinal(a, cause, causeRecorded, killed)
 	}
@@ -716,6 +756,9 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	if err := write(map[string]any{"type": "start", "attempt_id": a.ID, "task": task}); err != nil {
 		abort(preparingCause(fmt.Errorf("start write: %w", err)))
 		return
+	}
+	if e.beforeAnswer != nil {
+		e.beforeAnswer()
 	}
 	answer, _, err := next("", true)
 	if err != nil {
