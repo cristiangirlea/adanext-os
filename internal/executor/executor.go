@@ -74,6 +74,8 @@ type Executor struct {
 	probeMu          sync.Mutex // One probe of the installed CLIs at a time.
 	probed           map[string]engine.Installed
 	probedAt         time.Time
+	// The provider walk; tests make it fail or stop.
+	providerState func(root string, limit int) (map[string]string, bool, error)
 }
 
 func New(cfg Config) *Executor {
@@ -86,7 +88,7 @@ func New(cfg Config) *Executor {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 1
 	}
-	return &Executor{cfg: cfg, active: make(map[string]*active), versionArgs: []string{"--version"}, versionTimeout: 10 * time.Second}
+	return &Executor{cfg: cfg, active: make(map[string]*active), versionArgs: []string{"--version"}, versionTimeout: 10 * time.Second, providerState: source.ProviderState}
 }
 
 // StopBudget covers an ignored cancel (stdin closed after one CancelGrace, the
@@ -382,13 +384,6 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		return
 	}
 	cmd.Stdout = stdoutWriter
-	if err := engine.Verify(enginePath, e.cfg.EngineSHA256); err != nil {
-		stdin.Close()
-		stdout.Close()
-		stdoutWriter.Close()
-		e.fail(a, fmt.Errorf("engine verification: %w", err))
-		return
-	}
 	if workspace {
 		if e.beforeCheck != nil {
 			e.beforeCheck(a.ID)
@@ -401,7 +396,7 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			return
 		}
 		var err error
-		providerBefore, providerUnknown, err = source.ProviderState(work, providerWalkLimit)
+		providerBefore, providerUnknown, err = e.providerState(work, providerWalkLimit)
 		providerUnknown = providerUnknown || err != nil
 	}
 	maxTurns, timeout, err := e.cfg.Store.AttemptLimits(ctx, a.ID)
@@ -410,6 +405,14 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		stdout.Close()
 		stdoutWriter.Close()
 		e.fail(a, fmt.Errorf("attempt limits: %w", err))
+		return
+	}
+	// Checked last, so nothing slow sits between the hash and the launch.
+	if err := engine.Verify(enginePath, e.cfg.EngineSHA256); err != nil {
+		stdin.Close()
+		stdout.Close()
+		stdoutWriter.Close()
+		e.fail(a, fmt.Errorf("engine verification: %w", err))
 		return
 	}
 	if err := cmd.Start(); err != nil {

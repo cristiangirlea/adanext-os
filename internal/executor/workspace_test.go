@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -528,5 +529,33 @@ func TestTheManifestBindsTheTaskRevisionAndOwnershipGeneration(t *testing.T) {
 	row, err := s.Workspace(context.Background(), "attempt")
 	if err != nil || row.ManifestVersion != source.ManifestVersion || source.ManifestVersion != 2 || row.TaskRevision != 2 || row.Generation != e.cfg.Generation {
 		t.Fatalf("workspace row = %+v, %v", row, err)
+	}
+}
+
+func TestTheEngineIsVerifiedAfterTheWorkspaceChecksJustBeforeItsLaunch(t *testing.T) {
+	e, s, marker, _, _ := workspaceExecutor(t, "happy")
+	data, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "engine"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	copied := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(copied, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.EnginePath = copied
+	// The engine is replaced after the workspace checks and the provider walk have begun.
+	e.beforeCheck = func(string) {
+		if err := os.WriteFile(copied, append(data, 0), 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	e.LaunchAttempt("attempt")
+	waitAttemptPrepared(t, s, "ended_failed")
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a replaced engine was launched: %v", err)
 	}
 }

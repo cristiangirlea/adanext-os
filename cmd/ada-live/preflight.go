@@ -120,27 +120,54 @@ func claudeMCPServers(data []byte) []string {
 	return found
 }
 
-var codexRefused = []*regexp.Regexp{
-	regexp.MustCompile(`^\s*env_key\s*=`),
-	regexp.MustCompile(`^\s*api_key\s*=`),
-	regexp.MustCompile(`^\s*experimental_bearer_token\s*=`),
-	regexp.MustCompile(`^\s*preferred_auth_method\s*=\s*"apikey"`),
-	regexp.MustCompile(`^\s*forced_login_method\s*=\s*"api"`),
+var (
+	// Matched anywhere on a line once quotes are gone: a table, a dotted or quoted key, an inline table.
+	codexRefused  = regexp.MustCompile(`(?i)\b(model_providers|env_key|api_key|experimental_bearer_token|http_headers|env_http_headers)\b`)
+	codexLogin    = regexp.MustCompile(`(?i)\b(preferred_auth_method|forced_login_method)\s*=\s*(\w*)`)
+	codexProvider = regexp.MustCompile(`(?i)\bmodel_provider\s*=\s*([\w-]*)`)
+	codexEscape   = regexp.MustCompile(`\\[uU]`)
+	codexTable    = regexp.MustCompile(`^\s*\[\s*(mcp_servers|plugins)\.([A-Za-z0-9_-]+)\s*\]`)
+)
+
+// uncomment cuts a TOML comment: a # outside a string.
+func uncomment(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case quote == '"' && c == '\\':
+			i++
+		case quote != 0 && c == quote:
+			quote = 0
+		case quote == 0 && (c == '"' || c == '\''):
+			quote = c
+		case quote == 0 && c == '#':
+			return line[:i]
+		}
+	}
+	return line
 }
 
-var codexTable = regexp.MustCompile(`^\s*\[\s*(mcp_servers|plugins)\.([A-Za-z0-9_-]+)\s*\]`)
-
-// codexConfig refuses a codex config.toml that signs in with or sends an API key, and lists the
-// MCP servers and plugins it declares. Comments are skipped.
+// codexConfig refuses, failing closed, a codex config.toml that could sign in with or send an API
+// key or use another provider: any model_providers, a model_provider other than openai, a key, token
+// or header setting, an API sign-in, or a unicode escape that could spell one. It lists the MCP
+// servers and plugins it declares. Comments are skipped.
 func codexConfig(data []byte) ([]string, error) {
 	var found []string
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
-		line, _, _ := strings.Cut(scanner.Text(), "#")
-		for _, refused := range codexRefused {
-			if refused.MatchString(line) {
-				return nil, fmt.Errorf("the codex config holds %s", strings.TrimSpace(strings.SplitN(line, "=", 2)[0]))
-			}
+		line := uncomment(scanner.Text())
+		bare := strings.NewReplacer(`"`, "", "'", "").Replace(line)
+		if codexEscape.MatchString(line) {
+			return nil, errors.New("the codex config holds a unicode escape, which could spell a refused key")
+		}
+		if m := codexRefused.FindString(bare); m != "" {
+			return nil, fmt.Errorf("the codex config holds %s", m)
+		}
+		if m := codexLogin.FindStringSubmatch(bare); m != nil && !strings.EqualFold(m[2], "chatgpt") {
+			return nil, fmt.Errorf("the codex config sets %s to %q", m[1], m[2])
+		}
+		if m := codexProvider.FindStringSubmatch(bare); m != nil && m[1] != "openai" {
+			return nil, fmt.Errorf("the codex config sets model_provider to %q, not openai", m[1])
 		}
 		if m := codexTable.FindStringSubmatch(line); m != nil {
 			kind := "mcp server"
@@ -161,4 +188,40 @@ func codexAuthHoldsAKey(data []byte) bool {
 	}
 	key, ok := auth["OPENAI_API_KEY"]
 	return ok && key != nil && key != ""
+}
+
+// claudeStatusRecord keeps only the plan fields of `claude auth status`; account fields such as
+// email or orgName are never recorded.
+func claudeStatusRecord(status []byte) map[string]any {
+	out := map[string]any{}
+	var s map[string]any
+	if json.Unmarshal(status, &s) != nil {
+		return out
+	}
+	for _, key := range []string{"loggedIn", "authMethod", "apiProvider", "subscriptionType"} {
+		if v, ok := s[key]; ok {
+			out[key] = v
+		}
+	}
+	return out
+}
+
+// managedClaudeSettings are the files where an administrator's claude settings override the
+// user's, on goos.
+func managedClaudeSettings(goos string) []string {
+	switch goos {
+	case "windows":
+		return []string{`C:\Program Files\ClaudeCode\managed-settings.json`, `C:\ProgramData\ClaudeCode\managed-settings.json`}
+	case "darwin":
+		return []string{"/Library/Application Support/ClaudeCode/managed-settings.json"}
+	}
+	return []string{"/etc/claude-code/managed-settings.json"}
+}
+
+// managedCodexConfigs are codex's system-wide config files on goos; Windows has none.
+func managedCodexConfigs(goos string) []string {
+	if goos == "windows" {
+		return nil
+	}
+	return []string{"/etc/codex/config.toml", "/etc/codex/managed_config.toml"}
 }

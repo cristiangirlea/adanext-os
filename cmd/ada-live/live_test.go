@@ -144,6 +144,24 @@ func TestCodexConfigWithAnAPIKeyIsRefused(t *testing.T) {
 		"experimental_bearer_token = \"abc\"\n":                             false,
 		"preferred_auth_method = \"apikey\"\n":                              false,
 		"forced_login_method = \"api\"\n":                                   false,
+		// Every other route to a key or another provider is refused too.
+		"model_provider = \"openai\"\n":                                      true,
+		"model_providers.x.env_key = \"K\"\n":                                false,
+		"[model_providers.x]\nbase_url = \"https://proxy\"\n":                false,
+		"model_providers = { x = { name = \"x\" } }\n":                       false,
+		"[ model_providers . x ]\n":                                          false,
+		"model_provider = \"azure\"\n":                                       false,
+		"[profiles.p]\nmodel_provider = 'x'\n":                               false,
+		"profiles.p.model_provider = \"x\"\n":                                false,
+		"x = { \"api_key\" = \"k\" }\n":                                      false,
+		"x = { a = \"#\", api_key = \"k\" }\n":                               false,
+		"'env_key' = 'K'\n":                                                  false,
+		"\"api\\u005fkey\" = \"k\"\n":                                        false,
+		"preferred_auth_method = 'apikey'\n":                                 false,
+		"forced_login_method = 'api'\n":                                      false,
+		"[mcp_servers.s]\nhttp_headers = { Authorization = \"Bearer k\" }\n": false,
+		"[mcp_servers.s]\nenv_http_headers = { \"X\" = \"Y\" }\n":            false,
+		"[mcp_servers.s.http_headers]\nAuthorization = \"Bearer k\"\n":       false,
 	} {
 		if _, err := codexConfig([]byte(config)); (err == nil) != ok {
 			t.Errorf("%q: %v", config, err)
@@ -168,5 +186,70 @@ func TestTheFixtureHoldsAProjectHookThatWritesAMarker(t *testing.T) {
 	config, err := os.ReadFile(filepath.Join(dir, ".codex", "config.toml"))
 	if err != nil || !bytes.Contains(config, []byte(codexMarker)) {
 		t.Fatalf("codex config = %s, %v", config, err)
+	}
+}
+
+func TestOnlyThePlanFieldsOfClaudesStatusAreRecorded(t *testing.T) {
+	status := `{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "max", "email": "a@b.c", "orgName": "Some Person's Organization", "orgId": "x"}`
+	got := claudeStatusRecord([]byte(status))
+	want := map[string]any{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "max"}
+	if len(got) != len(want) {
+		t.Fatalf("recorded %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %v, want %v", k, got[k], v)
+		}
+	}
+	if got := claudeStatusRecord([]byte("not json")); len(got) != 0 {
+		t.Fatalf("unparsed status recorded %v", got)
+	}
+}
+
+// planRunner answers the sign-in commands as a plan sign-in does.
+type planRunner struct{}
+
+func (planRunner) Output(_ context.Context, _ string, _ []string, _ string, args ...string) ([]byte, error) {
+	switch strings.Join(args, " ") {
+	case "auth status":
+		return []byte(`{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "max"}`), nil
+	case "login status":
+		return []byte("Logged in using ChatGPT\n"), nil
+	}
+	return []byte("1.0.0\n"), nil
+}
+
+func TestManagedSettingsGoThroughTheSameChecks(t *testing.T) {
+	dir := t.TempDir()
+	c := &config{home: dir, claudeConfig: filepath.Join(dir, "claude"), codexHome: filepath.Join(dir, "codex"),
+		claudeManaged: []string{filepath.Join(dir, "absent.json")}, codexManaged: []string{filepath.Join(dir, "absent.toml")}}
+	for _, backend := range []string{"claude", "codex"} {
+		if err := c.preflight(context.Background(), planRunner{}, backend, "cli", map[string]any{}); err != nil {
+			t.Fatalf("%s with no managed settings: %v", backend, err)
+		}
+	}
+	managed := filepath.Join(dir, "managed-settings.json")
+	if err := os.WriteFile(managed, []byte(`{"apiKeyHelper": "/bin/key"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.claudeManaged = []string{managed}
+	if err := c.preflight(context.Background(), planRunner{}, "claude", "cli", map[string]any{}); err == nil || !strings.Contains(err.Error(), "apiKeyHelper") {
+		t.Fatalf("claude managed settings with a key helper: %v", err)
+	}
+	system := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(system, []byte("[model_providers.x]\nenv_key = \"K\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.codexManaged = []string{system}
+	if err := c.preflight(context.Background(), planRunner{}, "codex", "cli", map[string]any{}); err == nil {
+		t.Fatal("codex's system config with another provider was accepted")
+	}
+	for _, goos := range []string{"windows", "linux", "darwin"} {
+		if len(managedClaudeSettings(goos)) == 0 {
+			t.Errorf("%s: no managed claude settings path", goos)
+		}
+	}
+	if len(managedCodexConfigs("linux")) == 0 || len(managedCodexConfigs("darwin")) == 0 {
+		t.Error("no codex system config path")
 	}
 }

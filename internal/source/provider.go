@@ -81,10 +81,12 @@ const maxProviderFile = 16 << 20
 // ProviderState walks a worktree, without following links and skipping the root's .git, and
 // returns each provider path with what it holds: a regular file's content hash, a link's target,
 // or another type's mode. The walk counts every entry it visits; past limit it stops and reports
-// truncated. It reads the file system, not git, since an ignored settings file is loaded as well.
-func ProviderState(root string, limit int) (state map[string]string, truncated bool, err error) {
+// unknown. A link at a provider path reports unknown too: what it leads to can change while the
+// link stays the same. It reads the file system, not git, since an ignored settings file is loaded
+// as well.
+func ProviderState(root string, limit int) (state map[string]string, unknown bool, err error) {
 	state = map[string]string{}
-	visited := 0
+	visited, linked := 0, false
 	stop := errors.New("limit")
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -121,6 +123,7 @@ func ProviderState(root string, limit int) (state map[string]string, truncated b
 				return err
 			}
 			state[rel] = "link:" + target
+			linked = true
 		case info.Mode().IsRegular():
 			sum, err := hashProviderFile(path)
 			if err != nil {
@@ -135,7 +138,7 @@ func ProviderState(root string, limit int) (state map[string]string, truncated b
 	if errors.Is(err, stop) {
 		return state, true, nil
 	}
-	return state, false, err
+	return state, linked, err
 }
 
 func hashProviderFile(path string) (string, error) {

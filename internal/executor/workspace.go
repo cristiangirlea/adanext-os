@@ -243,10 +243,10 @@ const providerWalkLimit = 200000
 
 // recordProviderChanges compares the worktree's provider configuration with what it held before
 // the engine started and records the difference on the attempt, so review and refine can show
-// it (decisions log, 2026-10-25). A walk that failed or stopped at its limit records the attempt
-// as flagged regardless.
+// it (decisions log, 2026-10-25). A walk that failed, stopped at its limit or met a link at a
+// provider path records the attempt as flagged regardless.
 func (e *Executor) recordProviderChanges(a store.Attempt, work string, before map[string]string, unknown bool) {
-	after, truncated, err := source.ProviderState(work, providerWalkLimit)
+	after, truncated, err := e.providerState(work, providerWalkLimit)
 	changes := store.ProviderChanges{Truncated: unknown || truncated || err != nil}
 	for _, c := range source.DiffProviderState(before, after) {
 		changes.Changes = append(changes.Changes, store.ProviderChange{Path: c.Path, Change: c.Change})

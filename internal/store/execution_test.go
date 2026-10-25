@@ -75,11 +75,56 @@ func TestRestartRecoversPendingAndRunningAttemptsWithoutRelaunch(t *testing.T) {
 			if err != nil || task.State != RecoveryRequired {
 				t.Fatalf("task = %+v: %v", task, err)
 			}
+			// No workspace, so nothing in a worktree to assess.
+			if task.Attempt.ProviderChanges != nil || task.Attempt.ProviderFlagged() {
+				t.Fatalf("an attempt with no workspace = %+v", task.Attempt)
+			}
 			events, err := s.Events(context.Background(), "u", "a", 0)
 			if err != nil || len(events) != 1 || events[0].Kind != "recovery" {
 				t.Fatalf("events = %+v: %v", events, err)
 			}
 		})
+	}
+}
+
+func TestRestartFlagsAnAttemptWhoseWorktreeWasNeverAssessed(t *testing.T) {
+	s := openTestStore(t)
+	boundTask(t, s)
+	if err := s.write(ctx, "alice", func(tx *Tx) error { _, err := tx.RecordWorkspace(ctx, testWorkspace()); return err }); err != nil {
+		t.Fatal(err)
+	}
+	execute(t, s, "UPDATE attempts SET state='running' WHERE id='a1'")
+	execute(t, s, "UPDATE tasks SET state='running',revision=2 WHERE id='t1'")
+	if _, ids, err := s.BumpAndRecover(ctx); err != nil || len(ids) != 1 {
+		t.Fatalf("recovery = %v: %v", ids, err)
+	}
+	task, err := s.Task(ctx, "alice", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := task.Attempt.ProviderChanges; c == nil || !c.Truncated || c.Changes == nil || len(c.Changes) != 0 || !task.Attempt.ProviderFlagged() {
+		t.Fatalf("recovered attempt = %+v %+v", task.Attempt, c)
+	}
+}
+
+func TestAnAttemptThatEndedWithAWorktreeButNoAssessmentIsFlagged(t *testing.T) {
+	assessed := &ProviderChanges{Changes: []ProviderChange{}}
+	for _, c := range []struct {
+		attempt TaskAttempt
+		flagged bool
+	}{
+		{TaskAttempt{State: "ended_ok", Workspace: true}, true},
+		{TaskAttempt{State: "ended_failed", Workspace: true}, true},
+		{TaskAttempt{State: "recovery_required", Workspace: true}, true},
+		{TaskAttempt{State: "running", Workspace: true}, false},
+		{TaskAttempt{State: "pending", Workspace: true}, false},
+		{TaskAttempt{State: "ended_ok"}, false},
+		{TaskAttempt{State: "ended_ok", Workspace: true, ProviderChanges: assessed}, false},
+		{TaskAttempt{State: "ended_ok", Workspace: true, ProviderChanges: &ProviderChanges{Truncated: true}}, true},
+	} {
+		if got := c.attempt.ProviderFlagged(); got != c.flagged {
+			t.Errorf("%+v: flagged %v, want %v", c.attempt, got, c.flagged)
+		}
 	}
 }
 

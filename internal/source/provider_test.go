@@ -116,9 +116,9 @@ func TestAProviderLinkIsRecordedAsALinkAndNotFollowed(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, ".claude", "settings.json")); err != nil {
 		t.Skipf("cannot create a symbolic link here: %v", err)
 	}
-	state, _, err := ProviderState(root, 1000)
-	if err != nil || !strings.HasPrefix(state[".claude/settings.json"], "link:") {
-		t.Fatalf("state = %v, %v", state, err)
+	state, unknown, err := ProviderState(root, 1000)
+	if err != nil || !unknown || !strings.HasPrefix(state[".claude/settings.json"], "link:") {
+		t.Fatalf("state = %v, %v, %v", state, unknown, err)
 	}
 }
 
@@ -129,5 +129,22 @@ func TestAWalkPastItsLimitIsMarkedTruncated(t *testing.T) {
 	}
 	if _, truncated, err := ProviderState(root, 2); err != nil || !truncated {
 		t.Fatalf("truncated = %v, %v", truncated, err)
+	}
+}
+
+func TestALinkAtAProviderPathLeavesTheWalkUnassessed(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "cfg", "settings.json"), "{}")
+	if err := os.Symlink("cfg", filepath.Join(root, ".claude")); err != nil {
+		t.Skipf("cannot create a symbolic link here: %v", err)
+	}
+	// What the link leads to can change without the link changing, so no walk vouches for it.
+	before, unknown, err := ProviderState(root, 1000)
+	if err != nil || !unknown {
+		t.Fatalf("before = %v %v %v", before, unknown, err)
+	}
+	write(t, filepath.Join(root, "cfg", "settings.json"), markerHook)
+	if _, unknown, err := ProviderState(root, 1000); err != nil || !unknown {
+		t.Fatalf("after: %v %v", unknown, err)
 	}
 }

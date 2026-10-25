@@ -148,3 +148,15 @@ func TestAScriptShimIsNotRunThroughAShell(t *testing.T) {
 		t.Error("a directory was accepted")
 	}
 }
+
+func TestAProbeWhoseCallerLeftIsNotCachedAsAFailure(t *testing.T) {
+	e, _ := probeExecutor(t, "answer")
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if claude := e.Installed(gone)["claude"]; !claude.Available || claude.Version != "2.1.284" {
+		t.Fatalf("a probe for a caller that left = %+v", claude)
+	}
+	if claude := e.Installed(context.Background())["claude"]; !claude.Available || claude.Version != "2.1.284" {
+		t.Fatalf("the next caller = %+v", claude)
+	}
+}

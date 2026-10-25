@@ -31,7 +31,8 @@ func (e *Executor) Installed(ctx context.Context) map[string]engine.Installed {
 	if e.probed != nil && time.Since(e.probedAt) < probeLifetime {
 		return e.probed
 	}
-	e.probed, e.probedAt = e.probe(ctx), time.Now()
+	// The result is shared, so one caller leaving must not cache a failure; the probe has its own timeouts.
+	e.probed, e.probedAt = e.probe(context.WithoutCancel(ctx)), time.Now()
 	return e.probed
 }
 

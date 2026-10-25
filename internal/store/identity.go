@@ -90,18 +90,31 @@ type TaskAttempt struct {
 	QueuePosition int
 	// ProviderChanges is nil until assessed, and for an attempt with no workspace.
 	ProviderChanges *ProviderChanges
+	Workspace       bool // whether the attempt has a worktree
+}
+
+// ProviderFlagged reports whether the attempt's provider changes must be shown before review or
+// refine. An attempt that ended with a worktree but no assessment (a crash, a lost ownership) is
+// flagged: nothing vouches for what it left.
+func (a TaskAttempt) ProviderFlagged() bool {
+	if a.ProviderChanges != nil {
+		return a.ProviderChanges.Flagged()
+	}
+	return a.Workspace && a.State != "pending" && a.State != "launching" && a.State != "running"
 }
 
 const taskReadColumns = `t.id,t.project,t.created_by,t.objective,t.acceptance_criteria,t.state,t.revision,t.created,t.updated,COALESCE(t.snapshot,''),
 	(SELECT provider_configuration FROM source_snapshots WHERE id=t.snapshot),
-	a.id,a.state,CASE WHEN a.state='pending' THEN (SELECT count(*)+1 FROM attempts p WHERE p.state='pending' AND p.rowid<a.rowid) ELSE 0 END,a.provider_changes`
+	a.id,a.state,CASE WHEN a.state='pending' THEN (SELECT count(*)+1 FROM attempts p WHERE p.state='pending' AND p.rowid<a.rowid) ELSE 0 END,a.provider_changes,
+	EXISTS(SELECT 1 FROM workspaces w WHERE w.attempt=a.id)`
 const taskReadFrom = ` FROM tasks t LEFT JOIN attempts a ON a.rowid=(SELECT max(latest.rowid) FROM attempts latest WHERE latest.task=t.id)`
 
 func scanTaskRead(row interface{ Scan(...any) error }, extra ...any) (Task, error) {
 	var task Task
 	var id, state, provider, changes sql.NullString
 	var position int
-	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot, &provider, &id, &state, &position, &changes}
+	var workspace bool
+	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot, &provider, &id, &state, &position, &changes, &workspace}
 	if err := row.Scan(append(args, extra...)...); err != nil {
 		return task, err
 	}
@@ -110,7 +123,7 @@ func scanTaskRead(row interface{ Scan(...any) error }, extra ...any) (Task, erro
 		return task, err
 	}
 	if id.Valid {
-		task.Attempt = TaskAttempt{ID: id.String, State: state.String, QueuePosition: position}
+		task.Attempt = TaskAttempt{ID: id.String, State: state.String, QueuePosition: position, Workspace: workspace}
 		if task.Attempt.ProviderChanges, err = decodeJSON[ProviderChanges](changes); err != nil {
 			return task, err
 		}

@@ -40,7 +40,7 @@ dirty=$(git -C "$src" status --porcelain --untracked-files=normal)
 # ask which one is in effect from inside the Harness checkout, where the build runs. Nothing from the
 # user's go env file or tuning variables reaches the build.
 export GOTOOLCHAIN="$want_go" GOENV=off GOFLAGS= CGO_ENABLED=0 GOWORK=off
-unset GOAMD64 GOARM GOARM64 GO386 GOMIPS GOMIPS64 GOPPC64 GORISCV64 GOWASM GOEXPERIMENT
+unset GOAMD64 GOARM GOARM64 GO386 GOMIPS GOMIPS64 GOPPC64 GORISCV64 GOWASM GOEXPERIMENT GOFIPS140
 have_go=$(cd "$src" && go env GOVERSION)
 [ "$have_go" = "$want_go" ] || die "the build in $src would use $have_go; engine/engine.json pins $want_go"
 

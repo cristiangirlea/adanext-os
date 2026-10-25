@@ -179,7 +179,7 @@ func TestBuildEngineScriptBuildsReproducibly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"CGO_ENABLED=0", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=", "GOENV=off", "GOFLAGS=", `GOTOOLCHAIN="$want_go"`} {
+	for _, want := range []string{"CGO_ENABLED=0", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=", "GOENV=off", "GOFLAGS=", `GOTOOLCHAIN="$want_go"`, "GOFIPS140"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("build-engine.sh lacks %s", want)
 		}
@@ -207,5 +207,16 @@ func TestLocateFindsTheEngineInTheAppDirectoryOrThroughTheFlag(t *testing.T) {
 	}
 	if _, _, err := Locate(filepath.Join(app, "absent"), app, "linux"); err == nil {
 		t.Fatal("a flag naming a missing engine was accepted")
+	}
+}
+
+func TestAWindowsEngineFlagWithoutExeIsRefusedAtStartup(t *testing.T) {
+	plain := writeFile(t, "hrn", "engine")
+	if _, _, err := Locate(plain, t.TempDir(), "windows"); err == nil || !strings.Contains(err.Error(), ".exe") {
+		t.Fatalf("a Windows engine without .exe: %v", err)
+	}
+	upper := writeFile(t, "hrn.EXE", "engine")
+	if path, found, err := Locate(upper, t.TempDir(), "windows"); err != nil || !found || path != upper {
+		t.Fatalf("hrn.EXE: %q %v %v", path, found, err)
 	}
 }

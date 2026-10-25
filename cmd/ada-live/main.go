@@ -77,6 +77,8 @@ type config struct {
 	dryRun                  bool
 	home, user              string
 	claudeConfig, codexHome string
+	claudeManaged           []string // administrators' claude settings, read when present
+	codexManaged            []string // codex's system-wide config, read when present
 }
 
 func run(ctx context.Context, args []string, env func(string) string, r runner, out io.Writer) int {
@@ -165,6 +167,7 @@ func parse(args []string, env func(string) string, out io.Writer) (*config, erro
 	if c.codexHome == "" {
 		c.codexHome = filepath.Join(c.home, ".codex")
 	}
+	c.claudeManaged, c.codexManaged = managedClaudeSettings(runtime.GOOS), managedCodexConfigs(runtime.GOOS)
 	return c, nil
 }
 
@@ -249,8 +252,9 @@ func (c *config) cliPath(ctx context.Context, backend string) (string, error) {
 	return "", fmt.Errorf("the engine does not find the %s CLI", backend)
 }
 
-// preflight records the CLI's version and sign-in status and its user-level configuration, and
-// refuses an API-key sign-in, an apiKeyHelper or a key in env.
+// preflight records the CLI's version, its sign-in status (for claude only the plan fields) and its
+// user-level configuration, and refuses an API-key sign-in, an apiKeyHelper or a key in env, in the
+// user's settings and in managed ones.
 func (c *config) preflight(ctx context.Context, r runner, backend, cli string, result map[string]any) error {
 	pre := map[string]any{}
 	result["preflight"] = pre
@@ -262,15 +266,16 @@ func (c *config) preflight(ctx context.Context, r runner, backend, cli string, r
 	if backend == "claude" {
 		pre["status_command"] = "claude auth status"
 		status, err = r.Output(ctx, "", os.Environ(), cli, "auth", "status")
-		pre["status"] = c.mask(string(status))
+		pre["status"] = claudeStatusRecord(status)
 		if err != nil {
 			return fmt.Errorf("claude auth status: %v", err)
 		}
 		if err := claudeSignIn(status); err != nil {
 			return err
 		}
-		for _, name := range []string{"settings.json", "settings.local.json"} {
-			data, err := os.ReadFile(filepath.Join(c.claudeConfig, name))
+		files := append([]string{filepath.Join(c.claudeConfig, "settings.json"), filepath.Join(c.claudeConfig, "settings.local.json")}, c.claudeManaged...)
+		for _, name := range files {
+			data, err := os.ReadFile(name)
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			} else if err != nil {
@@ -278,7 +283,7 @@ func (c *config) preflight(ctx context.Context, r runner, backend, cli string, r
 			}
 			more, err := claudeSettings(data)
 			if err != nil {
-				return fmt.Errorf("%s: %w", name, err)
+				return fmt.Errorf("%s: %w", filepath.Base(name), err)
 			}
 			found = append(found, more...)
 		}
@@ -295,12 +300,18 @@ func (c *config) preflight(ctx context.Context, r runner, backend, cli string, r
 		if err := codexSignIn(status); err != nil {
 			return err
 		}
-		if data, err := os.ReadFile(filepath.Join(c.codexHome, "config.toml")); err == nil {
-			if found, err = codexConfig(data); err != nil {
+		for _, name := range append([]string{filepath.Join(c.codexHome, "config.toml")}, c.codexManaged...) {
+			data, err := os.ReadFile(name)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
 				return err
 			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
+			more, err := codexConfig(data)
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			found = append(found, more...)
 		}
 		if data, err := os.ReadFile(filepath.Join(c.codexHome, "auth.json")); err == nil && codexAuthHoldsAKey(data) {
 			return errors.New("codex's auth.json stores an API key")
@@ -310,7 +321,7 @@ func (c *config) preflight(ctx context.Context, r runner, backend, cli string, r
 		found[i] = c.mask(found[i])
 	}
 	pre["user_configuration"] = found
-	pre["settings"] = "no apiKeyHelper, no key in env"
+	pre["settings"] = "no apiKeyHelper, no key in env, managed settings included"
 	return nil
 }
 

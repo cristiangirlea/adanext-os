@@ -91,10 +91,14 @@ func (p Pin) Expected(goos, goarch string) (string, error) {
 }
 
 // Locate finds the engine: the path a flag named, which must exist, or else hrn (hrn.exe on
-// Windows) in the application's directory. found is false when neither names an engine. Nothing
-// beside the binary says which hash it should have: the caller checks it against Pinned.
+// Windows) in the application's directory. found is false when neither names an engine. On Windows
+// a flag must name a .exe, which is all a launch runs. Nothing beside the binary says which hash it
+// should have: the caller checks it against Pinned.
 func Locate(flagPath, appDir, goos string) (path string, found bool, err error) {
 	if flagPath != "" {
+		if goos == "windows" && !strings.HasSuffix(strings.ToLower(flagPath), ".exe") {
+			return "", false, fmt.Errorf("-engine %s: an engine on Windows is a .exe", flagPath)
+		}
 		abs, err := filepath.Abs(flagPath)
 		if err != nil {
 			return "", false, err

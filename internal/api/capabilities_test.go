@@ -218,3 +218,14 @@ func TestTheTaskShowsWhatItsAttemptChangedOfTheProviderConfiguration(t *testing.
 		t.Fatalf("assessed attempt = %v", attempt)
 	}
 }
+
+func TestAFinishedAttemptWithAWorktreeAndNoAssessmentReadsFlagged(t *testing.T) {
+	unassessed := taskValue(store.Task{ID: "t", Attempt: store.TaskAttempt{ID: "a", State: "ended_ok", Workspace: true}})
+	if unassessed.Attempt.ProviderChanges != nil || !unassessed.Attempt.ProviderFlagged {
+		t.Fatalf("unassessed = %+v", unassessed.Attempt)
+	}
+	running := taskValue(store.Task{ID: "t", Attempt: store.TaskAttempt{ID: "a", State: "running", Workspace: true}})
+	if running.Attempt.ProviderFlagged {
+		t.Fatalf("running = %+v", running.Attempt)
+	}
+}

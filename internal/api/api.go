@@ -371,7 +371,7 @@ type taskAttemptJSON struct {
 	QueuePosition int    `json:"queue_position,omitempty"`
 	// ProviderChanges is what the attempt added, altered or removed of the provider configuration,
 	// null until assessed after its engine's tree has ended; ProviderFlagged is set when it must
-	// be shown before review or refine.
+	// be shown before review or refine, and for an attempt that ended with a worktree unassessed.
 	ProviderChanges *store.ProviderChanges `json:"provider_changes"`
 	ProviderFlagged bool                   `json:"provider_flagged"`
 }
@@ -384,7 +384,7 @@ type startedTaskJSON struct {
 func taskValue(t store.Task) taskJSON {
 	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated, Snapshot: t.Snapshot, ProviderConfiguration: t.ProviderConfiguration}
 	if a := t.Attempt; a.ID != "" {
-		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderChanges != nil && a.ProviderChanges.Flagged()}
+		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged()}
 		// Keep the existing top-level field for /v1 clients.
 		v.QueuePosition = a.QueuePosition
 	}

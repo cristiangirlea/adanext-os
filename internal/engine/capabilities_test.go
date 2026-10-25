@@ -121,8 +121,8 @@ func TestACellForAnotherCLIVersionShowsUnverified(t *testing.T) {
 	if got := claude.cell("readonly", RowReadOnly); got.Status != Unverified || got.Recorded != Requested {
 		t.Fatalf("other version: read-only cell %+v", got)
 	}
-	if got := claude.cell("readonly", RowCancellation); got.Status != Enforced {
-		t.Fatalf("other version: adad's cancellation %+v, want it still enforced", got)
+	if got, want := claude.cell("readonly", RowCancellation), m.backend("claude").cell("readonly", RowCancellation); got.Status != want.Status {
+		t.Fatalf("other version: adad's cancellation %+v, want it unchanged at %s", got, want.Status)
 	}
 	if claude.Installed == nil || claude.Installed.Version != "0.0.1" {
 		t.Fatalf("installed %+v", claude.Installed)
@@ -154,5 +154,18 @@ func TestParseCLIVersionTakesTheVersionFromTheCLIsOwnOutput(t *testing.T) {
 	}
 	if got := ParseCLIVersion(strings.Repeat("9", 100) + ".1.1"); len(got) > 64 {
 		t.Errorf("an overlong version was kept: %q", got)
+	}
+}
+
+func TestCancellationIsEnforcedOnlyWhereTheWholeTreeIsKilled(t *testing.T) {
+	for goos, want := range map[string]Status{"windows": Enforced, "linux": Enforced, "darwin": Requested} {
+		m := capabilitiesFor(goos)
+		for _, b := range m.Backends {
+			for _, mode := range []string{"readonly", "auto", "yolo"} {
+				if got := b.cell(mode, RowCancellation); got.Status != want {
+					t.Errorf("%s %s %s: cancellation %s, want %s", goos, b.Backend, mode, got.Status, want)
+				}
+			}
+		}
 	}
 }

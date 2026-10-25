@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -110,17 +111,27 @@ const (
 
 var efforts = []string{"low", "medium", "high", "xhigh", "max"}
 
+// cancellation is adad's stop of the engine's tree on goos: enforced where the whole tree is
+// killed, only requested on macOS, where only the engine's group is.
+func cancellation(goos string) Cell {
+	if goos == "darwin" {
+		return Cell{Status: Requested, By: "adad: hrn's cancel, then the engine's process group",
+			Detail: "on macOS only the engine's group is killed while it runs; a descendant that left it can outlive the cancel"}
+	}
+	return Cell{Status: Enforced, By: "adad: hrn's cancel, then the engine's whole process tree (a kill-on-close Job Object on Windows, the session's groups on Linux)",
+		Test:   "internal/executor TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine, TestForceKillStopsNestedBackendAndGrandchild",
+		Detail: "the CLI's own cooperation is not needed"}
+}
+
 // common are the rows a backend's modes share; cli marks the CLI-dependent ones.
-func common(usageBy, turns Cell) map[string]Cell {
+func common(goos string, usageBy, turns Cell) map[string]Cell {
 	return map[string]Cell{
 		RowApprovals: {Status: Unsupported, By: "hrn exec protocol v1",
 			Detail: "the pinned protocol advertises approvals: false and refuses mode ask; nothing answers a CLI's prompt (#7)"},
 		RowContinuation: {Status: Unsupported, By: "adad",
 			Detail: "hrn can continue a run (sessions: fork), but every attempt is a fresh session until M6; refine is a new session (decisions log, 2026-10-20)"},
-		RowCancellation: {Status: Enforced, By: "adad: hrn's cancel, then the engine's whole process tree (a kill-on-close Job Object on Windows, the session's groups on Linux)",
-			Test:   "internal/executor TestCancelWaitsForEngineExitAndKillsAnIgnoringEngine, TestForceKillStopsNestedBackendAndGrandchild",
-			Detail: "the CLI's own cooperation is not needed; on macOS only the engine's group is killed while it runs"},
-		RowUsage: usageBy,
+		RowCancellation: cancellation(goos),
+		RowUsage:        usageBy,
 		RowModelDiscovery: {Status: Unsupported, By: "hrn exec protocol v1",
 			Detail: "hello lists no models and no CLI is asked; a model is passed as given, checked only as a safe argument, and the CLI refuses one it does not know"},
 		RowTimeLimit: {Status: Enforced, By: "hrn: the task's timeout ends the run and its process tree",
@@ -142,14 +153,16 @@ func withModes(shared map[string]Cell, modes map[string]map[string]Cell) []Mode 
 }
 
 // Capabilities is the static table for the pinned engine, recorded in the decisions log
-// (2026-10-25) with its sources. Each call returns a fresh copy.
-func Capabilities() Matrix {
+// (2026-10-25) with its sources, for the host's OS. Each call returns a fresh copy.
+func Capabilities() Matrix { return capabilitiesFor(runtime.GOOS) }
+
+func capabilitiesFor(goos string) Matrix {
 	notOffered := func(detail string) Cell { return Cell{Status: Unsupported, Detail: detail} }
 	claudeNetwork := Cell{Status: Unsupported, cli: true, Detail: "claude has no network sandbox: its web tools and any command it runs use the user's network"}
 	claude := Backend{
 		Backend: "claude", CLIVersion: "2.1.284", Observed: recorded,
 		Efforts: efforts, Options: []string{"model", "mode", "effort", "timeout", "max_turns", "mcp"}, Models: []string{"claude-opus-5-5"},
-		Modes: withModes(common(
+		Modes: withModes(common(goos,
 			Cell{Status: Requested, By: "claude CLI (its result line: turns, tokens, cost)", cli: true, Test: liveReadonly, Detail: "hrn's result carries what the CLI reports; Ada neither stores nor checks it yet"},
 			Cell{Status: Requested, By: "claude --max-turns", cli: true, Test: liveReadonly, Detail: "passed only when the start sets max_turns; the CLI counts the turns"},
 		), map[string]map[string]Cell{
@@ -176,7 +189,7 @@ func Capabilities() Matrix {
 	codex := Backend{
 		Backend: "codex", CLIVersion: "0.163.0-alpha.11", Observed: recorded,
 		Efforts: efforts, Options: []string{"model", "mode", "effort", "timeout"}, Models: []string{"gpt-6.1-sol", "gpt-6-luna"},
-		Modes: withModes(common(
+		Modes: withModes(common(goos,
 			Cell{Status: Requested, By: "codex CLI (turn.completed usage: tokens)", cli: true, Test: liveReadonly, Detail: "hrn's result carries the tokens the CLI reports; Ada neither stores nor checks them yet"},
 			Cell{Status: Unsupported, Detail: "codex exec has no turn limit, and the pinned hrn does not offer max_turns for codex; use timeout"},
 		), map[string]map[string]Cell{

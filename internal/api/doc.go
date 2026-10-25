@@ -86,5 +86,6 @@
 // migration 0008. A task's attempt shows provider_changes, what it added,
 // altered or removed of them, recorded once the engine's whole tree has ended
 // (null until then, and for an attempt without a workspace), and
-// provider_flagged, set when that must be shown before review or refine.
+// provider_flagged, set when that must be shown before review or refine, and
+// for an attempt that ended with a workspace but no assessment.
 package api

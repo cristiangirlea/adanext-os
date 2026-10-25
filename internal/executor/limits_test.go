@@ -3,10 +3,13 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
 
@@ -106,5 +109,45 @@ func TestAnAttemptThatLeavesProviderConfigurationAloneIsNotFlagged(t *testing.T)
 	waitAttemptPrepared(t, s, "ended_ok")
 	if changes := waitProviderChanges(t, s); changes.Flagged() {
 		t.Fatalf("changes = %+v", changes)
+	}
+}
+
+func TestAnAttemptWhoseProviderWalkFailsOrIsTruncatedIsFlagged(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		walk func(root string, limit int, after bool) (map[string]string, bool, error)
+	}{
+		{"truncated before", func(root string, _ int, after bool) (map[string]string, bool, error) {
+			if after {
+				return source.ProviderState(root, providerWalkLimit)
+			}
+			return source.ProviderState(root, 1)
+		}},
+		{"truncated after", func(root string, _ int, after bool) (map[string]string, bool, error) {
+			if after {
+				return source.ProviderState(root, 1)
+			}
+			return source.ProviderState(root, providerWalkLimit)
+		}},
+		{"failed after", func(root string, limit int, after bool) (map[string]string, bool, error) {
+			if after {
+				return nil, false, errors.New("unreadable")
+			}
+			return source.ProviderState(root, limit)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, s, _, _, _ := workspaceExecutor(t, "happy")
+			e.cfg.CancelGrace = naturalExitGrace
+			var walks atomic.Int32
+			e.providerState = func(root string, limit int) (map[string]string, bool, error) {
+				return c.walk(root, limit, walks.Add(1) > 1)
+			}
+			e.LaunchAttempt("attempt")
+			waitAttemptPrepared(t, s, "ended_ok")
+			if changes := waitProviderChanges(t, s); !changes.Flagged() || !changes.Truncated || len(changes.Changes) != 0 {
+				t.Fatalf("changes = %+v", changes)
+			}
+		})
 	}
 }
