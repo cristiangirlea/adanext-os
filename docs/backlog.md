@@ -268,13 +268,175 @@ is M4.
   Acceptance: each kind of drift is reported, and an unchanged original reports none; a
   corrupted snapshot artifact or a stale manifest refuses the launch.
 
+## M4 First local workflow
+
+Five slices (decisions log, 2026-10-20). M4.1 first. M4.2 and M4.3 then one at a time, since
+each touches the schema or the API. M4.4 can start beside M4.2 on what the API already offers,
+and finishes after M4.3. M4.5 comes last.
+
+- [ ] **M4.1 The real engine, end to end.** `adad` finds the pinned engine, built by
+  `scripts/build-engine.sh` at `engine/engine.json`'s revision, in the app's directory or through
+  a flag. It checks the binary's SHA-256 against the expected one and refuses any other. The
+  expected SHA-256 is built into `adad` from `build-engine.sh`'s output, never read from beside
+  the binary. The engine runs with the environment of #58 (decisions log, 2026-10-19).
+  The capability matrix: per backend (claude, codex) and mode (readonly, auto, yolo; `ask`
+  refused until approvals exist, #7), what each enforces: read-only, workspace writes and shell,
+  network, approvals, continuation, cancellation, usage reporting, model discovery (M4.4 takes
+  models from it) and enforceable limits. Checks (M4.2) are listed as unsandboxed. Each cell is
+  `enforced` (by whom, and the live test that showed it), `requested` (passed, not verified) or
+  `unsupported`, keyed by the CLI version observed and dated; a different installed version
+  shows the cells as unverified. It is built from the pinned `hrn`'s accept and reject answers,
+  a static table recorded in the decisions log, and, per plan section 4, an assessment of what
+  the CLI loads: repository configuration and hooks in the worktree (`.claude/`, `.codex/`,
+  `.mcp.json`), user-level configuration, plugins and MCP servers under the profile. A worktree
+  holding provider configuration or hooks is reported at inspection and shown on the task, and
+  again when an attempt's changes add or alter any of them: marked in Changes, and shown before
+  a refine starts. A start whose options the matrix refuses answers 409 `unsupported_options`
+  before any preparation. The API exposes the matrix for the UI.
+  Evidence, on the owner's plans, small, never an API key, the backend always named: one real
+  claude run and one real codex run in readonly mode through `adad` on a tiny fixture repository
+  holding a project hook that writes a marker, each run asked to write a file, on Windows,
+  recorded with run ids, durations and the events received. This is also the live
+  check of the #58 allow-list. Before each live run, each CLI's own status command shows a plan
+  sign-in (not an API key), and its settings hold no `apiKeyHelper` or key in `env`; the output
+  is recorded with identifiers masked. Live runs are behind an explicit opt-in that CI never
+  sets, with a turn and time cap and a fixed tiny prompt.
+  Acceptance: the matrix refuses each unsupported combination; a cell for another CLI version
+  shows as unverified; a wrong engine hash is refused, and so is a hash file placed beside the
+  binary; a live readonly run asked to write a file leaves it absent, or the cell reads
+  `requested`; a fixture repository with a project hook writing a marker is reported, and the
+  result is recorded; without the opt-in no live run starts; each CLI's sign-in status is
+  recorded before its run; the live runs are recorded.
+- [ ] **M4.2 Checks.** A task declares its check commands: argv lists, a working directory
+  inside the worktree, a timeout of at most 30 minutes, and output capped at 16 MiB per check;
+  output beyond the cap is read and discarded, the log marked truncated, and the check keeps
+  running. There are at most 16 checks per task. They are part of the task's revision and are never discovered from the repository. A check
+  still runs the repository's code and the agent's changes with the user's rights, on the host,
+  outside any backend sandbox and with network. The UI says so where checks are declared and
+  where their results are shown, and the capability matrix lists checks as unsandboxed.
+  The commit. After an attempt ends ok, Ada commits the agent's changes as one commit on
+  `ada/<task>` ("Agent changes", Ada's author). The commit runs through M3's git runner with the
+  git directory named explicitly (never read from the worktree's `.git` file), system and global
+  config off, Ada's clone config checked against the copy Ada wrote (a difference moves the
+  attempt to `recovery_required`), hooks pointed at an empty directory, `core.fsmonitor=false`,
+  `commit.gpgsign=false`, and author and committer set through `GIT_AUTHOR_*` and
+  `GIT_COMMITTER_*`. Before committing, Ada checks that the branch still descends from the
+  imported-changes commit. Commits the agent made itself are kept beneath Ada's commit; a
+  rewritten or moved history moves the attempt to `recovery_required`.
+  Running. Each check runs as a managed process in a fresh detached worktree at the tested
+  commit, as the baseline does, at `<state>/projects/<id>/checks/<attempt>/<run>`, a path built from ids, its admin directory recorded when it is created, and both removed afterwards by the rules of M4.3's removal; nothing the
+  agent left outside the commit reaches a check, and the attempt's worktree is never changed by
+  one. It runs under the executor's process-tree supervision, output capped into artifacts,
+  with the #58 list minus `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and under the same never-passed
+  rule. A check may name further variables taken from `adad`'s environment, recorded with the
+  check; a never-passed one is refused. The working directory is resolved at run
+  time through no-follow handles (M3.3's walk); a link or reparse point on its path refuses the
+  check. After each check, the tracked files of the check's worktree must still match the tested commit; a check that changes them is recorded as such and its result does not bind the commit. Later checks start from their own fresh worktree and are unaffected.
+  Ada records the command, the environment's keys, the tested commit, the exit code, the
+  duration and the log artifact. The first `/v1` route that serves a check log checks
+  membership on each read (#3).
+  The baseline. The same checks run on the snapshot's imported-changes commit, in a separate
+  detached worktree removed afterwards, once per snapshot and check definition (again when a
+  check's definition changes). So failures that already existed are told apart from new ones.
+  States. The task moves `running` -> `verifying` -> `awaiting_review`; failed checks are
+  recorded, the task still goes to `awaiting_review`, and is shown as failing. Stop during
+  `verifying` kills the running check's tree and records the remaining checks as not run. A
+  restart during `verifying` moves the task to `awaiting_review` with the interrupted checks
+  marked. Any change to the branch after a check invalidates that result. A forward migration
+  adds checks and their results.
+  Acceptance: a check that passes, one that fails, one that times out, and one killed with its
+  process tree; a timeout or output cap above the ceiling refused, and so is a seventeenth check;
+  a check writing past the cap ends with its own exit code, its log marked truncated; a baseline
+  failure told apart
+  from a new one, and the baseline run again after a check's definition changes; a result
+  invalidated by a later edit; a check that edits a tracked file recorded as such, binding
+  nothing; no check runs from a repository script unless the task declares it; the check's
+  environment holds no credential-profile variable and no never-passed variable; a further variable the check names reaches it from `adad`'s environment, and naming a never-passed one is refused; a check's worktree and its admin directory are gone after the check, and a crash in between finishes on the next try; a working
+  directory that the tested commit holds as a symlink to outside is refused; an ignored file the
+  agent left in its worktree is absent from the check's worktree; a check that edits a tracked
+  file leaves the attempt's worktree unchanged; a check
+  that daemonizes (double fork or `setsid` on Linux; a detached child on Windows) leaves nothing
+  running when it ends; an agent that sets `core.hooksPath`, `core.fsmonitor` or `gpg.program`
+  in the clone, or repoints the worktree's `.git` file, causes no marker and goes to recovery;
+  an agent commit is kept; an agent reset below the imported-changes commit goes to recovery;
+  Stop and a restart during `verifying` end as stated; a non-member reading a check log gets
+  404.
+- [ ] **M4.3 Changes and review.** `GET /v1/tasks/{id}/changes` returns the task's own changes,
+  the diff from the imported-changes commit to the agent-changes commit: the file list with
+  each file's status and patch, binary files marked. It is capped at stated numbers (files,
+  bytes per file, bytes in all), with truncation marked; members only (404 otherwise). It runs
+  through Ada's git runner with `--no-ext-diff --no-textconv -z` and a fixed rename threshold,
+  and returns paths as the bytes git reported. `GET /v1/tasks/{id}/files` lists and reads files
+  from the agent-changes commit through git (`ls-tree`, `cat-file`), never by walking the
+  worktree, so no link is followed; symlinks are shown as links; size-capped; members only.
+  Review actions as #3 says: findings (any member); accept (the attempt's actor or a project
+  owner), which records the reviewed commit, its check results and the coordinator's ownership
+  generation (#3), so a later change invalidates it, and moves the task to `accepted`.
+  Refine (the attempt's actor or a project owner, #3) is a new attempt on the same task, run as
+  a fresh engine session (native continuation stays in M6) whose actor is the requester and
+  which runs on the requester's profile. It continues on `ada/<task>` from its tip, with the
+  findings in its prompt. Refine is allowed from `awaiting_review`, `failed` and `canceled`, and
+  moves the task to `preparing` with the new attempt; it is refused for an accepted task. It is
+  also refused while any attempt of the task is not ended or is `recovery_required`. An ended
+  attempt's remaining changes are committed as in M4.2 before its worktree is removed. Removal
+  deletes only `<state>/projects/<id>/worktrees/<attempt>`, a path built from ids, never from
+  stored text. It never follows a link or reparse point (the directory itself is Lstat-checked
+  as a real directory under the state root), and then removes only that attempt's admin
+  directory under the clone's `worktrees/`, as M3.3 recorded it, never through `git worktree
+  prune`. Each step is idempotent after a crash. This settles #98. Export stays in M7.
+  Acceptance: the diff matches git's for a text change, a binary file, a rename, a mode change
+  and a deletion; each cap marks its truncation; a non-member gets 404 from changes and files;
+  the files route shows a symlink as a link and reads nothing through it; findings from a
+  non-member refused; an accept or refine by the creator or a reviewer who is neither the actor
+  nor an owner refused; an accept against an older commit or generation refused; refine starts
+  a second attempt on the requester's profile that sees the first one's commits; refine refused
+  for a running or `recovery_required` attempt and for an accepted task; refine of a failed and
+  of a canceled task; a failed attempt's changes reach the second attempt; an attempt that adds
+  a project hook is marked in Changes and before refine; symlinks and junctions inside the
+  worktree, and the worktree itself replaced by a junction, all pointing at a directory with a
+  marker: removal leaves the marker; another attempt's missing worktree keeps its admin
+  directory; a crash between the removal steps finishes on the next try.
+- [ ] **M4.4 The workspace UI.** The plan's practical layout (`docs/plan.md` section 3) in `ui/`,
+  through `AdaClient` only. Left navigation: projects and active tasks. Main area: the task and
+  its activity, events rendered by kind instead of raw JSON. A resizable work area: Changes (a
+  diff viewer), Checks (results and logs, marked as unsandboxed), and Files (a read-only tree of
+  the agent-changes commit, from M4.3's files route); Preview waits for M5. Patches and paths
+  render as text, never HTML; control and bidirectional characters in paths and lines are
+  marked. A status bar: branch, executor, backend and model, task state, Stop. The import flow:
+  a folder chosen through a typed Electron dialog in main, the only way a path enters (#5). The
+  bridge method takes no path; main sends the chosen path to inspect and import and keeps a
+  short-lived handle for the snapshot and create calls; the generic bridge refuses a `path`
+  field on the inspect and import routes from the renderer. Then inspect; blockers shown with
+  their paths; provider configuration and hooks found in the repository shown; the uncommitted
+  changes offered ("Include these changes in the new feature branch"), untracked files
+  selectable and sensitive ones marked; the snapshot; then task creation with objective,
+  acceptance criteria, check commands (with the unsandboxed notice), and backend, model and mode
+  from the capability matrix. Readonly is the default mode; yolo is never preselected and is
+  shown with what it disables (plan section 4). Light theme by default and a dark mode; Source
+  Sans 3 and JetBrains Mono bundled, no remote fonts; keyboard navigation, visible focus, reduced
+  motion. Read the frontend-design skill first. The resume summary and Overview wait for M6.
+  Acceptance: Vitest for the components; a renderer call with a typed path is refused by the
+  bridge; readonly preselected and yolo never; a path holding control or bidirectional
+  characters is marked and a patch holding HTML shows as text; Playwright for the flow import ->
+  task -> fake engine -> checks -> changes -> accept; an accessibility pass.
+- [ ] **M4.5 Demonstrations.** The full flow with a real backend on Windows (the owner's PC)
+  and on Ubuntu, recorded in the status file as evidence with screenshots, on a fixture
+  repository and a scratch state directory; screenshots show no account, e-mail or sign-in
+  details. Ubuntu needs a desktop session and a signed-in claude or codex CLI there, an owner
+  action ("Owner actions pending"). As in M4.1: before each live run, each CLI's own status
+  command shows a plan sign-in (not an API key), and its settings hold no `apiKeyHelper` or key
+  in `env`; the output is recorded with identifiers masked. Live runs are behind an explicit
+  opt-in that CI never sets, with a turn and time cap.
+  Acceptance: both demonstrations recorded with the sign-in status before each; the Playwright
+  flow green on the pull request's ubuntu-latest job (under xvfb) and on the windows-latest job
+  of the push to main after M4.4 merges.
+
 ## Later milestones
 
 Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
 
 - **M3 Project workspaces:** broken into slices; see "M3 Project workspaces" above.
-- **M4 First local workflow:** desktop import, task, edit, checks, diff and review on Windows and
-  Ubuntu with a real backend.
+- **M4 First local workflow:** broken into slices; see "M4 First local workflow" above.
 - **M4c Editor integration, VS Code first:** an extension that is one more client of `adad`.
   The desktop's Node modules (find-or-start, handshake, event-stream client) move to a package
   both use; the extension finds `adad` from the installed desktop app or a setting, starts it if
