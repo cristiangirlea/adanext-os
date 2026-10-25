@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/artifact"
+	"github.com/cristiangirlea/ada-os/internal/engine"
 	"github.com/cristiangirlea/ada-os/internal/source"
 	"github.com/cristiangirlea/ada-os/internal/store"
 )
@@ -121,6 +122,11 @@ func (a *Admission) Close() {
 	a.mu.Unlock()
 }
 
+// CapabilityProber reports, per backend, what this host has of its CLI.
+type CapabilityProber interface {
+	Installed(ctx context.Context) map[string]engine.Installed
+}
+
 type Execution struct {
 	EngineSHA256 string
 	Generation   int64
@@ -137,6 +143,9 @@ type Execution struct {
 	GitUnavailable string
 	// Admission is shared with the coordinator's signal-driven stop; New makes one when nil.
 	Admission *Admission
+	// Capabilities reports the installed CLIs for GET /v1/capabilities; *executor.Executor satisfies
+	// it. nil shows every CLI-dependent cell unverified.
+	Capabilities CapabilityProber
 }
 
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
@@ -159,6 +168,7 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
+	mux.HandleFunc("GET /v1/capabilities", h.capabilities)
 	mux.HandleFunc("POST /v1/projects/inspect", h.inspect)
 	mux.HandleFunc("POST /v1/projects", h.importProject)
 	mux.HandleFunc("POST /v1/projects/{id}/snapshots", h.snapshot)
@@ -336,17 +346,20 @@ func newID() (string, error) {
 }
 
 type taskJSON struct {
-	ID        string           `json:"id"`
-	Project   string           `json:"project"`
-	CreatedBy string           `json:"created_by"`
-	Objective string           `json:"objective"`
-	Criteria  string           `json:"criteria"`
-	State     store.State      `json:"state"`
-	Revision  int64            `json:"revision"`
-	Created   string           `json:"created"`
-	Updated   string           `json:"updated"`
-	Snapshot  string           `json:"snapshot,omitempty"` // the source snapshot the task's workspace is built from
-	Attempt   *taskAttemptJSON `json:"attempt"`
+	ID        string      `json:"id"`
+	Project   string      `json:"project"`
+	CreatedBy string      `json:"created_by"`
+	Objective string      `json:"objective"`
+	Criteria  string      `json:"criteria"`
+	State     store.State `json:"state"`
+	Revision  int64       `json:"revision"`
+	Created   string      `json:"created"`
+	Updated   string      `json:"updated"`
+	Snapshot  string      `json:"snapshot,omitempty"` // the source snapshot the task's workspace is built from
+	// ProviderConfiguration is the provider configuration and hooks the snapshot holds, which the
+	// CLI loads from the worktree; null with no snapshot or one taken before it was recorded.
+	ProviderConfiguration *store.ProviderConfiguration `json:"provider_configuration"`
+	Attempt               *taskAttemptJSON             `json:"attempt"`
 	// QueuePosition is the task's 1-based place among the pending attempts of
 	// all users while it is queued; absent otherwise. Only GET reports it.
 	QueuePosition int `json:"queue_position,omitempty"`
@@ -356,6 +369,11 @@ type taskAttemptJSON struct {
 	ID            string `json:"id"`
 	State         string `json:"state"`
 	QueuePosition int    `json:"queue_position,omitempty"`
+	// ProviderChanges is what the attempt added, altered or removed of the provider configuration,
+	// null until assessed after its engine's tree has ended; ProviderFlagged is set when it must
+	// be shown before review or refine, and for an attempt that ended with a worktree unassessed.
+	ProviderChanges *store.ProviderChanges `json:"provider_changes"`
+	ProviderFlagged bool                   `json:"provider_flagged"`
 }
 
 type startedTaskJSON struct {
@@ -364,9 +382,9 @@ type startedTaskJSON struct {
 }
 
 func taskValue(t store.Task) taskJSON {
-	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated, Snapshot: t.Snapshot}
+	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated, Snapshot: t.Snapshot, ProviderConfiguration: t.ProviderConfiguration}
 	if a := t.Attempt; a.ID != "" {
-		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition}
+		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged()}
 		// Keep the existing top-level field for /v1 clients.
 		v.QueuePosition = a.QueuePosition
 	}
@@ -469,15 +487,19 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 		// The task's workspace is built from this snapshot when it starts.
 		var snapshot any
+		var provider *store.ProviderConfiguration
 		if input.Snapshot != "" {
 			if err := tx.RequireSnapshot(r.Context(), input.Project, input.Snapshot); err != nil {
 				return 0, nil, err
 			}
 			snapshot = input.Snapshot
+			if provider, err = tx.SnapshotProvider(r.Context(), input.Snapshot); err != nil {
+				return 0, nil, err
+			}
 		}
 		at := time.Now().UTC().Format(time.RFC3339Nano)
 		_, err = tx.ExecContext(r.Context(), "INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,snapshot) VALUES(?,?,?,?,?,'draft',0,?,?,?)", id, input.Project, user, input.Objective, input.Criteria, at, at, snapshot)
-		return 201, taskValue(store.Task{ID: id, Project: input.Project, CreatedBy: user, Objective: input.Objective, AcceptanceCriteria: input.Criteria, State: store.Draft, Revision: 0, Created: at, Updated: at, Snapshot: input.Snapshot}), err
+		return 201, taskValue(store.Task{ID: id, Project: input.Project, CreatedBy: user, Objective: input.Objective, AcceptanceCriteria: input.Criteria, State: store.Draft, Revision: 0, Created: at, Updated: at, Snapshot: input.Snapshot, ProviderConfiguration: provider}), err
 	})
 }
 
@@ -716,12 +738,19 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Backend string `json:"backend"`
-		Model   string `json:"model"`
-		Effort  string `json:"effort"`
-		Mode    string `json:"mode"`
+		Backend  string `json:"backend"`
+		Model    string `json:"model"`
+		Effort   string `json:"effort"`
+		Mode     string `json:"mode"`
+		MaxTurns int    `json:"max_turns"`
+		Timeout  string `json:"timeout"`
 	}
-	if err := decode(body, &input); err != nil || !validBackend(input.Backend) || !validModel(input.Model) || !printableASCII(input.Effort) || (input.Mode != "readonly" && input.Mode != "auto" && input.Mode != "yolo") {
+	if err := decode(body, &input); err != nil || !validBackend(input.Backend) || !validModel(input.Model) || !printableASCII(input.Effort) || !validBackend(input.Mode) || input.MaxTurns < 0 || input.MaxTurns > maxTurnLimit {
+		writeError(w, 400, "bad_request")
+		return
+	}
+	timeout, ok := startTimeout(input.Timeout)
+	if !ok {
 		writeError(w, 400, "bad_request")
 		return
 	}
@@ -730,6 +759,20 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		storeError(w, err)
 		return
+	}
+	// The pinned engine's matrix decides before anything is recorded, prepared or cloned.
+	if err := engine.Capabilities().Check(engine.StartOptions{Backend: input.Backend, Mode: input.Mode, Model: input.Model, Effort: input.Effort, MaxTurns: input.MaxTurns, Timeout: timeout}); err != nil {
+		var unsupported *engine.UnsupportedError
+		if errors.As(err, &unsupported) {
+			writeJSON(w, 409, errorBody{"unsupported_options", unsupported.Reason})
+			return
+		}
+		writeInternalError(w, err)
+		return
+	}
+	limit := ""
+	if timeout > 0 {
+		limit = timeout.String()
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
 	// Held through the transaction and the scheduler handoff: a stop waits
@@ -792,7 +835,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return 0, nil, err
 		}
-		_, err = tx.ExecContext(r.Context(), "INSERT INTO attempts(id,task,actor,backend,model,effort,mode,executor,ownership_generation,engine_sha256,state,started) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?)", attemptID, id, user, input.Backend, input.Model, input.Effort, input.Mode, "local", h.exec.Generation, h.exec.EngineSHA256, time.Now().UTC().Format(time.RFC3339Nano))
+		_, err = tx.ExecContext(r.Context(), "INSERT INTO attempts(id,task,actor,backend,model,effort,mode,executor,ownership_generation,engine_sha256,state,started,max_turns,timeout) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)", attemptID, id, user, input.Backend, input.Model, input.Effort, input.Mode, "local", h.exec.Generation, h.exec.EngineSHA256, time.Now().UTC().Format(time.RFC3339Nano), input.MaxTurns, limit)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -804,6 +847,47 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 	if ok && attemptID != "" && h.exec.Runner != nil {
 		h.exec.Runner.LaunchAttempt(attemptID)
 	}
+}
+
+// The bounds of a start's limits: hrn enforces the time, the CLI counts the turns.
+const (
+	maxTurnLimit = 1000
+	maxTimeout   = 24 * time.Hour
+)
+
+// startTimeout parses a start's timeout: empty is none, otherwise a Go duration in (0, 24h].
+func startTimeout(value string) (time.Duration, bool) {
+	if value == "" {
+		return 0, true
+	}
+	d, err := time.ParseDuration(value)
+	if len(value) > 32 || err != nil || d <= 0 || d > maxTimeout {
+		return 0, false
+	}
+	return d, true
+}
+
+// capabilities serves the pinned engine's capability matrix with what this host has of each
+// CLI, to any account of the coordinator. It holds no path and no secret.
+func (h *handler) capabilities(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.actor(w, r)
+	if !ok {
+		return
+	}
+	exists, err := h.store.UserExists(r.Context(), user)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if !exists {
+		writeError(w, 403, "forbidden")
+		return
+	}
+	var installed map[string]engine.Installed
+	if h.exec.Capabilities != nil {
+		installed = h.exec.Capabilities.Installed(r.Context())
+	}
+	writeJSON(w, 200, engine.Capabilities().WithInstalled(installed))
 }
 
 func validBackend(value string) bool {

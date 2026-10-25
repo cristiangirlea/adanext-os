@@ -236,3 +236,30 @@ func (e *Executor) recoverWorkspace(a store.Attempt, reason, mismatch string) {
 		e.cfg.Hub.Notify(a.ID)
 	}
 }
+
+// providerWalkLimit bounds each walk of a worktree for its provider configuration; past it the
+// attempt is flagged as not fully assessed.
+const providerWalkLimit = 200000
+
+// recordProviderChanges compares the worktree's provider configuration with what it held before
+// the engine started and records the difference on the attempt, so review and refine can show
+// it (decisions log, 2026-10-25). A walk that failed, stopped at its limit or met a link at a
+// provider path records the attempt as flagged regardless.
+func (e *Executor) recordProviderChanges(a store.Attempt, work string, before map[string]string, unknown bool) {
+	after, truncated, err := e.providerState(work, providerWalkLimit)
+	changes := store.ProviderChanges{Truncated: unknown || truncated || err != nil}
+	for _, c := range source.DiffProviderState(before, after) {
+		changes.Changes = append(changes.Changes, store.ProviderChange{Path: c.Path, Change: c.Change})
+	}
+	e.saveProviderChanges(a, changes)
+}
+
+// saveProviderChanges records an assessment on the attempt and tells its subscribers.
+func (e *Executor) saveProviderChanges(a store.Attempt, changes store.ProviderChanges) {
+	if err := e.owned(a.ID, func(tx *store.Tx) error { return tx.RecordProviderChanges(context.Background(), a.ID, changes) }); err != nil {
+		return
+	}
+	if e.cfg.Hub != nil {
+		e.cfg.Hub.Notify(a.ID)
+	}
+}

@@ -60,4 +60,32 @@
 // result whose engine then exits by itself ends ended_ok even when a
 // descendant still held stdout and the post-exit check had to close it: the
 // result was complete, and only the descendant's output after it is lost.
+//
+// Capabilities. GET /v1/capabilities returns the pinned engine's capability
+// matrix (internal/engine's Capabilities, decisions log 2026-10-25) to any
+// account of the coordinator, 403 otherwise: per backend and mode, each row's
+// cell is enforced (by whom, and the test that shows it), requested (passed,
+// not verified) or unsupported; checks are unsandboxed. "installed" is what
+// this host has of the CLI, from the engine's hello and the CLI's own version
+// command; a CLI-dependent cell reads unverified, with the table's status in
+// "recorded", when the installed version is not the recorded one or no CLI was
+// found. It holds no path and no secret.
+//
+// Unsupported options. A start the matrix refuses (an unknown backend, mode
+// ask, an effort the backend cannot apply, max_turns on codex) is answered 409
+// {"error":"unsupported_options","message":<reason>} before anything is
+// recorded, prepared or cloned. A start may set max_turns (1 to 1000) and
+// timeout (a Go duration up to 24h, stored normalised, e.g. "3m0s"); the
+// engine receives each only when it is set.
+//
+// Provider configuration. An inspection's "findings" hold the non-blocking
+// provider_configuration: work-tree paths under .claude/ or .codex/, or named
+// .mcp.json. A snapshot records those its worktree will hold (tracked ones,
+// and the untracked ones it selected) as provider_configuration {paths,count};
+// a task shows its snapshot's, null when it has none or the snapshot predates
+// migration 0008. A task's attempt shows provider_changes, what it added,
+// altered or removed of them, recorded once the engine's whole tree has ended
+// (null until then, and for an attempt without a workspace), and
+// provider_flagged, set when that must be shown before review or refine, and
+// for an attempt that ended with a workspace but no assessment.
 package api

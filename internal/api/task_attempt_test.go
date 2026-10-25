@@ -51,13 +51,13 @@ func TestTaskReadsIncludeTheCurrentAttemptAndQueuePosition(t *testing.T) {
 			}
 		}
 	}
-	check(map[string]any{"id": attempt, "state": "pending", "queue_position": 1})
+	check(map[string]any{"id": attempt, "state": "pending", "queue_position": 1, "provider_changes": nil, "provider_flagged": false})
 	// Latest means insertion order, including a terminal attempt, not lexicographic id or timestamp.
 	ctx := context.Background()
 	if err := f.s.CreateAttempt(ctx, store.Attempt{ID: "latest", Task: id, Actor: "alice", Backend: "codex", Mode: "auto", Executor: "local", State: "canceled"}); err != nil {
 		t.Fatal(err)
 	}
-	check(map[string]any{"id": "latest", "state": "canceled"})
+	check(map[string]any{"id": "latest", "state": "canceled", "provider_changes": nil, "provider_flagged": false})
 	if code, _ := do(t, asUser(f, "bob"), "GET", "/v1/tasks/"+id, "", "", nil); code != 404 {
 		t.Fatal(code)
 	}

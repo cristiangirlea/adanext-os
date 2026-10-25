@@ -153,7 +153,10 @@ func (s *Store) BumpAndRecover(ctx context.Context) (int64, []string, error) {
 		if err := transition(ctx, tx, a.task, Interrupted, RecoveryRequired, rev+1); err != nil {
 			return 0, nil, err
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE attempts SET state='recovery_required',ended=? WHERE id=?", now(), a.id); err != nil {
+		// A worktree whose provider changes were never assessed is recorded as not assessed, so it is flagged.
+		if _, err := tx.ExecContext(ctx, `UPDATE attempts SET state='recovery_required',ended=?,
+			provider_changes=CASE WHEN provider_changes IS NULL AND EXISTS(SELECT 1 FROM workspaces WHERE attempt=attempts.id)
+				THEN '{"changes":[],"truncated":true}' ELSE provider_changes END WHERE id=?`, now(), a.id); err != nil {
 			return 0, nil, err
 		}
 		// A queued attempt (pending behind another) is marked like a running

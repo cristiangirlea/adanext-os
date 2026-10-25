@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -122,7 +123,9 @@ type Snapshot struct {
 	Staged, Unstaged                     ArtifactRef
 	Untracked                            []SnapshotFile
 	State                                *SnapshotState // nil for a snapshot taken before migration 0007
-	CreatedBy, Created                   string
+	// ProviderConfiguration is nil for a snapshot taken before migration 0008.
+	ProviderConfiguration *ProviderConfiguration
+	CreatedBy, Created    string
 }
 
 // SnapshotState is what a snapshot recorded of the original for drift: its
@@ -165,8 +168,18 @@ func (tx *Tx) RecordSnapshot(ctx context.Context, snap Snapshot) (Snapshot, erro
 	if snap.State != nil {
 		branch = sql.NullString{String: snap.State.Branch, Valid: true}
 	}
-	if _, err := tx.tx.ExecContext(ctx, "INSERT INTO source_snapshots(id,project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created,branch) VALUES(?,?,?,?,?,?,?,?,?)",
-		snap.ID, snap.Project, snap.BaseCommit, snap.Fingerprint, snap.Staged.Hash, snap.Unstaged.Hash, snap.CreatedBy, snap.Created, branch); err != nil {
+	if snap.ProviderConfiguration == nil {
+		snap.ProviderConfiguration = &ProviderConfiguration{}
+	}
+	if snap.ProviderConfiguration.Paths == nil {
+		snap.ProviderConfiguration.Paths = []string{}
+	}
+	provider, err := json.Marshal(snap.ProviderConfiguration)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if _, err := tx.tx.ExecContext(ctx, "INSERT INTO source_snapshots(id,project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created,branch,provider_configuration) VALUES(?,?,?,?,?,?,?,?,?,?)",
+		snap.ID, snap.Project, snap.BaseCommit, snap.Fingerprint, snap.Staged.Hash, snap.Unstaged.Hash, snap.CreatedBy, snap.Created, branch, string(provider)); err != nil {
 		return Snapshot{}, err
 	}
 	if snap.State != nil {
@@ -213,15 +226,18 @@ func (s *Store) NewestSnapshot(ctx context.Context, userID, projectID string) (S
 // limits who may read it, and is empty for the trusted executor.
 func (s *Store) readSnapshot(ctx context.Context, join string, joinArgs []any, snapshotID, projectID string) (Snapshot, error) {
 	snap := Snapshot{ID: snapshotID, Project: projectID, Untracked: []SnapshotFile{}}
-	var branch sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT s.base_commit,s.fingerprint,s.staged_patch,staged.size,s.unstaged_patch,unstaged.size,s.created_by,s.created,s.branch
+	var branch, provider sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT s.base_commit,s.fingerprint,s.staged_patch,staged.size,s.unstaged_patch,unstaged.size,s.created_by,s.created,s.branch,s.provider_configuration
 		FROM source_snapshots s `+join+`
 		JOIN artifacts staged ON staged.hash=s.staged_patch JOIN artifacts unstaged ON unstaged.hash=s.unstaged_patch
-		WHERE s.id=? AND s.project=?`, append(joinArgs, snapshotID, projectID)...).Scan(&snap.BaseCommit, &snap.Fingerprint, &snap.Staged.Hash, &snap.Staged.Size, &snap.Unstaged.Hash, &snap.Unstaged.Size, &snap.CreatedBy, &snap.Created, &branch)
+		WHERE s.id=? AND s.project=?`, append(joinArgs, snapshotID, projectID)...).Scan(&snap.BaseCommit, &snap.Fingerprint, &snap.Staged.Hash, &snap.Staged.Size, &snap.Unstaged.Hash, &snap.Unstaged.Size, &snap.CreatedBy, &snap.Created, &branch, &provider)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Snapshot{}, ErrNotFound
 	}
 	if err != nil {
+		return Snapshot{}, err
+	}
+	if snap.ProviderConfiguration, err = decodeJSON[ProviderConfiguration](provider); err != nil {
 		return Snapshot{}, err
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT f.path,f.mode,f.artifact,a.size FROM snapshot_untracked f JOIN artifacts a ON a.hash=f.artifact WHERE f.snapshot=? ORDER BY f.rowid", snapshotID)

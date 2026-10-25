@@ -1,5 +1,12 @@
 {
   "repository": "github.com/cristiangirlea/harness",
   "revision": "8dd2659b953e9e5d9c593fa655254167ea9f8a8c",
-  "go": "go1.26.4"
+  "go": "go1.26.4",
+  "sha256": {
+    "darwin/amd64": "02c0a0117778c6f93d58328826bc140cc6b5ea18f667e76906d2ae9a99d30d08",
+    "darwin/arm64": "4fb8ee2be8bdcbbc1b0332a5dbdc07185b0038d12786126fa421141378872855",
+    "linux/amd64": "95a9c4eeccf8d05142af71ddbb6396815854de082f60d65ceb055603aeeb307d",
+    "linux/arm64": "a9515453fc078381bdab64a6887df1ee515e0eecb8e6860b1bbf7b24af8b74e7",
+    "windows/amd64": "ceb7e138722fc9b482e0af60444cd266b6d2aa50514ce53bbe60749fc799220a"
+  }
 }

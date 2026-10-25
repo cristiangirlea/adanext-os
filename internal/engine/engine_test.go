@@ -21,7 +21,7 @@ func writeFile(t *testing.T, name, content string) string {
 }
 
 func TestLoadPinReadsTheRepositoryRevisionAndGoVersion(t *testing.T) {
-	p := writeFile(t, "engine.json", `{"repository": "github.com/cristiangirlea/harness", "revision": "`+goodRevision+`", "go": "go1.26.4"}`)
+	p := writeFile(t, "engine.json", pinJSON(`"linux/amd64": "`+strings.Repeat("0", 64)+`"`))
 	pin, err := LoadPin(p)
 	if err != nil {
 		t.Fatal(err)
@@ -114,5 +114,109 @@ func TestVerifyComparesTheHashCaseInsensitively(t *testing.T) {
 	}
 	if err := Verify(p, "abc"); err == nil {
 		t.Fatal("Verify accepted a hash that is not 64 hex characters")
+	}
+}
+
+func pinJSON(sha string) string {
+	return `{"repository": "github.com/cristiangirlea/harness", "revision": "` + goodRevision + `", "go": "go1.26.4", "sha256": {` + sha + `}}`
+}
+
+func TestLoadPinReadsTheHashPerPlatform(t *testing.T) {
+	hash := strings.Repeat("ab", 32)
+	pin, err := LoadPin(writeFile(t, "engine.json", pinJSON(`"windows/amd64": "`+hash+`"`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := pin.Expected("windows", "amd64"); err != nil || got != hash {
+		t.Fatalf("Expected(windows, amd64) = %q, %v", got, err)
+	}
+	if _, err := pin.Expected("plan9", "amd64"); err == nil {
+		t.Fatal("a platform with no recorded hash was given one")
+	}
+}
+
+func TestLoadPinRefusesABadHashTable(t *testing.T) {
+	cases := map[string]string{
+		"short hash":     `"linux/amd64": "abc"`,
+		"uppercase hash": `"linux/amd64": "` + strings.Repeat("AB", 32) + `"`,
+		"bad platform":   `"linux": "` + strings.Repeat("ab", 32) + `"`,
+		"spaced key":     `"linux /amd64": "` + strings.Repeat("ab", 32) + `"`,
+		"no hashes":      ``,
+	}
+	for name, sha := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadPin(writeFile(t, "engine.json", pinJSON(sha))); err == nil {
+				t.Fatalf("LoadPin accepted %s", sha)
+			}
+		})
+	}
+	if _, err := LoadPin(writeFile(t, "engine.json", `{"repository": "r", "revision": "`+goodRevision+`", "go": "go1.26.4"}`)); err == nil {
+		t.Fatal("LoadPin accepted a pin without hashes")
+	}
+}
+
+func TestTheEmbeddedPinIsTheRepositoryPin(t *testing.T) {
+	embedded, err := Pinned()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := LoadPin(filepath.Join("..", "..", "engine", "engine.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if embedded.Revision != file.Revision || len(embedded.SHA256) != len(file.SHA256) {
+		t.Fatalf("embedded %+v, file %+v", embedded, file)
+	}
+	for _, platform := range []string{"windows/amd64", "linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"} {
+		if embedded.SHA256[platform] == "" || embedded.SHA256[platform] != file.SHA256[platform] {
+			t.Errorf("%s: embedded %q, file %q", platform, embedded.SHA256[platform], file.SHA256[platform])
+		}
+	}
+}
+
+func TestBuildEngineScriptBuildsReproducibly(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "build-engine.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"CGO_ENABLED=0", "-trimpath", "-buildvcs=false", "-ldflags=-buildid=", "GOENV=off", "GOFLAGS=", `GOTOOLCHAIN="$want_go"`, "GOFIPS140"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("build-engine.sh lacks %s", want)
+		}
+	}
+}
+
+func TestLocateFindsTheEngineInTheAppDirectoryOrThroughTheFlag(t *testing.T) {
+	app := t.TempDir()
+	if _, found, err := Locate("", app, "linux"); err != nil || found {
+		t.Fatalf("empty app directory: found=%v err=%v", found, err)
+	}
+	beside := filepath.Join(app, "hrn")
+	if err := os.WriteFile(beside, []byte("engine"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if path, found, err := Locate("", app, "linux"); err != nil || !found || path != beside {
+		t.Fatalf("app directory: %q %v %v", path, found, err)
+	}
+	if path, found, err := Locate("", app, "windows"); err != nil || found {
+		t.Fatalf("windows looks for hrn.exe: %q %v %v", path, found, err)
+	}
+	flag := writeFile(t, "elsewhere", "engine")
+	if path, found, err := Locate(flag, app, "linux"); err != nil || !found || path != flag {
+		t.Fatalf("flag: %q %v %v", path, found, err)
+	}
+	if _, _, err := Locate(filepath.Join(app, "absent"), app, "linux"); err == nil {
+		t.Fatal("a flag naming a missing engine was accepted")
+	}
+}
+
+func TestAWindowsEngineFlagWithoutExeIsRefusedAtStartup(t *testing.T) {
+	plain := writeFile(t, "hrn", "engine")
+	if _, _, err := Locate(plain, t.TempDir(), "windows"); err == nil || !strings.Contains(err.Error(), ".exe") {
+		t.Fatalf("a Windows engine without .exe: %v", err)
+	}
+	upper := writeFile(t, "hrn.EXE", "engine")
+	if path, found, err := Locate(upper, t.TempDir(), "windows"); err != nil || !found || path != upper {
+		t.Fatalf("hrn.EXE: %q %v %v", path, found, err)
 	}
 }
