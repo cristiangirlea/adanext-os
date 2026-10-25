@@ -1339,29 +1339,73 @@ task's second attempt (#98).
   API; M4.4 can start beside M4.2 and finishes after M4.3; M4.5 is last. The decisions they
   need:
   Check commands are declared per task (argv lists, a working directory inside the worktree, a
-  timeout) and are never discovered from the repository's scripts, as `docs/plan.md` section 3
-  already says of import: running a repository's package scripts is running its code.
+  timeout) and are part of the task's revision; they are never discovered from the repository.
+  A check still runs the repository's code and the agent's changes with the user's rights, on
+  the host, outside any backend sandbox and with network; the UI says so where checks are
+  declared and where their results are shown, and the capability matrix lists checks as
+  unsandboxed. Checks run with the #58 list minus `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and under
+  the same never-passed rule. The working directory is resolved at run time through no-follow
+  handles (M3.3's walk); a link or reparse point on its path refuses the check. The timeout is at
+  most 30 minutes and the output at most 16 MiB per check. Before each check the worktree's
+  tracked files must match the tested commit; a check that changes them binds nothing from then on.
   Ada commits the agent's result as its own commit ("Agent changes", Ada's author) on
   `ada/<task>` before any check runs, so a check result and a review each bind a commit and not
-  a work tree that can still change.
-  The same checks run once on the snapshot's imported-changes commit as a baseline, so a failure
-  that existed before the task is told apart from one the task introduced (plan section 3).
-  A review binds the reviewed commit and its check results; any later change to the branch
-  invalidates it, as #3 already says of the content hash.
-  Refine continues on `ada/<task>` from its tip as a new attempt of the same task, with the
-  findings in its prompt; the earlier attempt's worktree, which holds the branch, is removed
-  once its record is kept. This settles #98, and moves refinement from M7 to M4.3; the M3.3
-  entry's "M7 removes worktrees" now covers export only. Reason: one branch per task keeps the
-  lineage plain, and a second branch per attempt would make export choose between them.
-  The capability matrix is the pinned `hrn`'s accept and reject answers plus a static table
-  for what the engine cannot report (read-only enforcement, network, usage reporting), recorded
-  here when M4.1 lands. Mode `ask` stays refused until an engine protocol with approvals exists
-  (#7).
+  a work tree that can still change. The agent had a shell as the user, so Ada trusts none of
+  the git state it left: the commit runs through M3's git runner with the git directory named
+  explicitly, system and global config off, the clone's config checked against Ada's copy,
+  hooks pointed at an empty directory, fsmonitor and signing off, and author and committer set
+  through the environment. The branch must still descend from the imported-changes commit;
+  the agent's own commits are kept beneath Ada's, and a rewritten or moved history moves the
+  attempt to `recovery_required`.
+  The same checks run on the snapshot's imported-changes commit as a baseline, in a separate
+  detached worktree, once per snapshot and check definition, so a failure that existed before
+  the task is told apart from one the task introduced (plan section 3).
+  Stop during `verifying` kills the running check's tree and records the rest as not run; a
+  restart during `verifying` moves the task to `awaiting_review` with the interrupted checks
+  marked; accept moves the task to `accepted`, and an accepted task cannot be refined.
+  A review binds the reviewed commit, its check results and the coordinator's ownership
+  generation; any later change to the branch invalidates it, as #3 already says of the content
+  hash.
+  Refine is a new attempt of the same task that continues on `ada/<task>` from its tip, with the
+  findings in its prompt. It is a fresh engine session whose actor is the requester and which
+  runs on the requester's profile; native continuation stays in M6. So the 2026-10-13 rule "a
+  continuation stays in the profile of the attempt it continues" does not apply to refine, and
+  an owner refining someone else's attempt never runs on that person's login. Refine is refused
+  while any attempt of the task is not ended or is `recovery_required`, since that attempt's
+  engine may still run git (M3.3, M3.4). An ended attempt's remaining changes are committed
+  first, so a failed or canceled attempt's work is kept. The earlier attempt's worktree, which
+  holds the branch, is then removed: only the path built from ids, never following a link or
+  reparse point, then pruned through Ada's git runner, each step idempotent after a crash.
+  This settles #98, and moves refinement from M7 to M4.3; the M3.3 entry's "M7 removes
+  worktrees" now covers export only. Reason: one branch per task keeps the lineage plain, and a
+  second branch per attempt would make export choose between them.
+  Findings and acceptance (#3) move from M7 to M4.3 with refinement; desktop previews (#5) move
+  from M4 to M5, beside the VM preview (plan M5 row). #3's per-read membership check on
+  artifacts lands with the first `/v1` route that serves a check log (M4.2).
+  Each cell of the capability matrix is `enforced` (by whom, and the live test that showed it),
+  `requested` (passed, not verified) or `unsupported`, keyed by the CLI version observed and
+  dated; a different installed version shows the cells as unverified. Accepting a flag proves
+  only that it was passed. The matrix is built from the pinned `hrn`'s accept and reject
+  answers, a static table recorded here when M4.1 lands, and, per plan section 4, an assessment
+  of what the CLI loads: repository configuration and hooks in the worktree, user-level
+  configuration, plugins and MCP servers under the profile. A worktree holding provider
+  configuration or hooks is reported at inspection and shown on the task. Its rows include
+  model discovery and enforceable limits. Mode `ask` stays refused until an engine protocol with
+  approvals exists (#7). Readonly is the default mode, and yolo is never preselected.
+  The expected engine SHA-256 is built into `adad` from `build-engine.sh`'s output, never read
+  from beside the binary.
   A folder enters only through Electron's dialog in main, which hands the path to `adad`; the
-  renderer never types one (#5).
+  renderer never types one (#5). `adad` cannot tell main from the renderer on the pipe, so the
+  bridge enforces it: its method takes no path, and the generic bridge refuses a `path` field on
+  the inspect and import routes from the renderer.
   Fonts (Source Sans 3, JetBrains Mono) are bundled; the app loads nothing remote.
   The live runs of M4.1 are the first real claude and codex runs through `adad`, and with them
-  the live check of the #58 environment list.
+  the live check of the #58 environment list. The list cannot stop a CLI that bills per token
+  from its own stored login (`codex login --with-api-key`, claude's `apiKeyHelper` or an `env`
+  block in its settings). So before each live run of M4.1 and M4.5, each CLI's own status
+  command must show a plan sign-in, and its settings must hold no `apiKeyHelper` or key in
+  `env`; the output is recorded with identifiers masked. Live runs are behind an explicit opt-in
+  that CI never sets, with a turn and time cap.
 
 ## Owner actions pending
 
@@ -1403,4 +1447,5 @@ task's second attempt (#98).
     with the result kept.
 13. For M4.5 (decisions log, 2026-10-20): an Ubuntu machine with a desktop session Ada's
     desktop app can open in, and a claude or codex CLI signed in there on the owner's plan, so
-    the Ubuntu demonstration can run. Say which machine.
+    the Ubuntu demonstration can run. Say which machine. The CLI's own status command must show
+    a plan sign-in, not an API key, and its settings no `apiKeyHelper` or key in `env`.
