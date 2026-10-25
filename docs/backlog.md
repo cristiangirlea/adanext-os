@@ -289,12 +289,14 @@ and finishes after M4.3. M4.5 comes last.
   a static table recorded in the decisions log, and, per plan section 4, an assessment of what
   the CLI loads: repository configuration and hooks in the worktree (`.claude/`, `.codex/`,
   `.mcp.json`), user-level configuration, plugins and MCP servers under the profile. A worktree
-  holding provider configuration or hooks is reported at inspection and shown on the task. A
-  start whose options the matrix refuses answers 409 `unsupported_options` before any
-  preparation. The API exposes the matrix for the UI.
+  holding provider configuration or hooks is reported at inspection and shown on the task, and
+  again when an attempt's changes add or alter any of them: marked in Changes, and shown before
+  a refine starts. A start whose options the matrix refuses answers 409 `unsupported_options`
+  before any preparation. The API exposes the matrix for the UI.
   Evidence, on the owner's plans, small, never an API key, the backend always named: one real
   claude run and one real codex run in readonly mode through `adad` on a tiny fixture repository
-  on Windows, recorded with run ids, durations and the events received. This is also the live
+  holding a project hook that writes a marker, each run asked to write a file, on Windows,
+  recorded with run ids, durations and the events received. This is also the live
   check of the #58 allow-list. Before each live run, each CLI's own status command shows a plan
   sign-in (not an API key), and its settings hold no `apiKeyHelper` or key in `env`; the output
   is recorded with identifiers masked. Live runs are behind an explicit opt-in that CI never
@@ -306,8 +308,9 @@ and finishes after M4.3. M4.5 comes last.
   result is recorded; without the opt-in no live run starts; each CLI's sign-in status is
   recorded before its run; the live runs are recorded.
 - [ ] **M4.2 Checks.** A task declares its check commands: argv lists, a working directory
-  inside the worktree, a timeout of at most 30 minutes, and output capped at 16 MiB per check.
-  They are part of the task's revision and are never discovered from the repository. A check
+  inside the worktree, a timeout of at most 30 minutes, and output capped at 16 MiB per check;
+  output beyond the cap is read and discarded, the log marked truncated, and the check keeps
+  running. There are at most 16 checks per task. They are part of the task's revision and are never discovered from the repository. A check
   still runs the repository's code and the agent's changes with the user's rights, on the host,
   outside any backend sandbox and with network. The UI says so where checks are declared and
   where their results are shown, and the capability matrix lists checks as unsandboxed.
@@ -320,9 +323,13 @@ and finishes after M4.3. M4.5 comes last.
   `GIT_COMMITTER_*`. Before committing, Ada checks that the branch still descends from the
   imported-changes commit. Commits the agent made itself are kept beneath Ada's commit; a
   rewritten or moved history moves the attempt to `recovery_required`.
-  Running. Each check runs in the worktree as a managed process (the executor's process-tree
-  supervision, output capped into artifacts), with the #58 list minus `CLAUDE_CONFIG_DIR` and
-  `CODEX_HOME` and under the same never-passed rule. The working directory is resolved at run
+  Running. Each check runs as a managed process in a fresh detached worktree at the tested
+  commit, as the baseline does, removed afterwards by the rules of M4.3's removal; nothing the
+  agent left outside the commit reaches a check, and the attempt's worktree is never changed by
+  one. It runs under the executor's process-tree supervision, output capped into artifacts,
+  with the #58 list minus `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and under the same never-passed
+  rule. A check may name further variables taken from `adad`'s environment, recorded with the
+  check; a never-passed one is refused. The working directory is resolved at run
   time through no-follow handles (M3.3's walk); a link or reparse point on its path refuses the
   check. Before each check the worktree's tracked files must match the tested commit; a check
   that changes them is recorded as such, and its result and later ones do not bind the commit.
@@ -339,12 +346,16 @@ and finishes after M4.3. M4.5 comes last.
   marked. Any change to the branch after a check invalidates that result. A forward migration
   adds checks and their results.
   Acceptance: a check that passes, one that fails, one that times out, and one killed with its
-  process tree; a timeout or output cap above the ceiling refused; a baseline failure told apart
+  process tree; a timeout or output cap above the ceiling refused, and so is a seventeenth check;
+  a check writing past the cap ends with its own exit code, its log marked truncated; a baseline
+  failure told apart
   from a new one, and the baseline run again after a check's definition changes; a result
   invalidated by a later edit; a check that edits a tracked file recorded as such, binding
   nothing; no check runs from a repository script unless the task declares it; the check's
   environment holds no credential-profile variable and no never-passed variable; a working
-  directory replaced by a link to outside the worktree after declaration is refused; a check
+  directory that the tested commit holds as a symlink to outside is refused; an ignored file the
+  agent left in its worktree is absent from the check's worktree; a check that edits a tracked
+  file leaves the attempt's worktree unchanged; a check
   that daemonizes (double fork or `setsid` on Linux; a detached child on Windows) leaves nothing
   running when it ends; an agent that sets `core.hooksPath`, `core.fsmonitor` or `gpg.program`
   in the clone, or repoints the worktree's `.git` file, causes no marker and goes to recovery;
@@ -365,23 +376,27 @@ and finishes after M4.3. M4.5 comes last.
   Refine (the attempt's actor or a project owner, #3) is a new attempt on the same task, run as
   a fresh engine session (native continuation stays in M6) whose actor is the requester and
   which runs on the requester's profile. It continues on `ada/<task>` from its tip, with the
-  findings in its prompt. Refine is refused while any attempt of the task is not ended or is
-  `recovery_required`, and for an accepted task. An ended attempt's remaining changes are
-  committed as in M4.2 before its worktree is removed. Removal deletes only
-  `<state>/projects/<id>/worktrees/<attempt>`, a path built from ids, never from stored text. It
-  never follows a link or reparse point (the directory itself is Lstat-checked as a real
-  directory under the state root), and then prunes the worktree's admin directory through Ada's
-  git runner. Each step is idempotent after a crash. This settles #98. Export stays in M7.
+  findings in its prompt. Refine is allowed from `awaiting_review`, `failed` and `canceled`, and
+  moves the task to `preparing` with the new attempt; it is refused for an accepted task. It is
+  also refused while any attempt of the task is not ended or is `recovery_required`. An ended
+  attempt's remaining changes are committed as in M4.2 before its worktree is removed. Removal
+  deletes only `<state>/projects/<id>/worktrees/<attempt>`, a path built from ids, never from
+  stored text. It never follows a link or reparse point (the directory itself is Lstat-checked
+  as a real directory under the state root), and then removes only that attempt's admin
+  directory under the clone's `worktrees/`, as M3.3 recorded it, never through `git worktree
+  prune`. Each step is idempotent after a crash. This settles #98. Export stays in M7.
   Acceptance: the diff matches git's for a text change, a binary file, a rename, a mode change
   and a deletion; each cap marks its truncation; a non-member gets 404 from changes and files;
   the files route shows a symlink as a link and reads nothing through it; findings from a
   non-member refused; an accept or refine by the creator or a reviewer who is neither the actor
   nor an owner refused; an accept against an older commit or generation refused; refine starts
   a second attempt on the requester's profile that sees the first one's commits; refine refused
-  for a running or `recovery_required` attempt and for an accepted task; a failed attempt's
-  changes reach the second attempt; symlinks and junctions inside the worktree, and the worktree
-  itself replaced by a junction, all pointing at a directory with a marker: removal leaves the
-  marker; a crash between the removal steps finishes on the next try.
+  for a running or `recovery_required` attempt and for an accepted task; refine of a failed and
+  of a canceled task; a failed attempt's changes reach the second attempt; an attempt that adds
+  a project hook is marked in Changes and before refine; symlinks and junctions inside the
+  worktree, and the worktree itself replaced by a junction, all pointing at a directory with a
+  marker: removal leaves the marker; another attempt's missing worktree keeps its admin
+  directory; a crash between the removal steps finishes on the next try.
 - [ ] **M4.4 The workspace UI.** The plan's practical layout (`docs/plan.md` section 3) in `ui/`,
   through `AdaClient` only. Left navigation: projects and active tasks. Main area: the task and
   its activity, events rendered by kind instead of raw JSON. A resizable work area: Changes (a

@@ -1343,11 +1343,17 @@ task's second attempt (#98).
   A check still runs the repository's code and the agent's changes with the user's rights, on
   the host, outside any backend sandbox and with network; the UI says so where checks are
   declared and where their results are shown, and the capability matrix lists checks as
-  unsandboxed. Checks run with the #58 list minus `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and under
-  the same never-passed rule. The working directory is resolved at run time through no-follow
-  handles (M3.3's walk); a link or reparse point on its path refuses the check. The timeout is at
-  most 30 minutes and the output at most 16 MiB per check. Before each check the worktree's
-  tracked files must match the tested commit; a check that changes them binds nothing from then on.
+  unsandboxed. The execution boundary the 2026-10-13 entry requires before M4b lets a second
+  user run anything covers checks as well as the engine. Checks run with the #58 list minus
+  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and under the same never-passed rule; a check may name
+  further variables taken from `adad`'s environment, recorded with the check, and a never-passed
+  one is refused. The working directory is resolved at run time through no-follow handles
+  (M3.3's walk); a link or reparse point on its path refuses the check. The timeout is at most
+  30 minutes and the output at most 16 MiB per check, with at most 16 checks per task; output
+  beyond the cap is read and discarded, the log marked truncated, and the check keeps running.
+  Before each check the worktree's tracked files must match the tested commit; checks run in a
+  fresh detached worktree at that commit, as the baseline does; a check that changes them binds
+  nothing from then on.
   Ada commits the agent's result as its own commit ("Agent changes", Ada's author) on
   `ada/<task>` before any check runs, so a check result and a review each bind a commit and not
   a work tree that can still change. The agent had a shell as the user, so Ada trusts none of
@@ -1370,12 +1376,16 @@ task's second attempt (#98).
   findings in its prompt. It is a fresh engine session whose actor is the requester and which
   runs on the requester's profile; native continuation stays in M6. So the 2026-10-13 rule "a
   continuation stays in the profile of the attempt it continues" does not apply to refine, and
-  an owner refining someone else's attempt never runs on that person's login. Refine is refused
-  while any attempt of the task is not ended or is `recovery_required`, since that attempt's
-  engine may still run git (M3.3, M3.4). An ended attempt's remaining changes are committed
-  first, so a failed or canceled attempt's work is kept. The earlier attempt's worktree, which
-  holds the branch, is then removed: only the path built from ids, never following a link or
-  reparse point, then pruned through Ada's git runner, each step idempotent after a crash.
+  an owner refining someone else's attempt never runs on that person's login. Refine is allowed
+  from `awaiting_review`, `failed` and `canceled`, and moves the task to `preparing` with the new
+  attempt; it is refused for an accepted task. It is also refused while any attempt of the task
+  is not ended or is `recovery_required`, since that attempt's engine may still run git (M3.3,
+  M3.4). An ended attempt's remaining changes are committed first, so a failed or canceled
+  attempt's work is kept. The earlier attempt's worktree, which holds the branch, is then
+  removed: only the path built from ids, never following a link or reparse point, then only that
+  attempt's admin directory under the clone's `worktrees/`, as M3.3 recorded it, never through
+  `git worktree prune` (which would drop a `recovery_required` attempt's entry too), each step
+  idempotent after a crash.
   This settles #98, and moves refinement from M7 to M4.3; the M3.3 entry's "M7 removes
   worktrees" now covers export only. Reason: one branch per task keeps the lineage plain, and a
   second branch per attempt would make export choose between them.
@@ -1389,7 +1399,9 @@ task's second attempt (#98).
   answers, a static table recorded here when M4.1 lands, and, per plan section 4, an assessment
   of what the CLI loads: repository configuration and hooks in the worktree, user-level
   configuration, plugins and MCP servers under the profile. A worktree holding provider
-  configuration or hooks is reported at inspection and shown on the task. Its rows include
+  configuration or hooks is reported at inspection and shown on the task, and again when an
+  attempt's changes add or alter any of them: marked in Changes, and shown before a refine
+  starts. Its rows include
   model discovery and enforceable limits. Mode `ask` stays refused until an engine protocol with
   approvals exists (#7). Readonly is the default mode, and yolo is never preselected.
   The expected engine SHA-256 is built into `adad` from `build-engine.sh`'s output, never read
