@@ -18,6 +18,10 @@ func newBackendSupervisor(cmd *exec.Cmd) (*processSupervisor, error) {
 	return &processSupervisor{signal: syscall.Kill}, nil
 }
 
+func detachProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
+
 // startSupervised starts the fake engine under a supervisor, as run does.
 func startSupervised(t *testing.T, script string) (*exec.Cmd, *processSupervisor, string, <-chan struct{}) {
 	t.Helper()

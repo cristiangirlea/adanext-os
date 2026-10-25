@@ -184,6 +184,11 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 		return Manifest{}, fmt.Errorf("the worktree's HEAD is not on %s: %q, %v", m.Branch, branch, err)
 	}
 	m.Head = head
+	if cfgData, _, err := readUnder(repo, filepath.Join(repo, "config"), maxFileSize); err == nil {
+		if err := os.WriteFile(filepath.Join(admin, "ada-config"), cfgData, 0o600); err != nil {
+			return Manifest{}, err
+		}
+	}
 	if err := os.WriteFile(filepath.Join(admin, manifestFile), m.Encode(), 0o600); err != nil {
 		return Manifest{}, err
 	}
@@ -368,6 +373,13 @@ func removeLocks(repo string) error {
 func (w *Workspaces) writeConfig(repo, mirror string, src mirrorSource) error {
 	hooks := "hooksPath = " + quoteConfig(filepath.ToSlash(w.Inspector.Git.hooks))
 	if err := writeAdaConfig(repo, src, true, "[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n", hooks, "fsmonitor = false"); err != nil {
+		return err
+	}
+	cfgData, _, err := readUnder(repo, filepath.Join(repo, "config"), maxFileSize)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(repo, "ada-config"), cfgData, 0o600); err != nil {
 		return err
 	}
 	for _, name := range []string{"exclude", "attributes"} {

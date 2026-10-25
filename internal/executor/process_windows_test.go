@@ -2,15 +2,21 @@ package executor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func detachProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS}
+}
 
 func TestWindowsSuspendedEngineCannotExitBeforeAssignment(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
@@ -125,4 +131,60 @@ func TestWindowsStartupResumesTheInitialThreadBehindAnInjectedThread(t *testing.
 // Object, without breakaway.
 func newBackendSupervisor(cmd *exec.Cmd) (*processSupervisor, error) {
 	return newProcessSupervisor(cmd)
+}
+
+func TestWindowsCloseTerminatesAndWaitsForJobProcesses(t *testing.T) {
+	marker := t.TempDir() + `\marker`
+	held := t.TempDir() + `\held`
+	if err := os.MkdirAll(held, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+	cmd.Dir = held
+	cmd.Env = append(os.Environ(), "ADA_FAKE_ENGINE=detached_child", "ADA_FAKE_MARKER="+marker)
+	s, err := newProcessSupervisor(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	cleanupGrandchild(t, marker)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.started(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatal(err)
+	}
+	// The parent exits after starting its detached child.
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("parent wait: %v", err)
+	}
+	waitGrandchildMarker(t, marker)
+	// A duplicate handle keeps the job object alive across CloseHandle, so only
+	// an explicit TerminateJobObject and bounded wait ends the detached child before close returns.
+	var dup windows.Handle
+	self := windows.CurrentProcess()
+	if err := windows.DuplicateHandle(self, s.job, self, &dup, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(dup)
+
+	var pid int
+	var identity string
+	for _, line := range markerLines(t, marker) {
+		if _, err := fmt.Sscanf(line, "child:%d:%s", &pid, &identity); err == nil && pid > 0 {
+			break
+		}
+	}
+	if pid == 0 {
+		t.Fatal("missing detached child pid")
+	}
+	s.close()
+	if err := waitProcessGone(pid, identity, 0); err != nil {
+		t.Fatalf("detached child still running after close returned: %v", err)
+	}
+	if err := os.RemoveAll(held); err != nil {
+		t.Fatalf("remove held directory after close: %v", err)
+	}
 }

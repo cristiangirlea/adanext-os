@@ -118,7 +118,7 @@ func TestAVersionFiveStoreMigratesForwardWithItsTasksUnbound(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	path := s.path
-	for _, query := range []string{"ALTER TABLE attempts DROP COLUMN max_turns", "ALTER TABLE attempts DROP COLUMN timeout", "ALTER TABLE attempts DROP COLUMN provider_changes", "ALTER TABLE source_snapshots DROP COLUMN provider_configuration", "DROP TABLE snapshot_paths", "ALTER TABLE source_snapshots DROP COLUMN branch", "DROP TABLE workspaces", "ALTER TABLE tasks DROP COLUMN snapshot", "DELETE FROM schema_migrations WHERE version>=6", "PRAGMA user_version=5"} {
+	for _, query := range []string{"DROP TABLE check_results", "DROP TABLE check_baselines", "DROP TABLE check_worktrees", "ALTER TABLE workspaces DROP COLUMN tested_commit", "ALTER TABLE tasks DROP COLUMN checks_json", "ALTER TABLE attempts DROP COLUMN max_turns", "ALTER TABLE attempts DROP COLUMN timeout", "ALTER TABLE attempts DROP COLUMN provider_changes", "ALTER TABLE source_snapshots DROP COLUMN provider_configuration", "DROP TABLE snapshot_paths", "ALTER TABLE source_snapshots DROP COLUMN branch", "DROP TABLE workspaces", "ALTER TABLE tasks DROP COLUMN snapshot", "DELETE FROM schema_migrations WHERE version>=6", "PRAGMA user_version=5"} {
 		execute(t, s, query)
 	}
 	if err := s.Close(); err != nil {

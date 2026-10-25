@@ -88,7 +88,9 @@ func New(cfg Config) *Executor {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 1
 	}
-	return &Executor{cfg: cfg, active: make(map[string]*active), versionArgs: []string{"--version"}, versionTimeout: 10 * time.Second, providerState: source.ProviderState}
+	e := &Executor{cfg: cfg, active: make(map[string]*active), versionArgs: []string{"--version"}, versionTimeout: 10 * time.Second, providerState: source.ProviderState}
+	e.sweepCheckWorktrees(context.Background(), "")
+	return e
 }
 
 // StopBudget covers an ignored cancel (stdin closed after one CancelGrace, the
@@ -330,17 +332,22 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	// Deferred before the supervisor's close, so it runs after the engine's whole tree has
 	// ended: no descendant can still change the worktree once its provider changes are recorded.
 	var providerBefore map[string]string
-	var providerWalked, providerUnknown, engineStarted bool
+	var providerWalked, providerUnknown, engineStarted, providerRecorded bool
+	recordProviders := func() {
+		if !workspace || providerRecorded {
+			return
+		}
+		providerRecorded = true
+		switch {
+		case engineStarted:
+			e.recordProviderChanges(a, work, providerBefore, providerUnknown)
+		case providerWalked && !providerUnknown:
+			// No engine ran in a fully walked worktree: it changed nothing.
+			e.saveProviderChanges(a, store.ProviderChanges{})
+		}
+	}
 	if workspace {
-		defer func() {
-			switch {
-			case engineStarted:
-				e.recordProviderChanges(a, work, providerBefore, providerUnknown)
-			case providerWalked && !providerUnknown:
-				// No engine ran in a fully walked worktree: it changed nothing.
-				e.saveProviderChanges(a, store.ProviderChanges{})
-			}
-		}()
+		defer recordProviders()
 	}
 	stderr, err := os.OpenFile(filepath.Join(base, "engine.stderr"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -946,6 +953,12 @@ func (e *Executor) run(a store.Attempt, active *active) {
 			}
 			if waitErr != nil && m.Result.Status != "canceled" {
 				e.fail(a, fmt.Errorf("engine exit: %w", waitErr))
+				return
+			}
+			if m.Result.Status == "ok" && workspace {
+				supervisor.close()
+				recordProviders()
+				e.commitAndVerify(a, active)
 				return
 			}
 			if err := e.finish(a, m.Result.Status); err != nil {

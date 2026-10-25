@@ -10,7 +10,7 @@ are in `docs/backlog.md`.
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100 | M4 first local workflow |
-| M4 First local workflow | in progress | Slices in `docs/backlog.md`; M4.1 (#112) code on `m4/real-engine` | M4.1 live runs (owner's plans, `cmd/ada-live`), then M4.2 |
+| M4 First local workflow | in progress | Slices in `docs/backlog.md`; M4.1 (#112) code on `m4/real-engine`; M4.2 (#114, #108) on `m4/checks` | M4.1 live runs, then M4.3 |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
 | M6 Resume intelligence | not started | | |
@@ -430,6 +430,24 @@ exit 0`), the seven desktop end-to-end tests included; `-race` ran in the Linux 
 Not done here: the live claude and codex readonly runs (`ADANEXT_LIVE=1 go run ./cmd/ada-live
 -backend claude,codex -state-dir <dir> -engine .engine/hrn.exe -adad <adad.exe>`), whose results
 file becomes this section's evidence and the live check of the #58 environment list.
+
+### M4.2 checks and Windows job termination wait (2026-10-25, #114, #108)
+
+Migration 0009 (`tasks.checks_json`, `workspaces.tested_commit`, `check_worktrees`,
+`check_baselines`, `check_results`), `PUT /v1/tasks/{id}/checks`, `GET /v1/tasks/{id}/checks`,
+`GET /v1/checks/{id}/log` (and `GET /v1/tasks/{task}/checks/{id}/log`), `source.CommitAgentChanges`,
+detached check worktrees and no-follow workdir resolution, executor verification against the
+snapshot's baseline, and process-tree exit waiting on Windows (#108) and Linux. The decisions are
+in the 2026-10-25 M4.2 entry of the decisions log.
+
+Evidence at the commit that adds this section: `.hrn/check.sh` passed (`== windows exit 0, linux
+exit 0`), that is `bash scripts/check.sh` on Windows (all steps including the seven Playwright
+tests and the Windows Job Object termination wait test; `-race` left to Linux) and `go vet`,
+`go test` and `go test -race` for every package in `golang:1.26` in Docker (including the Linux
+`setsid` and double-fork daemonizing check tests).
+
+Not verified: macOS process-tree tracking beyond process groups; hosted GitHub CI until the pull
+request runs.
 
 ## Decisions log
 
@@ -1515,6 +1533,44 @@ file becomes this section's evidence and the live check of the #58 environment l
   status`: "Logged in using ChatGPT") or settings with an `apiKeyHelper`, a key or provider
   switch in `env`, an API key in codex's config or `auth.json`, and writes its results with
   identifiers masked under the state directory. `-dry-run` does everything but the start.
+
+- **2026-10-25, M4.2 checks and Windows job wait (#114, #108).** Points the backlog entry left open.
+  1. Check definition JSON shape in the task API: each entry in `task.checks` (accepted on
+     `POST /v1/tasks` and `PUT /v1/tasks/{id}/checks` under `If-Match` in `draft`, `ready` or
+     `refinement`, at most 16 per task) is `{"name": string, "argv": [string, ...], "workdir":
+     string, "timeout": string, "max_output_bytes": int64, "env": [string, ...]}`. `workdir` is a
+     relative slash path inside the worktree (`.` or empty for the root; `..`, absolute, drive or
+     UNC paths refused), `timeout` is a Go duration in `(0, 30m]` defaulting to `"30m0s"`,
+     `max_output_bytes` is in `(0, 16 MiB]` defaulting to `16777216`, and `env` names additional
+     environment keys to forward from `adad`'s environment (refusing credential-profile keys
+     `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and every never-passed key of #58). Updating checks bumps
+     the task's `revision`.
+  2. Check result state names: `passed`, `failed`, `timed_out`, `killed`, `not_run`, `interrupted`
+     and `changed_tree` (plus `running` while a check is in flight). A check that modifies or
+     deletes tracked files in its detached worktree is recorded as `changed_tree` with an empty
+     `bound_commit`. Stop during `verifying` kills the active check's tree (`killed`) and records
+     remaining checks as `not_run`. A coordinator restart during `verifying` moves the task to
+     `awaiting_review`, marks any in-flight check `interrupted`, and records any remaining declared
+     checks as `not_run`.
+  3. Invalidation: a check result that leaves its worktree's tracked files unchanged binds the
+     tested commit in `bound_commit` (empty when `changed_tree`, `killed`, `not_run` or
+     `interrupted`). On task and check-result reads, `invalidated` is true whenever `bound_commit`
+     is empty or differs from the current tip of `refs/heads/ada/<task>` in Ada's clone (falling
+     back to `workspaces.tested_commit` when no clone ref is on disk).
+  4. Baseline storage: baseline runs live in `check_baselines`, keyed by
+     `UNIQUE(snapshot, definition_hash)` where `definition_hash` is the SHA-256 of the normalised
+     `CheckDefinition` JSON, with their log artifacts referenced in `artifacts` as
+     `baseline:<id>`. Each `check_results` row links to its baseline via `baseline_id`, and API
+     reads embed the baseline summary on each `CheckResult` (`baseline`) alongside `new_failure`
+     (the check failed on the tested commit while the baseline passed) and `baseline_failure`
+     (both failed).
+  5. Process-tree termination wait (#108): on Windows, `terminateAndCloseJob` queries
+     `JobObjectBasicProcessIdList`, calls `TerminateJobObject`, opens `SYNCHRONIZE` handles on the
+     assigned PIDs, waits boundedly with `WaitForSingleObject`, and polls
+     `JobObjectBasicAccountingInformation` until `ActiveProcesses == 0` before closing the job
+     handle. On Linux, the supervisor tracks processes across the child's session and process group
+     (catching `setsid` and double-fork descendants) and waits boundedly until `/proc/<pid>` is
+     gone or zombie (`Z`/`X`).
 
 ## Owner actions pending
 

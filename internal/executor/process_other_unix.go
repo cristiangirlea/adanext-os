@@ -11,3 +11,5 @@ func stopTree(func(int, syscall.Signal) error, int, string) map[int]processRecor
 	return nil
 }
 func killTree(func(int, syscall.Signal) error, map[int]processRecord) {}
+func (s *processSupervisor) stopAll() map[int]processRecord           { return nil }
+func waitTree(map[int]processRecord)                                  {}

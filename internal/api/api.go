@@ -164,7 +164,10 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/tasks", h.create)
 	mux.HandleFunc("GET /v1/tasks", h.list)
 	mux.HandleFunc("GET /v1/tasks/{id}", h.get)
-	mux.HandleFunc("POST /v1/tasks/{id}/ready", h.transition(store.Draft, store.Ready))
+	mux.HandleFunc("PUT /v1/tasks/{id}/checks", h.setChecks)
+	mux.HandleFunc("GET /v1/tasks/{id}/checks", h.getChecks)
+	mux.HandleFunc("POST /v1/tasks/{id}/ready", h.ready)
+	mux.HandleFunc("POST /v1/tasks/{id}/refine", h.transition(store.AwaitingReview, store.Refinement))
 	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
@@ -176,6 +179,8 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("GET /v1/projects/{id}/drift", h.drift)
 	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
 	mux.HandleFunc("GET /v1/attempts/{id}/artifacts/{hash}", h.artifact)
+	mux.HandleFunc("GET /v1/checks/{id}/log", h.checkLog)
+	mux.HandleFunc("GET /v1/tasks/{task}/checks/{id}/log", h.checkLog)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var allowed []string
 		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
@@ -260,6 +265,8 @@ func storeError(w http.ResponseWriter, err error) {
 		return
 	}
 	switch {
+	case errors.Is(err, store.ErrInvalidCheck):
+		writeError(w, 400, "bad_request")
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrNotMember):
 		writeError(w, 404, "not_found")
 	case errors.Is(err, store.ErrStaleRevision):
@@ -359,6 +366,7 @@ type taskJSON struct {
 	// ProviderConfiguration is the provider configuration and hooks the snapshot holds, which the
 	// CLI loads from the worktree; null with no snapshot or one taken before it was recorded.
 	ProviderConfiguration *store.ProviderConfiguration `json:"provider_configuration"`
+	Checks                []store.CheckDefinition      `json:"checks"`
 	Attempt               *taskAttemptJSON             `json:"attempt"`
 	// QueuePosition is the task's 1-based place among the pending attempts of
 	// all users while it is queued; absent otherwise. Only GET reports it.
@@ -374,6 +382,9 @@ type taskAttemptJSON struct {
 	// be shown before review or refine, and for an attempt that ended with a worktree unassessed.
 	ProviderChanges *store.ProviderChanges `json:"provider_changes"`
 	ProviderFlagged bool                   `json:"provider_flagged"`
+	TestedCommit    string                 `json:"tested_commit,omitempty"`
+	Checks          []store.CheckResult    `json:"checks,omitempty"`
+	ChecksFailed    bool                   `json:"checks_failed,omitempty"`
 }
 
 type startedTaskJSON struct {
@@ -382,9 +393,9 @@ type startedTaskJSON struct {
 }
 
 func taskValue(t store.Task) taskJSON {
-	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated, Snapshot: t.Snapshot, ProviderConfiguration: t.ProviderConfiguration}
+	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated, Snapshot: t.Snapshot, ProviderConfiguration: t.ProviderConfiguration, Checks: t.CheckDefinitions()}
 	if a := t.Attempt; a.ID != "" {
-		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged()}
+		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged(), TestedCommit: a.TestedCommit, Checks: a.CheckResults(), ChecksFailed: a.ChecksFailed}
 		// Keep the existing top-level field for /v1 clients.
 		v.QueuePosition = a.QueuePosition
 	}
@@ -470,15 +481,27 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Project   string `json:"project"`
-		Objective string `json:"objective"`
-		Criteria  string `json:"criteria"`
-		Snapshot  string `json:"snapshot"`
+		Project   string                  `json:"project"`
+		Objective string                  `json:"objective"`
+		Criteria  string                  `json:"criteria"`
+		Snapshot  string                  `json:"snapshot"`
+		Checks    []store.CheckDefinition `json:"checks"`
 	}
 	if err := decode(body, &input); err != nil || input.Project == "" || input.Objective == "" {
 		writeError(w, 400, "bad_request")
 		return
 	}
+	checks, err := store.NormalizeCheckDefinitions(input.Checks)
+	if err != nil {
+		writeError(w, 400, "bad_request")
+		return
+	}
+	checksBytes, err := json.Marshal(checks)
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	checksJSON := string(checksBytes)
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
 	h.mutate(w, r, user, k, &store.Scope{ProjectID: input.Project}, "", func(tx *store.Tx) (int, any, error) {
 		id, err := newID()
@@ -498,8 +521,12 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		at := time.Now().UTC().Format(time.RFC3339Nano)
-		_, err = tx.ExecContext(r.Context(), "INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,snapshot) VALUES(?,?,?,?,?,'draft',0,?,?,?)", id, input.Project, user, input.Objective, input.Criteria, at, at, snapshot)
-		return 201, taskValue(store.Task{ID: id, Project: input.Project, CreatedBy: user, Objective: input.Objective, AcceptanceCriteria: input.Criteria, State: store.Draft, Revision: 0, Created: at, Updated: at, Snapshot: input.Snapshot, ProviderConfiguration: provider}), err
+		var taskChecks *[]store.CheckDefinition
+		if len(checks) > 0 {
+			taskChecks = &checks
+		}
+		_, err = tx.ExecContext(r.Context(), "INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,snapshot,checks_json) VALUES(?,?,?,?,?,'draft',0,?,?,?,?)", id, input.Project, user, input.Objective, input.Criteria, at, at, snapshot, checksJSON)
+		return 201, taskValue(store.Task{ID: id, Project: input.Project, CreatedBy: user, Objective: input.Objective, AcceptanceCriteria: input.Criteria, State: store.Draft, Revision: 0, Created: at, Updated: at, Snapshot: input.Snapshot, ProviderConfiguration: provider, Checks: taskChecks}), err
 	})
 }
 
@@ -605,9 +632,7 @@ func (h *handler) taskMutation(w http.ResponseWriter, r *http.Request, change fu
 			return 0, nil, err
 		}
 		changed = true
-		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,COALESCE(snapshot,'') FROM tasks WHERE id=?", id)
-		var task store.Task
-		err := row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot)
+		task, err := scanTaskTx(r.Context(), tx, id)
 		return 200, taskValue(task), err
 	})
 	return id, ok && changed
@@ -839,9 +864,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return 0, nil, err
 		}
-		row := tx.QueryRowContext(r.Context(), "SELECT id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,COALESCE(snapshot,'') FROM tasks WHERE id=?", id)
-		var task store.Task
-		err = row.Scan(&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot)
+		task, err := scanTaskTx(r.Context(), tx, id)
 		return 200, startedTaskJSON{taskValue(task), attemptID}, err
 	})
 	if ok && attemptID != "" && h.exec.Runner != nil {
@@ -1282,6 +1305,10 @@ func (h *handler) artifact(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
+	h.streamBlob(w, hash, size)
+}
+
+func (h *handler) streamBlob(w http.ResponseWriter, hash string, size int64) {
 	blob, err := h.exec.Artifacts.Open(hash)
 	if err != nil {
 		writeInternalError(w, fmt.Errorf("artifact %s: %w", hash, err))

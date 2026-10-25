@@ -7,10 +7,36 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+const (
+	jobObjectBasicAccountingInformation = 1
+	jobObjectBasicProcessIDList         = 3
+	jobExitTimeout                      = 5 * time.Second
+)
+
+var procQueryInformationJobObject = windows.NewLazySystemDLL("kernel32.dll").NewProc("QueryInformationJobObject")
+
+type jobBasicAccountingInfo struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
+
+type jobBasicProcessIDList struct {
+	NumberOfAssignedProcesses uint32
+	NumberOfProcessIdsInList  uint32
+	ProcessIdList             [256]uintptr
+}
 
 type processSupervisor struct {
 	mu      sync.Mutex
@@ -103,7 +129,7 @@ func (s *processSupervisor) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.job != 0 {
-		_ = windows.CloseHandle(s.job)
+		_ = terminateAndCloseJob(s.job)
 		s.job = 0
 	}
 }
@@ -114,7 +140,64 @@ func (s *processSupervisor) kill(*exec.Cmd) error {
 	if s.job == 0 {
 		return nil
 	}
-	err := windows.CloseHandle(s.job)
+	err := terminateAndCloseJob(s.job)
 	s.job = 0
 	return err
+}
+
+// terminateAndCloseJob terminates the Job Object, waits boundedly for its
+// processes to exit, and closes the handle.
+func terminateAndCloseJob(job windows.Handle) error {
+	handles := map[uint32]windows.Handle{}
+	collectJobProcesses(job, handles)
+	_ = windows.TerminateJobObject(job, 1)
+	collectJobProcesses(job, handles)
+	deadline := time.Now().Add(jobExitTimeout)
+	for _, h := range handles {
+		wait := max(time.Until(deadline), 0)
+		_, _ = windows.WaitForSingleObject(h, uint32(wait/time.Millisecond))
+		_ = windows.CloseHandle(h)
+	}
+	for time.Now().Before(deadline) {
+		var info jobBasicAccountingInfo
+		r1, _, _ := procQueryInformationJobObject.Call(
+			uintptr(job),
+			jobObjectBasicAccountingInformation,
+			uintptr(unsafe.Pointer(&info)),
+			unsafe.Sizeof(info),
+			0,
+		)
+		if r1 == 0 || info.ActiveProcesses == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return windows.CloseHandle(job)
+}
+
+func collectJobProcesses(job windows.Handle, handles map[uint32]windows.Handle) {
+	var list jobBasicProcessIDList
+	r1, _, _ := procQueryInformationJobObject.Call(
+		uintptr(job),
+		jobObjectBasicProcessIDList,
+		uintptr(unsafe.Pointer(&list)),
+		unsafe.Sizeof(list),
+		0,
+	)
+	if r1 == 0 {
+		return
+	}
+	n := min(int(list.NumberOfProcessIdsInList), len(list.ProcessIdList))
+	for i := range n {
+		pid := uint32(list.ProcessIdList[i])
+		if pid == 0 {
+			continue
+		}
+		if _, ok := handles[pid]; ok {
+			continue
+		}
+		if h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, pid); err == nil {
+			handles[pid] = h
+		}
+	}
 }

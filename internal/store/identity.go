@@ -80,7 +80,15 @@ type Task struct {
 	Snapshot                                              string // empty when the task is bound to none
 	// ProviderConfiguration is what the task's snapshot holds; nil with no snapshot or one older than 0008.
 	ProviderConfiguration *ProviderConfiguration
+	Checks                *[]CheckDefinition
 	Attempt               TaskAttempt
+}
+
+func (t Task) CheckDefinitions() []CheckDefinition {
+	if t.Checks == nil || *t.Checks == nil {
+		return []CheckDefinition{}
+	}
+	return *t.Checks
 }
 
 // TaskAttempt is the newest attempt, even after it ends. Task reads join it
@@ -91,6 +99,16 @@ type TaskAttempt struct {
 	// ProviderChanges is nil until assessed, and for an attempt with no workspace.
 	ProviderChanges *ProviderChanges
 	Workspace       bool // whether the attempt has a worktree
+	TestedCommit    string
+	Checks          *[]CheckResult
+	ChecksFailed    bool
+}
+
+func (a TaskAttempt) CheckResults() []CheckResult {
+	if a.Checks == nil || *a.Checks == nil {
+		return []CheckResult{}
+	}
+	return *a.Checks
 }
 
 // ProviderFlagged reports whether the attempt's provider changes must be shown before review or
@@ -103,27 +121,36 @@ func (a TaskAttempt) ProviderFlagged() bool {
 	return a.Workspace && a.State != "pending" && a.State != "launching" && a.State != "running"
 }
 
-const taskReadColumns = `t.id,t.project,t.created_by,t.objective,t.acceptance_criteria,t.state,t.revision,t.created,t.updated,COALESCE(t.snapshot,''),
+const taskReadColumns = `t.id,t.project,t.created_by,t.objective,t.acceptance_criteria,t.state,t.revision,t.created,t.updated,COALESCE(t.snapshot,''),t.checks_json,
 	(SELECT provider_configuration FROM source_snapshots WHERE id=t.snapshot),
 	a.id,a.state,CASE WHEN a.state='pending' THEN (SELECT count(*)+1 FROM attempts p WHERE p.state='pending' AND p.rowid<a.rowid) ELSE 0 END,a.provider_changes,
-	EXISTS(SELECT 1 FROM workspaces w WHERE w.attempt=a.id)`
+	EXISTS(SELECT 1 FROM workspaces w WHERE w.attempt=a.id),
+	COALESCE((SELECT w.tested_commit FROM workspaces w WHERE w.attempt=a.id),'')`
 const taskReadFrom = ` FROM tasks t LEFT JOIN attempts a ON a.rowid=(SELECT max(latest.rowid) FROM attempts latest WHERE latest.task=t.id)`
 
 func scanTaskRead(row interface{ Scan(...any) error }, extra ...any) (Task, error) {
 	var task Task
+	var checksJSON, testedCommit string
 	var id, state, provider, changes sql.NullString
 	var position int
 	var workspace bool
-	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot, &provider, &id, &state, &position, &changes, &workspace}
+	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot, &checksJSON, &provider, &id, &state, &position, &changes, &workspace, &testedCommit}
 	if err := row.Scan(append(args, extra...)...); err != nil {
 		return task, err
 	}
 	var err error
+	defs, err := decodeChecksJSON(checksJSON)
+	if err != nil {
+		return task, err
+	}
+	if len(defs) > 0 {
+		task.Checks = &defs
+	}
 	if task.ProviderConfiguration, err = decodeJSON[ProviderConfiguration](provider); err != nil {
 		return task, err
 	}
 	if id.Valid {
-		task.Attempt = TaskAttempt{ID: id.String, State: state.String, QueuePosition: position, Workspace: workspace}
+		task.Attempt = TaskAttempt{ID: id.String, State: state.String, QueuePosition: position, Workspace: workspace, TestedCommit: testedCommit}
 		if task.Attempt.ProviderChanges, err = decodeJSON[ProviderChanges](changes); err != nil {
 			return task, err
 		}
@@ -153,7 +180,16 @@ func (s *Store) ListTasks(ctx context.Context, userID string) ([]Task, error) {
 		}
 		tasks = append(tasks, task)
 	}
-	return tasks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range tasks {
+		if err := s.populateAttemptChecks(ctx, &tasks[i]); err != nil {
+			return nil, err
+		}
+	}
+	return tasks, nil
 }
 
 func (s *Store) Task(ctx context.Context, userID, taskID string) (Task, error) {
@@ -169,7 +205,30 @@ func (s *Store) Task(ctx context.Context, userID, taskID string) (Task, error) {
 	if !member {
 		return Task{}, &NotMemberError{UserID: userID, ProjectID: task.Project}
 	}
+	if err := s.populateAttemptChecks(ctx, &task); err != nil {
+		return Task{}, err
+	}
 	return task, nil
+}
+
+func (s *Store) populateAttemptChecks(ctx context.Context, task *Task) error {
+	if task.Attempt.ID == "" {
+		return nil
+	}
+	results, err := s.attemptCheckResults(ctx, task.Project, task.ID, task.Attempt.ID)
+	if err != nil {
+		return err
+	}
+	if len(results) > 0 {
+		task.Attempt.Checks = &results
+	}
+	for _, r := range results {
+		if r.State != CheckPassed {
+			task.Attempt.ChecksFailed = true
+			break
+		}
+	}
+	return nil
 }
 
 // TaskProject and AttemptProject reveal a scope only to a current member.
