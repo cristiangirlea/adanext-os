@@ -602,6 +602,96 @@ func TestOneFailureRecordsOneCause(t *testing.T) {
 	}
 }
 
+// stopAtAnswer stops the executor once the start is written, after recording
+// the owner's stop as the API does when record is set (a signal records none).
+// The channel carries the recording's error.
+func stopAtAnswer(e *Executor, s *store.Store, record bool) <-chan error {
+	errc := make(chan error, 1)
+	e.beforeAnswer = func() {
+		var err error
+		if record {
+			ctx := context.Background()
+			_, err = s.Do(ctx, "u", "stop", "stop", nil, func(tx *store.Tx) ([]byte, error) {
+				_, err := tx.StopWork(ctx, e.cfg.Generation, "coordinator stopped by the owner")
+				return []byte("ok"), err
+			})
+		}
+		e.StopWork()
+		errc <- err
+	}
+	return errc
+}
+
+// preparingOutcome waits for the preparing attempt to need recovery and
+// returns its recovery and executor_error payloads.
+func preparingOutcome(t *testing.T, s *store.Store, errc <-chan error) (recoveries, causes []string) {
+	t.Helper()
+	waitAttempt(t, s, "recovery_required")
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.Events(context.Background(), "u", "attempt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		switch event.Kind {
+		case "recovery":
+			recoveries = append(recoveries, string(event.Payload))
+		case "executor_error":
+			causes = append(causes, string(event.Payload))
+		}
+	}
+	return recoveries, causes
+}
+
+func TestAStreamEndedByAStopIsNotACause(t *testing.T) {
+	// The stop begins once the start is written; its shutdown closes stdin, on
+	// which the engine exits, and only then does the stream end.
+	e, s, _, _ := testExecutor(t, "exit_on_stdin_close")
+	e.cfg.CancelGrace = naturalExitGrace
+	errc := stopAtAnswer(e, s, true)
+	e.LaunchAttempt("attempt")
+	recoveries, causes := preparingOutcome(t, s, errc)
+	if len(recoveries) != 1 || !strings.Contains(recoveries[0], "engine exit not confirmed") || len(causes) != 0 {
+		t.Fatalf("recoveries = %q, causes = %q, want one recovery and no cause", recoveries, causes)
+	}
+}
+
+func TestAStreamEndedByAnUnrecordedStopIsACause(t *testing.T) {
+	// A signal stops the executor with no stop recorded, so the end of the
+	// stream is the only cause the attempt can show.
+	e, s, _, _ := testExecutor(t, "exit_on_stdin_close")
+	e.cfg.CancelGrace = naturalExitGrace
+	errc := stopAtAnswer(e, s, false)
+	e.LaunchAttempt("attempt")
+	recoveries, causes := preparingOutcome(t, s, errc)
+	if len(recoveries) != 1 || len(causes) != 1 || !strings.Contains(causes[0], "start response: EOF") {
+		t.Fatalf("recoveries = %q, causes = %q, want one recovery and the stream's end", recoveries, causes)
+	}
+}
+
+func TestAnEngineThatFailsBeforeAStopRecordsItsExit(t *testing.T) {
+	// The engine exits by itself while its child holds stdout; the stop that
+	// follows closes stdout, but the engine's exit is the cause.
+	e, s, _, marker := testExecutor(t, "crash_with_child_stdout")
+	cleanupGrandchild(t, marker)
+	e.cfg.CancelGrace = naturalExitGrace
+	written := make(chan struct{})
+	e.beforeAnswer = func() { close(written) }
+	e.LaunchAttempt("attempt")
+	select {
+	case <-written:
+	case <-time.After(markerBound):
+		t.Fatal("the start was never written")
+	}
+	waitGrandchildMarker(t, marker)
+	stopWork(t, e, s)
+	e.StopWork()
+	waitAttempt(t, s, "recovery_required")
+	errorEventContains(t, s, "exit status 7")
+}
+
 func TestAPINotesListEveryEventKind(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "api", "doc.go"))
 	if err != nil {
