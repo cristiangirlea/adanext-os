@@ -103,4 +103,8 @@
 // /v1/tasks/{task}/checks/{id}/log, only for that task's runs and the
 // baselines they were compared with) streams a check or baseline log artifact
 // with X-Ada-Truncated after checking project membership on each read.
+// Checks and agents run with the user's rights, outside any sandbox, and can
+// still write Ada's state directory, so a result catches a tree changed by
+// mistake or by a careless agent, not by a determined one; the M5 guest is
+// the boundary against hostile code.
 package api

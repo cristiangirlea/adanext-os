@@ -292,4 +292,28 @@ func TestCheckResultsAreInvalidatedUnlessTheyBindTheBranchTip(t *testing.T) {
 			}
 		}
 	}
+	// A mutation's response reads any result it carries as GET does.
+	tips["a/"+id] = bound
+	_, want := read()
+	for _, m := range []struct {
+		method, path, key, match string
+		body                     []byte
+	}{
+		{"PUT", "/v1/tasks/" + id + "/checks", "tip-checks", "0", []byte(`{"checks":[{"argv":["bin"]}]}`)},
+		{"POST", "/v1/tasks/" + id + "/ready", "tip-ready", "1", nil},
+	} {
+		code, body := f.request(t, m.method, m.path, m.key, m.match, m.body)
+		var task taskJSON
+		if code != 200 || json.Unmarshal(body, &task) != nil {
+			t.Fatalf("%s %s = %d %s", m.method, m.path, code, body)
+		}
+		if task.Attempt == nil {
+			continue
+		}
+		for i, r := range task.Attempt.Checks {
+			if i >= len(want) || r.Invalidated != want[i].Invalidated {
+				t.Fatalf("%s %s: %+v, GET reads %+v", m.method, m.path, task.Attempt.Checks, want)
+			}
+		}
+	}
 }

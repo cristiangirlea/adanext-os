@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -120,5 +121,58 @@ func TestASupervisorTakesNoProcessForSharingItsWorkingDirectory(t *testing.T) {
 		if pid == -unrelated.Process.Pid || pid == -self.group {
 			t.Errorf("signalled group %d", -pid)
 		}
+	}
+}
+
+func TestWaitTreeReapsExitedOrphansThoughAMemberOutlivesItsDeadline(t *testing.T) {
+	stuck := exec.Command(os.Args[0], "-test.run=^TestHelperCheck$", "--", "hold_child", filepath.Join(t.TempDir(), "stuck"))
+	if err := stuck.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stuck.Process.Kill(); _ = stuck.Wait() })
+	s := &processSupervisor{}
+	// Members are visited in map order: over three rounds the stuck one comes
+	// before some exited one, which only a pass after the deadline reaps.
+	for round := range 3 {
+		record, err := readProcessRecord(stuck.Process.Pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree := map[int]processRecord{record.pid: record}
+		var exitedPids []int
+		for range 8 {
+			child := exec.Command(os.Args[0], "-test.run=^$")
+			if err := child.Start(); err != nil {
+				t.Fatal(err)
+			}
+			pid := child.Process.Pid
+			for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+				r, err := readProcessRecord(pid)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if exited(r) {
+					tree[pid] = r
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("child %d never exited", pid)
+				}
+			}
+			exitedPids = append(exitedPids, pid)
+		}
+		s.waitTreeWithin(tree, 20*time.Millisecond)
+		for _, pid := range exitedPids {
+			if r, err := readProcessRecord(pid); err == nil {
+				t.Fatalf("round %d: exited member %d left unreaped (%s)", round, pid, r.state)
+			}
+		}
+	}
+}
+
+func TestAFailedSubreaperCallIsReported(t *testing.T) {
+	failing := func(int, uintptr, uintptr, uintptr, uintptr) error { return errors.New("refused") }
+	if err := subreaper(failing); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("subreaper = %v, want the prctl error", err)
 	}
 }

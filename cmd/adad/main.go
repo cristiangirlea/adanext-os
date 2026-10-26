@@ -262,6 +262,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "adad: -concurrency must be at least 1")
 		return 2
 	}
+	if runtime.GOOS == "linux" && opts.concurrency > 1 {
+		// An orphan that left its session can't yet be told to belong to one
+		// attempt rather than another (decisions log, 2026-10-26).
+		fmt.Fprintln(stderr, "adad: -concurrency above 1 is refused on Linux until adad can tell which attempt a detached process belongs to")
+		return 2
+	}
 	if opts.preparingDeadline <= 0 {
 		fmt.Fprintln(stderr, "adad: -preparing-deadline must be positive")
 		return 2

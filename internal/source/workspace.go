@@ -202,6 +202,9 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 // SHA-256 of the config it wrote.
 func (w *Workspaces) sync(ctx context.Context, project, source, base string) (string, error) {
 	in := w.Inspector
+	if err := in.Git.checkHooks(); err != nil {
+		return "", err
+	}
 	dir := filepath.Join(w.Root, project)
 	for _, d := range []string{dir, in.MirrorRoot} {
 		if err := os.MkdirAll(d, 0o700); err != nil {

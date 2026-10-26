@@ -45,11 +45,14 @@ func allowedCloneConfigKey(key string) bool {
 	return false
 }
 
-// verifyCloneConfig checks the clone config against the copy Ada wrote outside
-// the clone, and that copy against want, its SHA-256 from SQLite; with admin,
-// also the worktree's git directory: no config of its own, and the clone as
-// its common dir.
+// verifyCloneConfig checks Ada's hooks directory, the clone config against the
+// copy Ada wrote outside the clone, and that copy against want, its SHA-256
+// from SQLite; with admin, also the worktree's git directory: no config of its
+// own, and the clone as its common dir.
 func (w *Workspaces) verifyCloneConfig(project, want, admin string) error {
+	if err := w.Inspector.Git.checkHooks(); err != nil {
+		return err
+	}
 	repo := w.repo(project)
 	cfgData, _, err := readUnder(repo, filepath.Join(repo, "config"), maxFileSize)
 	if err != nil {
@@ -91,57 +94,58 @@ func (w *Workspaces) verifyCloneConfig(project, want, admin string) error {
 
 // CommitAgentChanges verifies the attempt's worktree, clone config, and branch
 // ancestry from the imported-changes commit, commits any agent changes on
-// ada/<task> with Ada as author and committer, and returns the branch tip commit.
-func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash string) (string, error) {
+// ada/<task> with Ada as author and committer, and returns the branch tip
+// commit and the imported-changes commit it verified.
+func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash string) (tested, imported string, err error) {
 	switch {
 	case m.Version != ManifestVersion:
-		return "", mismatch("manifest version %d", m.Version)
+		return "", "", mismatch("manifest version %d", m.Version)
 	case !safeName(m.Project) || !safeName(m.Task) || !safeName(m.Attempt) || m.Path != w.WorktreePath(m.Project, m.Attempt):
-		return "", mismatch("the worktree path is not the attempt's")
+		return "", "", mismatch("the worktree path is not the attempt's")
 	}
 	defer w.lock(m.Project)()
 
 	info, err := os.Lstat(m.Path)
 	if err != nil || !info.IsDir() || isLink(m.Path, info) {
-		return "", mismatch("the worktree is missing")
+		return "", "", mismatch("the worktree is missing")
 	}
 	repo := w.repo(m.Project)
 	admin := w.adminDir(m.Project, m.Attempt)
 	if !pointsTo(m.Path, admin) {
-		return "", mismatch("the worktree does not use its git directory")
+		return "", "", mismatch("the worktree does not use its git directory")
 	}
 	if err := w.verifyCloneConfig(m.Project, m.ConfigSHA256, admin); err != nil {
-		return "", err
+		return "", "", err
 	}
 	stored, _, err := readUnder(admin, filepath.Join(admin, manifestFile), maxFileSize)
 	if err != nil {
-		return "", mismatch("the manifest copy is missing")
+		return "", "", mismatch("the manifest copy is missing")
 	}
 	if m.Head == "" {
 		var copied Manifest
 		if err := json.Unmarshal(stored, &copied); err != nil {
-			return "", mismatch("the manifest copy cannot be read")
+			return "", "", mismatch("the manifest copy cannot be read")
 		}
 		m.Head = copied.Head
 	}
 	data := m.Encode()
 	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != hash {
-		return "", mismatch("the workspace row does not match its manifest hash")
+		return "", "", mismatch("the workspace row does not match its manifest hash")
 	}
 	if !bytes.Equal(stored, data) {
-		return "", mismatch("the manifest copy differs from the workspace row")
+		return "", "", mismatch("the manifest copy differs from the workspace row")
 	}
 
 	head, branch, err := resolveHead(layout{gitDir: admin, commonDir: repo}, len(m.BaseCommit)/2)
 	if err != nil || branch != m.Branch || head == "" {
-		return "", mismatch("the worktree is not on %s", m.Branch)
+		return "", "", mismatch("the worktree is not on %s", m.Branch)
 	}
 	g := w.Inspector.Git
 	flags := w.safeConfigFlags()
 	if head != m.Head {
 		cmd := g.commandWith(ctx, flags, repo, "", "merge-base", "--is-ancestor", m.Head, head)
 		if _, err := output(cmd, "merge-base"); err != nil {
-			return "", mismatch("the branch %s no longer descends from the imported-changes commit", m.Branch)
+			return "", "", mismatch("the branch %s no longer descends from the imported-changes commit", m.Branch)
 		}
 	}
 
@@ -149,7 +153,7 @@ func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash st
 	// mark a changed file assume-unchanged or skip-worktree.
 	scratch, err := os.MkdirTemp("", "ada-index-")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer os.RemoveAll(scratch)
 	inIndex := func(args ...string) *exec.Cmd {
@@ -158,10 +162,10 @@ func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash st
 		return cmd
 	}
 	if _, err := output(inIndex("read-tree", head), "read-tree"); err != nil {
-		return "", mismatch("read the branch head: %v", err)
+		return "", "", mismatch("read the branch head: %v", err)
 	}
 	if _, err := output(inIndex("add", "-A", "--"), "add"); err != nil {
-		return "", mismatch("stage agent changes: %v", err)
+		return "", "", mismatch("stage agent changes: %v", err)
 	}
 
 	diffCmd := inIndex("diff", "--cached", "--quiet")
@@ -170,7 +174,7 @@ func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash st
 		if e, ok := errors.AsType[*exec.ExitError](err); ok && e.ExitCode() == 1 {
 			dirty = true
 		} else {
-			return "", mismatch("diff staged agent changes: %v", err)
+			return "", "", mismatch("diff staged agent changes: %v", err)
 		}
 	}
 
@@ -185,15 +189,15 @@ func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash st
 			"GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=ada@adanext.invalid",
 		)
 		if _, err := output(commitCmd, "commit"); err != nil {
-			return "", mismatch("commit agent changes: %v", err)
+			return "", "", mismatch("commit agent changes: %v", err)
 		}
 	}
 
 	newHead, newBranch, err := resolveHead(layout{gitDir: admin, commonDir: repo}, len(m.BaseCommit)/2)
 	if err != nil || newBranch != m.Branch || newHead == "" {
-		return "", mismatch("the worktree left %s after commit", m.Branch)
+		return "", "", mismatch("the worktree left %s after commit", m.Branch)
 	}
-	return newHead, nil
+	return newHead, m.Head, nil
 }
 
 // PrepareCheckWorktree creates a fresh detached worktree at commit under
@@ -235,7 +239,8 @@ func (w *Workspaces) PrepareCheckWorktree(ctx context.Context, project, attempt,
 }
 
 // CheckTreeUnchanged reports whether the tracked files of a check's worktree
-// still match commit.
+// still match commit. A worktree, git directory or config the check moved or
+// changed reads changed; a git call that fails for another reason is an error.
 func (w *Workspaces) CheckTreeUnchanged(ctx context.Context, project, attempt, runID, adminName, commit, configSHA256 string) (bool, error) {
 	for _, id := range []string{project, attempt, runID} {
 		if !safeName(id) {
@@ -274,13 +279,18 @@ func (w *Workspaces) CheckTreeUnchanged(ctx context.Context, project, attempt, r
 		return false, err
 	}
 	defer os.RemoveAll(scratch)
+	// Only diff's exit 1 says the tree changed; any other failure is Ada's own
+	// and says nothing about the tree.
 	g := w.Inspector.Git
 	flags := w.safeConfigFlags()
 	for _, args := range [][]string{{"read-tree", commit}, {"diff", "--quiet", commit, "--"}} {
 		cmd := g.worktreeCommand(ctx, flags, repo, adminDir, wt, args...)
 		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+filepath.Join(scratch, "index"))
 		if _, err := output(cmd, args[0]); err != nil {
-			return false, nil
+			if e, ok := errors.AsType[*exec.ExitError](err); ok && e.ExitCode() == 1 && args[0] == "diff" {
+				return false, nil
+			}
+			return false, err
 		}
 	}
 	return true, nil

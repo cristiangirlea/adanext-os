@@ -12,14 +12,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var subreaperOnce sync.Once
-
 // becomeSubreaper makes adad the parent of every orphan of its trees, so a
 // daemon that leaves its session after its parent exits is still found. adad
 // reaps only processes a supervisor tracked, by pid, never with wait(-1), so
 // no exit status os/exec waits for is taken.
-func becomeSubreaper() {
-	subreaperOnce.Do(func() { _ = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) })
+var becomeSubreaper = sync.OnceValue(func() error { return subreaper(unix.Prctl) })
+
+// subreaper makes the call through prctl, the test seam.
+func subreaper(prctl func(option int, arg2, arg3, arg4, arg5 uintptr) error) error {
+	if err := prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		return fmt.Errorf("become child subreaper: %w", err)
+	}
+	return nil
 }
 
 func readProcessRecord(pid int) (processRecord, error) {
@@ -204,29 +208,43 @@ func signalGroups(signal func(int, syscall.Signal) error, tree map[int]processRe
 
 // waitTree waits, bounded, until each process of the tree has exited, and
 // reaps one that exited as adad's child: an orphan adad took as subreaper,
-// never the root (os/exec waits for it) nor another supervisor's root.
+// never the root (os/exec waits for it) nor another supervisor's root. After
+// the deadline one more pass reaps every member that has exited by then, so
+// one stuck process leaks no zombies.
 func (s *processSupervisor) waitTree(tree map[int]processRecord) {
+	s.waitTreeWithin(tree, 5*time.Second)
+}
+
+func (s *processSupervisor) waitTreeWithin(tree map[int]processRecord, bound time.Duration) {
 	if len(tree) == 0 {
 		return
 	}
-	self := os.Getpid()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(bound)
 	for pid, record := range tree {
-		for time.Now().Before(deadline) {
-			current, err := readProcessRecord(pid)
-			if err != nil || current.created != record.created {
-				break
-			}
-			if exited(current) {
-				if current.parent == self && pid != s.pid && !s.isRoot(pid) {
-					var status unix.WaitStatus
-					_, _ = unix.Wait4(pid, &status, unix.WNOHANG, nil)
-				}
-				break
-			}
+		for time.Now().Before(deadline) && !s.reap(pid, record) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
+	for pid, record := range tree {
+		s.reap(pid, record)
+	}
+}
+
+// reap reports a member that is gone or has exited, and reaps it, without
+// blocking, when it exited as adad's own orphan.
+func (s *processSupervisor) reap(pid int, record processRecord) bool {
+	current, err := readProcessRecord(pid)
+	if err != nil || current.created != record.created {
+		return true
+	}
+	if !exited(current) {
+		return false
+	}
+	if current.parent == os.Getpid() && pid != s.pid && !s.isRoot(pid) {
+		var status unix.WaitStatus
+		_, _ = unix.Wait4(pid, &status, unix.WNOHANG, nil)
+	}
+	return true
 }
 
 // isRoot reports another supervisor's root, which its own cmd.Wait reaps.

@@ -34,7 +34,9 @@ var (
 )
 
 func newProcessSupervisor(cmd *exec.Cmd) (*processSupervisor, error) {
-	becomeSubreaper()
+	if err := becomeSubreaper(); err != nil {
+		return nil, err
+	}
 	// A session of its own: descendants keep its id when they are reparented
 	// or their group leader exits, and Harness's backend groups stay in it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

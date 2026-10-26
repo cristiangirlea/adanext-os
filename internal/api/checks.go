@@ -70,7 +70,7 @@ func (h *handler) setChecks(w http.ResponseWriter, r *http.Request) {
 			return 0, nil, err
 		}
 		task, err := scanTaskTx(r.Context(), tx, id)
-		return 200, taskValue(task), err
+		return 200, h.taskAtTip(task), err
 	})
 }
 

@@ -694,7 +694,7 @@ func TestCommitAgentChangesKeepsAgentCommitsAndRefusesTampering(t *testing.T) {
 
 	row := m
 	row.Head = ""
-	tested, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
+	tested, _, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
 	if err != nil {
 		t.Fatalf("CommitAgentChanges: %v", err)
 	}

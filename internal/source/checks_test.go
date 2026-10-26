@@ -42,7 +42,7 @@ func TestCommitAgentChangesRefusesAConfigRewrittenTogetherWithItsCopy(t *testing
 	tamperConfig(t, w, m, "[gc]\n\tauto = 1\n")
 	row := m
 	row.Head = ""
-	_, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
+	_, _, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
 	if _, ok := errors.AsType[*MismatchError](err); !ok {
 		t.Fatalf("CommitAgentChanges = %v, want a mismatch", err)
 	}
@@ -75,7 +75,7 @@ func TestCommitAgentChangesRefusesARepointedCommonDirAndRunsNoFilter(t *testing.
 	}
 	row := m
 	row.Head = ""
-	_, err = w.CommitAgentChanges(context.Background(), row, m.Hash())
+	_, _, err = w.CommitAgentChanges(context.Background(), row, m.Hash())
 	if _, ok := errors.AsType[*MismatchError](err); !ok {
 		t.Errorf("CommitAgentChanges = %v, want a mismatch", err)
 	}
@@ -144,7 +144,7 @@ func TestCommitAgentChangesTakesAChangeTheAgentsIndexHides(t *testing.T) {
 			git(t, m.Path, "update-index", flag, "README.md")
 			row := m
 			row.Head = ""
-			tested, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
+			tested, _, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -152,5 +152,112 @@ func TestCommitAgentChangesTakesAChangeTheAgentsIndexHides(t *testing.T) {
 				t.Fatalf("Ada's commit holds %q", got)
 			}
 		})
+	}
+}
+
+func TestAPlantedOrLinkedHooksDirectoryIsRefusedBeforeAnyGitRuns(t *testing.T) {
+	t.Parallel()
+	for _, plant := range []string{"hook", "link"} {
+		t.Run(plant, func(t *testing.T) {
+			t.Parallel()
+			dir := newRepo(t, nil)
+			w := newWorkspaces(t)
+			m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+			write(t, filepath.Join(m.Path, "README.md"), "agent change\n")
+			marker := filepath.Join(tempDir(t), "hook-ran")
+			hooks := w.Inspector.Git.hooks
+			target := hooks
+			if plant == "link" {
+				target = tempDir(t)
+				if err := os.Remove(hooks); err != nil {
+					t.Fatal(err)
+				}
+				if runtime.GOOS == "windows" {
+					if out, err := exec.Command("cmd", "/c", "mklink", "/J", hooks, target).CombinedOutput(); err != nil {
+						t.Fatalf("mklink /J: %v: %s", err, out)
+					}
+				} else if err := os.Symlink(target, hooks); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Hooks that --no-verify does not skip, on every git call Ada makes
+			// here; a link is refused even to an empty directory.
+			for _, name := range []string{"post-index-change", "reference-transaction", "post-commit", "post-checkout"} {
+				if plant != "hook" {
+					break
+				}
+				if err := os.WriteFile(filepath.Join(target, name), []byte("#!/bin/sh\necho "+name+" >> '"+shPath(marker)+"'\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			row := m
+			row.Head = ""
+			if _, _, err := w.CommitAgentChanges(context.Background(), row, m.Hash()); err == nil {
+				t.Error("CommitAgentChanges ran with a planted hooks directory")
+			}
+			if _, _, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", m.Head, m.ConfigSHA256); err == nil {
+				t.Error("PrepareCheckWorktree ran with a planted hooks directory")
+			}
+			if _, err := prepareCapture(w, dir, mustCapture(t, w.Inspector, dir), "2"); err == nil {
+				t.Error("Prepare synced with a planted hooks directory")
+			}
+			if data, err := os.ReadFile(marker); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("a hook ran: %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestCommitAgentChangesReturnsTheImportedCommitItVerified(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	write(t, filepath.Join(m.Path, "README.md"), "agent change\n")
+	row := m
+	row.Head = ""
+	tested, imported, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported != m.Head || tested == m.Head {
+		t.Fatalf("tested %s, imported %s, want imported %s", tested, imported, m.Head)
+	}
+}
+
+func TestCheckTreeUnchangedReturnsAdasOwnGitErrors(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	_, admin, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", m.Head, m.ConfigSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// git never starts: that says nothing about the tree.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	unchanged, err := w.CheckTreeUnchanged(ctx, m.Project, m.Attempt, "run1", admin, m.Head, m.ConfigSHA256)
+	if err == nil {
+		t.Fatalf("a git call that never ran: unchanged = %v, no error", unchanged)
+	}
+}
+
+func TestWorktreeCommandNamesTheCloneAsItsCommonDir(t *testing.T) {
+	t.Parallel()
+	g := newInspector(t).Git
+	repo, admin, wt := tempDir(t), tempDir(t), tempDir(t)
+	cmd := g.worktreeCommand(context.Background(), nil, repo, admin, wt, "status")
+	found := 0
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, "GIT_COMMON_DIR=") {
+			found++
+			if kv != "GIT_COMMON_DIR="+repo {
+				t.Errorf("env holds %s, want GIT_COMMON_DIR=%s", kv, repo)
+			}
+		}
+	}
+	if found != 1 || cmd.Dir != wt {
+		t.Fatalf("GIT_COMMON_DIR set %d times, dir %s: %v", found, cmd.Dir, cmd.Env)
 	}
 }

@@ -164,6 +164,13 @@ func (h *handler) tip(project, task string) string {
 	return h.exec.Branches.BranchTip(project, task)
 }
 
+// taskAtTip is the task's response, any check result marked against its
+// branch's current commit, in every response that carries one.
+func (h *handler) taskAtTip(task store.Task) taskJSON {
+	task.Attempt.AtTip(h.tip(task.Project, task.ID))
+	return taskValue(task)
+}
+
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
 	if hub != nil && hub.BudgetBytes > 0 && hub.BudgetBytes < pageBytes {
 		panic(fmt.Sprintf("api: a budget of %d bytes is below one page (%d)", hub.BudgetBytes, pageBytes))
@@ -557,8 +564,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]taskJSON, 0, len(tasks))
 	for _, task := range tasks {
-		task.Attempt.AtTip(h.tip(task.Project, task.ID))
-		result = append(result, taskValue(task))
+		result = append(result, h.taskAtTip(task))
 	}
 	writeJSON(w, 200, result)
 }
@@ -573,8 +579,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	task.Attempt.AtTip(h.tip(task.Project, task.ID))
-	value := taskValue(task)
+	value := h.taskAtTip(task)
 	w.Header().Set("ETag", fmt.Sprintf("\"%d\"", task.Revision))
 	writeJSON(w, 200, value)
 }
@@ -650,7 +655,7 @@ func (h *handler) taskMutation(w http.ResponseWriter, r *http.Request, change fu
 		}
 		changed = true
 		task, err := scanTaskTx(r.Context(), tx, id)
-		return 200, taskValue(task), err
+		return 200, h.taskAtTip(task), err
 	})
 	return id, ok && changed
 }
@@ -886,7 +891,7 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 			return 0, nil, err
 		}
 		task, err := scanTaskTx(r.Context(), tx, id)
-		return 200, startedTaskJSON{taskValue(task), attemptID}, err
+		return 200, startedTaskJSON{h.taskAtTip(task), attemptID}, err
 	})
 	if ok && attemptID != "" && h.exec.Runner != nil {
 		h.exec.Runner.LaunchAttempt(attemptID)

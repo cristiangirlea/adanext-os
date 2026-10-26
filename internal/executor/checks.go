@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -113,22 +112,10 @@ func (e *Executor) commitAndVerify(a store.Attempt, active *active) {
 		Policy:       row.Policy,
 		ConfigSHA256: configSHA256,
 	}
-	adminManifest := filepath.Join(e.cfg.Workspaces.Root, row.Project, "repo.git", "worktrees", row.Attempt, "ada-manifest.json")
-	var importedCommit string
-	if data, err := os.ReadFile(adminManifest); err == nil {
-		var copied source.Manifest
-		if json.Unmarshal(data, &copied) == nil {
-			importedCommit = copied.Head
-		}
-	}
-
-	testedCommit, err := e.cfg.Workspaces.CommitAgentChanges(ctx, m, row.ManifestHash)
+	testedCommit, importedCommit, err := e.cfg.Workspaces.CommitAgentChanges(ctx, m, row.ManifestHash)
 	if err != nil {
 		e.recoverWorkspaceVerify(a, "workspace verification failed", err.Error())
 		return
-	}
-	if importedCommit == "" {
-		importedCommit = row.BaseCommit
 	}
 
 	var verifying bool

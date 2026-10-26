@@ -1580,11 +1580,14 @@ request runs.
   1. Ada's clone config is checked against one copy Ada writes outside the clone,
      `<state>/projects/<id>/ada-config`, and that copy against its SHA-256 in SQLite
      (`clone_configs`, per project, written with the workspace row). An agent or a check can
-     rewrite any file under the state directory with the user's rights; only the database
-     anchors what Ada wrote. No copy is kept in the clone or in a worktree's git directory.
+     rewrite any file under the state directory with the user's rights, the database included,
+     so this catches a config changed by mistake, not by a determined process (the 2026-10-26
+     second-review entry, point 8). No copy is kept in the clone or in a worktree's git
+     directory.
   2. Every git call on a worktree's git directory sets `GIT_COMMON_DIR` to the clone, and a
      worktree whose `commondir` file does not resolve to the clone (`os.SameFile`) is refused, so
-     a repointed common dir cannot bring its own config (a `filter` that runs on `git add`).
+     a repointed common dir is refused before git reads its config (a `filter` that runs on
+     `git add`).
   3. Ada's commit stages the agent's changes through a fresh temporary index read from the
      branch head, and a check's tracked files are compared with the tested commit through one
      read from that commit, so nothing the agent or the check left in its own index
@@ -1597,9 +1600,8 @@ request runs.
      session, not a supervisor's root) is taken by a closing supervisor only while no other
      supervisor is live (one not started yet, or whose root still runs): every process `adad`
      starts in a session of its own is a supervisor's root, so the orphan came from a
-     supervised tree, and with the plan's concurrency of one there is no doubt whose. With
-     more than one attempt at once, an orphan nobody can attribute waits for the last live
-     supervisor's close. `adad` reaps only tree members that exited as its own children, by pid
+     supervised tree, and with the plan's concurrency of one there is no doubt whose. More than
+     one attempt at once is refused on Linux (the second-review entry, point 4). `adad` reaps only tree members that exited as its own children, by pid
      with `wait4`, never another supervisor's root (its `cmd.Wait` reaps it) and never with
      `wait(-1)`, so no exit status `os/exec` waits for is taken.
   5. A check Ada could not run (its worktree could not be prepared or inspected, its working
@@ -1615,6 +1617,38 @@ request runs.
      runs and the baselines they were compared with.
   8. Not fixed here: the UI's statement that checks run unsandboxed, where checks are declared
      and where their results are shown, lands with M4.4, which builds the UI.
+
+- **2026-10-26, M4.2 second review (PR #115).** The re-review of `7b00cd5` confirmed the first
+  review's fixes and found these.
+  1. Ada's hooks directory (`core.hooksPath`, `<state>/git/hooks`) must be a real, empty
+     directory, not a link, before each of Ada's git calls on the clone and its worktrees and
+     before a sync: git runs hooks from it that `--no-verify` does not skip (`post-index-change`,
+     `reference-transaction`, `post-commit`, `post-checkout`). Otherwise the call is refused as a
+     workspace mismatch.
+  2. `source.CommitAgentChanges` returns the imported-changes commit it verified with the
+     tested commit; the executor no longer reads it from the agent's worktree git directory.
+  3. Only `git diff`'s exit 1 makes a check `changed_tree`; a worktree, git directory or config
+     the check moved or changed still does. Any other failure of Ada's own git calls while
+     inspecting a check's worktree is an error: the run is `not_run` and never kept as a
+     baseline.
+  4. `adad` refuses `-concurrency` above 1 on Linux. An orphan that leaves its session (a
+     `setsid` daemon from one attempt's engine) can't yet be told to belong to one attempt
+     rather than another, and could outlive that attempt's supervisor and run during its commit
+     and checks. Raising the limit waits for that attribution.
+  5. After its deadline, waiting for a Linux tree makes one more non-blocking `wait4` pass over
+     every member, so one stuck process leaks no zombies. A failed `PR_SET_CHILD_SUBREAPER` is
+     reported, and the engine or check does not start.
+  6. Mutation responses mark any check result they carry against the branch tip, as GET does.
+  7. Tests added for the clone as `GIT_COMMON_DIR` in a worktree's git calls, and for the
+     `executor_error` event a storage error while verifying records.
+  8. The trust boundary, stated as it is. A check or an agent runs with the user's rights and
+     can still write the state directory: `adanext.db`, the clone's objects and refs, Ada's
+     hooks directory, and Ada's copies of the clone config. M4's checks of the clone config, the
+     hooks directory, the worktrees and the trees therefore catch tampering by mistake or by a
+     careless agent, not by a determined one. The real boundary is the M5 guest: as
+     `docs/plan.md` section 4 says, a worktree is a development boundary, not protection
+     against hostile code. The title of commit `7b00cd5` ("checks trust nothing the agent can
+     write") claims more than this and is read with this limit.
 
 ## Owner actions pending
 

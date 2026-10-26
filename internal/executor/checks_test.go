@@ -91,6 +91,15 @@ func TestHelperCheck(t *testing.T) {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	case "break_objects":
+		// Ada's git then fails for a reason of its own, not a changed tree.
+		data, _ := os.ReadFile(".git")
+		admin := filepath.FromSlash(strings.TrimSpace(strings.TrimPrefix(string(data), "gitdir:")))
+		repo := filepath.Dir(filepath.Dir(admin))
+		if err := os.Rename(filepath.Join(repo, "objects"), filepath.Join(repo, "objects.gone")); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
 	case "dump_env":
 		for _, kv := range os.Environ() {
 			fmt.Println(kv)
@@ -699,6 +708,24 @@ func TestAStorageErrorWhileVerifyingStillEndsTheTaskInAwaitingReview(t *testing.
 	results := task.Attempt.CheckResults()
 	if len(results) != 2 || results[0].State != store.CheckNotRun || results[1].State != store.CheckNotRun || results[0].BoundCommit != "" {
 		t.Fatalf("results = %+v", results)
+	}
+	errorEventContains(t, s, "injected")
+}
+
+func TestAnInspectionGitErrorIsNotRunAndNeverKeptAsABaseline(t *testing.T) {
+	e, s, _, _, _ := workspaceExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
+	setTaskChecksForTest(t, s, []store.CheckDefinition{
+		{Name: "breaks-objects", Argv: checkHelperArgv("break_objects")},
+	})
+	e.LaunchAttempt("attempt")
+	task := waitTaskState(t, s, store.AwaitingReview)
+	results := task.Attempt.CheckResults()
+	if len(results) != 1 || results[0].State != store.CheckNotRun || results[0].BoundCommit != "" || results[0].Baseline != nil {
+		t.Fatalf("results = %+v", results)
+	}
+	if b, err := s.BaselineForCheck(context.Background(), "snap", store.CheckDefinitionHash(results[0].Definition)); err != nil || b != nil {
+		t.Fatalf("a baseline was kept from Ada's own git error: %+v, %v", b, err)
 	}
 }
 
