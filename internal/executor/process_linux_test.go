@@ -255,3 +255,52 @@ func TestAFailedSubreaperCallIsReported(t *testing.T) {
 		t.Fatalf("subreaper = %v, want the prctl error", err)
 	}
 }
+
+func TestAnotherOpenSupervisorHoldsOnlyTheOrphansOfItsTree(t *testing.T) {
+	other := &processSupervisor{
+		pid: 100, created: "c100",
+		sessions: map[int]string{200: "c200"},
+		seen:     map[int]processRecord{300: {pid: 300, created: "c300"}},
+	}
+	supervisorsMu.Lock()
+	supervisors[other] = true
+	supervisorsMu.Unlock()
+	t.Cleanup(func() {
+		supervisorsMu.Lock()
+		delete(supervisors, other)
+		supervisorsMu.Unlock()
+	})
+	self := os.Getpid()
+	// The other's root has exited: only what it recorded identifies its tree.
+	records := map[int]processRecord{
+		101: {pid: 101, parent: self, session: 100, created: "x"},
+		102: {pid: 102, parent: 1, session: 100, created: "x"},
+		200: {pid: 200, parent: 1, session: 200, created: "c200"},
+		201: {pid: 201, parent: self, session: 200, created: "x"},
+		300: {pid: 300, parent: self, session: 300, created: "c300"},
+		401: {pid: 401, parent: self, session: 400, created: "x"},
+	}
+	s := &processSupervisor{pid: 900, created: "c900"}
+	roots, held, live := s.otherSupervisors(records)
+	if !roots[100] {
+		t.Errorf("roots = %v, want the other's root 100", roots)
+	}
+	for pid, want := range map[int]bool{
+		101: true,  // an orphan in its root's session
+		201: true,  // an orphan in a session it recorded
+		300: true,  // an orphan its scans saw
+		102: false, // in its root's session, but not reparented to this process
+		401: false, // an orphan in a session it never knew
+	} {
+		if held[pid] != want {
+			t.Errorf("held[%d] = %v, want %v", pid, held[pid], want)
+		}
+	}
+	if live {
+		t.Error("live with the other's root gone")
+	}
+	records[100] = processRecord{pid: 100, parent: self, session: 100, created: "c100", state: "S"}
+	if _, _, live := s.otherSupervisors(records); !live {
+		t.Error("not live with the other's root running")
+	}
+}
