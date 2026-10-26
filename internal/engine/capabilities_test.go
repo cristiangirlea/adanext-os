@@ -127,6 +127,12 @@ func TestACellForAnotherCLIVersionShowsUnverified(t *testing.T) {
 	if claude.Installed == nil || claude.Installed.Version != "0.0.1" {
 		t.Fatalf("installed %+v", claude.Installed)
 	}
+	older := m.WithInstalled(map[string]Installed{
+		"codex": {Available: true, Version: "0.0.1", Modes: []string{"readonly", "auto", "yolo"}, Options: codex.Options},
+	})
+	if got := older.backend("codex").cell("readonly", RowReadOnly); got.Status != Unverified || got.Recorded != Enforced {
+		t.Fatalf("other codex version: read-only cell %+v", got)
+	}
 	missing := m.WithInstalled(nil)
 	if got := missing.backend("codex").cell("auto", RowWorkspaceWrites); got.Status != Unverified || got.Recorded != Requested {
 		t.Fatalf("no CLI found: %+v", got)

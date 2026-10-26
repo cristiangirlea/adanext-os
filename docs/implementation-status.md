@@ -10,7 +10,7 @@ are in `docs/backlog.md`.
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100 | M4 first local workflow |
-| M4 First local workflow | in progress | Slices in `docs/backlog.md`; M4.1 (#112) done with its live runs (#113, `m4/live-evidence`); M4.2 (#114, #108) on `m4/checks` | M4.3 |
+| M4 First local workflow | in progress | Slices in `docs/backlog.md`; M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) on `m4/checks` | M4.3 |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
 | M6 Resume intelligence | not started | | |
@@ -427,7 +427,7 @@ inspection and on the task, and the readonly cells reading `requested`.
 Evidence at the commit that adds this section: `.hrn/check.sh` passed (`== windows exit 0, linux
 exit 0`), the seven desktop end-to-end tests included; `-race` ran in the Linux leg only.
 
-Live runs (2026-10-25, `m4/live-evidence`): `ADANEXT_LIVE=1 go run ./cmd/ada-live -backend
+Live runs (2026-10-25, PR #116): `ADANEXT_LIVE=1 go run ./cmd/ada-live -backend
 claude,codex`, with `adad` built from `main` at `0b600f2` and the pinned engine built by
 `build-engine.sh`, its hash matching the one embedded in `adad`; one readonly run per backend
 whose task asks the agent to write `ada-live-probe.txt`, on a fixture repository holding a
@@ -455,7 +455,7 @@ Finding: claude's plan mode is not confined to the worktree. Its one write, the 
 under the user's profile (`~/.claude/plans/<id>.md`), outside the worktree, and the project's
 hook ran. So claude's readonly read-only cell stays `requested` with those caveats in its
 detail, while codex's, whose sandbox denied the write, is `enforced` (decisions log,
-2026-10-25 entry).
+2026-10-26, M4.1 live runs).
 
 ### M4.2 checks and Windows job termination wait (2026-10-25, #114, #108)
 
@@ -1516,7 +1516,7 @@ request runs.
 
   | Row | claude | codex |
   |---|---|---|
-  | read-only (readonly) | requested: plan mode, the CLI's rule, not a sandbox; it writes its plan file under the user's profile, and project hooks run | enforced by codex's read-only sandbox (`cmd/ada-live readonly run (write asked, access denied)`, 0.163.0-alpha.11, 2026-10-25) |
+  | read-only (readonly) | requested: plan mode, the CLI's rule, not a sandbox | requested: codex's read-only sandbox |
   | workspace writes and shell (auto / yolo) | requested: acceptEdits / bypassPermissions, nothing keeps it in the worktree | requested: workspace-write sandbox / no sandbox |
   | network | unsupported in every mode | requested (readonly, auto: the sandbox keeps it off), unsupported (yolo) |
   | approvals | unsupported (#7) | unsupported (#7) |
@@ -1528,10 +1528,8 @@ request runs.
   | turn limit | requested: `--max-turns` | unsupported |
   | checks (M4.2) | unsandboxed | unsandboxed |
 
-  Readonly cells name the live run that shows them; none is `enforced` by a CLI until a live
-  run has. The live runs of 2026-10-25 (M4.1 evidence) moved codex's to `enforced`: its sandbox
-  denied the write. Claude's stays `requested`: plan mode refused the write but wrote its plan
-  under the user's profile, and the project hook ran. Only the cells that depend on the CLI read `unverified` for another installed version
+  Readonly cells name the live run that will show them; none is `enforced` by a CLI until a live
+  run has. Only the cells that depend on the CLI read `unverified` for another installed version
   (or when no CLI or no version is found, or the engine's hello answers differently from the
   table); what adad and hrn hold does not depend on the CLI. The installed version comes from
   the engine's hello (which names the CLI it found) and the CLI's own `--version`, run directly
@@ -1696,6 +1694,25 @@ request runs.
   `-race -cpu=1,2 -count=8` over the package's parallel tests: 6 failures in 16 runs before the
   fix, none after; `TestASupervisorLeavesAnotherTreesOrphanInItsSessionToThatTree` fails before
   it.
+
+- **2026-10-26, M4.1 live runs (#112, PR #116).** The live runs of 2026-10-25 (M4.1's evidence,
+  "Live runs") change two readonly cells of the 2026-10-25 M4.1 entry's table. Codex's read-only
+  cell moves from `requested` to `enforced`: by codex's read-only sandbox (`codex --sandbox
+  read-only`), which denied the run's write of the probe file in the worktree ("Access to the
+  path ... is denied"); shown by `cmd/ada-live readonly run (write asked, access denied)` with
+  codex 0.163.0-alpha.11 on 2026-10-25. Claude's stays `requested`, its caveats now stated:
+  plan mode refused the write, but it is the CLI's rule, not a sandbox; it wrote its plan file
+  under the user's profile (`~/.claude/plans`), outside the worktree; and the fixture's project
+  hook ran in readonly mode. The rows now read:
+
+  | Row | claude | codex |
+  |---|---|---|
+  | read-only (readonly) | requested: plan mode, the CLI's rule, not a sandbox; it writes its plan file under the user's profile, and project hooks run | enforced by codex's read-only sandbox (`cmd/ada-live readonly run (write asked, access denied)`, 0.163.0-alpha.11, 2026-10-25) |
+
+  Readonly cells name the live run that shows them; a CLI's cell is `enforced` only once a live
+  run has shown it, and only for the version it ran: another installed codex version reads
+  `unverified`, with `enforced` as the recorded status. The live harness masks identifiers in
+  what it records, the attempt id among them, also where a line break splits it.
 
 ## Owner actions pending
 
