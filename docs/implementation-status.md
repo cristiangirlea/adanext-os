@@ -1714,6 +1714,20 @@ request runs.
   `unverified`, with `enforced` as the recorded status. The live harness masks identifiers in
   what it records, the attempt id among them, also where a line break splits it.
 
+- **2026-10-26, M4.4 split: a UI foundation first, and a dark workshop preset.** The owner asked
+  for a UI foundation in M4.4: "tokens, durations, motion switch, effect registry, contrast
+  check, Ctrl+P palette, resize handle, light default plus dark workshop preset". M4.4 is split
+  in two. M4.4a UI foundation lands the token tiers, the two themes switched before first paint,
+  a WCAG AA contrast script run by `scripts/check.sh`, the motion rules with one kill switch
+  beside `prefers-reduced-motion`, one effect registry, the Ctrl+P command palette and one
+  resize-handle component. M4.4b The workspace UI is the earlier M4.4 text, built on M4.4a.
+  M4.4a touches only `ui/`, so it can run beside M4.3; M4.4b comes after both. This amends plan
+  section 3, which says "a light default theme with dark mode": the owner chose Ada's light
+  slate default plus a dark "workshop" preset as the second theme. The base set adds no new
+  dependency: the palette is a native `<dialog>` written by hand, and the contrast check is a
+  script. Reason: one set of tokens, motion rules and shared parts first keeps the workspace UI
+  from growing a parallel style or effect system per component.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
