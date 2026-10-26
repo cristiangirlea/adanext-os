@@ -43,6 +43,9 @@ func startSupervised(t *testing.T, script string) (*exec.Cmd, *processSupervisor
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		<-waited
+		// Closed, so no later test's scan meets what this tree held.
+		s.signal = syscall.Kill
+		s.close()
 	})
 	return cmd, s, marker, waited
 }

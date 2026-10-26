@@ -170,6 +170,85 @@ func TestWaitTreeReapsExitedOrphansThoughAMemberOutlivesItsDeadline(t *testing.T
 	}
 }
 
+func TestASupervisorLeavesAnotherTreesOrphanInItsSessionToThatTree(t *testing.T) {
+	// The other tree's engine starts a descendant in its session and exits:
+	// the descendant is reparented to the test, as to adad, while the other
+	// supervisor is still open, waiting for its stderr.
+	_, other, otherMarker, otherWaited := startSupervised(t, "group_leader_exits")
+	cleanupGrandchild(t, otherMarker)
+	<-otherWaited
+	var pid int
+	var identity string
+	data, err := os.ReadFile(otherMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Sscanf(string(data), "child:%d:%s", &pid, &identity); err != nil {
+		t.Fatalf("descendant did not record itself: %q: %v", data, err)
+	}
+	for deadline := time.Now().Add(markerBound); ; time.Sleep(5 * time.Millisecond) {
+		if r, err := readProcessRecord(pid); err == nil && r.parent == os.Getpid() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("descendant %d was never reparented to the test", pid)
+		}
+	}
+	root, s, marker, _ := startSupervised(t, "grandchild_hold")
+	cleanupGrandchild(t, marker)
+	// Recorded, never sent.
+	s.signal = func(int, syscall.Signal) error { return nil }
+	tree := s.stopAll()
+	if _, ok := tree[root.Process.Pid]; !ok {
+		t.Fatalf("the tree misses its own root: %v", tree)
+	}
+	if _, ok := tree[pid]; ok {
+		t.Fatalf("the supervisor took %d, an orphan in another open supervisor's session", pid)
+	}
+	other.close()
+	if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
+		t.Fatalf("its own supervisor's close left the orphan: %v", err)
+	}
+}
+
+func TestASupervisorHoldsOnlyWhatItCanIdentify(t *testing.T) {
+	s := &processSupervisor{
+		pid: 100, created: "c100",
+		sessions: map[int]string{200: "c200"},
+		seen:     map[int]processRecord{300: {pid: 300, created: "c300"}},
+	}
+	records := map[int]processRecord{
+		200: {pid: 200, session: 200, created: "c200"},
+		400: {pid: 400, session: 400, created: "other"},
+	}
+	for _, c := range []struct {
+		name   string
+		record processRecord
+		want   bool
+	}{
+		{"its root", processRecord{pid: 100, session: 100, created: "c100"}, true},
+		{"a pid reused for its root", processRecord{pid: 100, session: 1, created: "reused"}, false},
+		{"its root's session, the root gone", processRecord{pid: 101, session: 100, created: "x"}, true},
+		{"a session it recorded", processRecord{pid: 201, session: 200, created: "x"}, true},
+		{"a process its scans saw", processRecord{pid: 300, session: 300, created: "c300"}, true},
+		{"a pid reused for one its scans saw", processRecord{pid: 300, session: 300, created: "reused"}, false},
+		{"a session it never recorded", processRecord{pid: 401, session: 400, created: "x"}, false},
+	} {
+		if got := s.holds(c.record, records); got != c.want {
+			t.Errorf("%s: holds = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// A session, its root's or one it recorded, whose leader is now another
+	// process is not its own.
+	records[100] = processRecord{pid: 100, session: 100, created: "reused"}
+	records[200] = processRecord{pid: 200, session: 200, created: "reused"}
+	for _, session := range []int{100, 200} {
+		if s.holds(processRecord{pid: session + 1, session: session, created: "x"}, records) {
+			t.Errorf("holds took a member of session %d, whose leader id was reused", session)
+		}
+	}
+}
+
 func TestAFailedSubreaperCallIsReported(t *testing.T) {
 	failing := func(int, uintptr, uintptr, uintptr, uintptr) error { return errors.New("refused") }
 	if err := subreaper(failing); err == nil || !strings.Contains(err.Error(), "refused") {

@@ -1654,6 +1654,21 @@ request runs.
      against hostile code. The title of commit `7b00cd5` ("checks trust nothing the agent can
      write") claims more than this and is read with this limit.
 
+- **2026-10-26, M4.2 CI failure (PR #115).** `TestExitedEngineWithDescendantStderrEndsOK` failed
+  on GitHub's runner: the info event for a descendant holding stderr after the engine exited was
+  missing. Another test's attempt, closing at the same moment, had killed that descendant. The
+  descendant was reparented to `adad` in its own engine's session, and the first review's
+  orphan rule (point 4) let any closing supervisor take it once the owning supervisor's root
+  had exited, though that supervisor was still open, waiting for the engine's stderr. The rule
+  now also leaves an orphan to any open supervisor that holds it: in its root's session, in a
+  session it recorded, or seen by its scans. A descendant that left its session before its
+  supervisor ever scanned stays the limit of the second review's point 4, which keeps Linux at
+  one attempt at a time. Under that limit no two supervisors are open at once in `adad`, so only
+  the tests, many executors in one process, met the fault. Reproduced in Docker with two CPUs,
+  `-race -cpu=1,2 -count=8` over the package's parallel tests: 6 failures in 16 runs before the
+  fix, none after; `TestASupervisorLeavesAnotherTreesOrphanInItsSessionToThatTree` fails before
+  it.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).

@@ -27,7 +27,8 @@ type processSupervisor struct {
 }
 
 // supervisors are the live supervisors of this process, from creation to
-// close: an orphan reparented to adad is claimed only when no other could own it.
+// close: an orphan reparented to adad is never claimed while another holds it,
+// nor while another could own it unseen.
 var (
 	supervisorsMu sync.Mutex
 	supervisors   = map[*processSupervisor]bool{}

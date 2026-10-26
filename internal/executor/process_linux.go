@@ -65,11 +65,17 @@ func processCreated(pid int) string {
 
 func exited(r processRecord) bool { return r.state == "Z" || r.state == "X" }
 
-// otherSupervisors reports the pids of the other supervisors' roots, and
-// whether any other may still own an orphan: one not started yet, or whose
-// root still runs.
-func (s *processSupervisor) otherSupervisors(records map[int]processRecord) (roots map[int]bool, live bool) {
-	roots = map[int]bool{}
+// otherSupervisors reports the pids of the other supervisors' roots, the
+// orphans reparented to adad that another open supervisor holds (in its root's
+// session, a session it recorded, or seen by its scans: a supervisor whose
+// root has exited is still open while its attempt waits for what holds the
+// engine's output), and whether any other may own an orphan none of them can
+// identify: one not started yet, or whose root still runs. A descendant that
+// left its session before its supervisor ever scanned is such an orphan, which
+// is why Linux runs one attempt at a time.
+func (s *processSupervisor) otherSupervisors(records map[int]processRecord) (roots, held map[int]bool, live bool) {
+	roots, held = map[int]bool{}, map[int]bool{}
+	self := os.Getpid()
 	supervisorsMu.Lock()
 	defer supervisorsMu.Unlock()
 	for other := range supervisors {
@@ -84,16 +90,46 @@ func (s *processSupervisor) otherSupervisors(records map[int]processRecord) (roo
 		if r, ok := records[other.pid]; ok && r.created == other.created && !exited(r) {
 			live = true
 		}
+		for pid, r := range records {
+			if r.parent == self && other.holds(r, records) {
+				held[pid] = true
+			}
+		}
 	}
-	return roots, live
+	return roots, held, live
+}
+
+// holds reports a process of the tree s knows: its root, a member of the
+// root's session or of a session a real descendant leads, or one an earlier
+// scan saw. A session id stays reserved while any member lives: it names the
+// session we know unless its leader is now another process. The caller holds
+// s.mu or supervisorsMu, under both of which stopAll records what it saw.
+func (s *processSupervisor) holds(r processRecord, records map[int]processRecord) bool {
+	if r.pid == s.pid && r.created == s.created {
+		return true
+	}
+	leader, ok := records[r.session]
+	switch {
+	case r.session == s.pid:
+		if !ok || leader.created == s.created {
+			return true
+		}
+	case s.sessions[r.session] != "":
+		if !ok || leader.created == s.sessions[r.session] {
+			return true
+		}
+	}
+	prev, seen := s.seen[r.pid]
+	return seen && prev.created == r.created
 }
 
 // scan lists the tree: the root, its session, the sessions its real
 // descendants lead, what earlier scans saw, every descendant of those by
 // parentage, and, while no other supervisor could own them, the orphans
-// reparented to adad outside its own session. Every process adad starts in a
-// session of its own is a supervisor's root, so such an orphan came from a
-// supervised tree. A process is never taken for sharing a working directory.
+// reparented to adad outside its own session that no other supervisor's tree
+// holds. Every process adad starts in a session of its own is a supervisor's
+// root, so such an orphan came from a supervised tree. A process is never
+// taken for sharing a working directory.
 func (s *processSupervisor) scan() map[int]processRecord {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -115,19 +151,7 @@ func (s *processSupervisor) scan() map[int]processRecord {
 	}
 	self := os.Getpid()
 	own := records[self]
-	roots, live := s.otherSupervisors(records)
-	// A session id stays reserved while any member lives: it names the
-	// session we know unless its leader is now another process.
-	inSession := func(r processRecord) bool {
-		leader, ok := records[r.session]
-		switch {
-		case r.session == s.pid:
-			return !ok || leader.created == s.created
-		case s.sessions[r.session] != "":
-			return !ok || leader.created == s.sessions[r.session]
-		}
-		return false
-	}
+	roots, held, live := s.otherSupervisors(records)
 	tree := make(map[int]processRecord)
 	var queue []int
 	add := func(pid int, rec processRecord) {
@@ -137,11 +161,10 @@ func (s *processSupervisor) scan() map[int]processRecord {
 		}
 	}
 	for pid, record := range records {
-		prev, seen := s.seen[pid]
 		switch {
-		case pid == s.pid && record.created == s.created, inSession(record), seen && prev.created == record.created:
+		case s.holds(record, records):
 			add(pid, record)
-		case record.parent == self && record.session != own.session && !roots[pid] && pid != s.pid && !live:
+		case record.parent == self && record.session != own.session && !roots[pid] && !held[pid] && pid != s.pid && !live:
 			add(pid, record)
 		}
 	}
@@ -168,6 +191,8 @@ func (s *processSupervisor) stopAll() map[int]processRecord {
 	for range 32 {
 		current := s.scan()
 		grew := false
+		// Recorded under supervisorsMu too: other supervisors read them.
+		supervisorsMu.Lock()
 		for pid, record := range current {
 			s.seen[pid] = record
 			// Only a session a real descendant leads is followed.
@@ -179,6 +204,7 @@ func (s *processSupervisor) stopAll() map[int]processRecord {
 				grew = true
 			}
 		}
+		supervisorsMu.Unlock()
 		if !grew {
 			break
 		}
