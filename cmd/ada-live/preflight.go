@@ -36,6 +36,19 @@ func mask(text, home, user string) string {
 	return text
 }
 
+// maskAttempt replaces the attempt id in text with "<attempt>", also where line breaks (\n or
+// \r\n) fall inside it, as they do in wrapped output.
+func maskAttempt(text, id string) string {
+	if id == "" {
+		return text
+	}
+	parts := make([]string, 0, len(id))
+	for _, r := range id {
+		parts = append(parts, regexp.QuoteMeta(string(r)))
+	}
+	return regexp.MustCompile(strings.Join(parts, `(?:\r?\n)*`)).ReplaceAllString(text, "<attempt>")
+}
+
 // claudeSignIn accepts `claude auth status` only when it shows a claude.ai plan sign-in with the
 // first-party provider, never an API key or a cloud provider that bills per token.
 func claudeSignIn(status []byte) error {

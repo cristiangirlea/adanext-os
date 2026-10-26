@@ -107,6 +107,7 @@ const (
 	pinnedRevision = "8dd2659b953e9e5d9c593fa655254167ea9f8a8c"
 	recorded       = "2026-10-25"
 	liveReadonly   = "cmd/ada-live readonly run (write asked, file absent)"
+	liveDenied     = "cmd/ada-live readonly run (write asked, access denied)"
 )
 
 var efforts = []string{"low", "medium", "high", "xhigh", "max"}
@@ -168,7 +169,7 @@ func capabilitiesFor(goos string) Matrix {
 		), map[string]map[string]Cell{
 			"readonly": {
 				RowReadOnly: {Status: Requested, By: "claude --permission-mode plan", cli: true, Test: liveReadonly,
-					Detail: "plan mode refuses edits and changing commands, but it is the CLI's own rule, not a sandbox; project hooks still run"},
+					Detail: "plan mode refuses edits and changing commands, but it is the CLI's own rule, not a sandbox: it writes its plan file under the user's profile (~/.claude/plans), outside the worktree, and project hooks run in readonly mode (live run, 2026-10-25)"},
 				RowWorkspaceWrites: notOffered("readonly asks for no writes"),
 				RowNetwork:         claudeNetwork,
 			},
@@ -194,8 +195,8 @@ func capabilitiesFor(goos string) Matrix {
 			Cell{Status: Unsupported, Detail: "codex exec has no turn limit, and the pinned hrn does not offer max_turns for codex; use timeout"},
 		), map[string]map[string]Cell{
 			"readonly": {
-				RowReadOnly: {Status: Requested, By: "codex --sandbox read-only", cli: true, Test: liveReadonly,
-					Detail: "codex's own sandbox refuses writes; not yet shown through Ada"},
+				RowReadOnly: {Status: Enforced, By: "codex --sandbox read-only", cli: true, Test: liveDenied,
+					Detail: "codex's own sandbox denied the live run's write in the worktree (0.163.0-alpha.11, 2026-10-25)"},
 				RowWorkspaceWrites: notOffered("readonly asks for no writes"),
 				RowNetwork:         {Status: Requested, By: "codex --sandbox read-only", cli: true, Detail: "the sandbox turns the network off for the commands it runs"},
 			},

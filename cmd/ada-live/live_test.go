@@ -87,6 +87,19 @@ func TestMaskHidesIdentifiers(t *testing.T) {
 	}
 }
 
+func TestMaskAttemptHidesTheIDAlsoWhenWrapped(t *testing.T) {
+	id := "att_0123456789abcdef"
+	in := "start " + id + " then att_0123\r\n456789\nabcdef wrapped, and att_0123456789abcdeX nearby"
+	got := maskAttempt(in, id)
+	want := "start <attempt> then <attempt> wrapped, and att_0123456789abcdeX nearby"
+	if got != want {
+		t.Errorf("maskAttempt = %q, want %q", got, want)
+	}
+	if maskAttempt(in, "") != in {
+		t.Error("an empty id changed the text")
+	}
+}
+
 func TestClaudesStatusMustShowAPlanSignIn(t *testing.T) {
 	for status, ok := range map[string]bool{
 		`{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "max"}`: true,

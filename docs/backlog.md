@@ -274,7 +274,7 @@ Five slices (decisions log, 2026-10-20). M4.1 first. M4.2 and M4.3 then one at a
 each touches the schema or the API. M4.4 can start beside M4.2 on what the API already offers,
 and finishes after M4.3. M4.5 comes last.
 
-- [ ] **M4.1 The real engine, end to end.** `adad` finds the pinned engine, built by
+- [x] **M4.1 The real engine, end to end** (#112: #113, #116; live runs 2026-10-25). `adad` finds the pinned engine, built by
   `scripts/build-engine.sh` at `engine/engine.json`'s revision, in the app's directory or through
   a flag. It checks the binary's SHA-256 against the expected one and refuses any other. The
   expected SHA-256 is built into `adad` from `build-engine.sh`'s output, never read from beside

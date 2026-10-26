@@ -492,7 +492,7 @@ func (c *config) liveRun(ctx context.Context, backend, fixture string, result ma
 	if code, err := cl.call(ctx, "POST", "/v1/tasks/"+task.ID+"/start", "start-"+randomID(), "1", start, &started); err != nil || code != 200 {
 		return fmt.Errorf("start: %d %v", code, err)
 	}
-	result["attempt"] = started.AttemptID
+	result["attempt"] = "<attempt>"
 
 	// The engine's own timeout ends the run; the harness cancels a minute past it, as a backstop.
 	var final map[string]any
@@ -572,7 +572,8 @@ func (c *config) readCell(ctx context.Context, cl client, backend string, writte
 }
 
 // events reads the attempt's events page by page, keeping each one's kind and a masked, short
-// text, and the run id hrn put on them.
+// text, and the run id hrn put on them. The attempt id is masked before the text is cut, so a cut
+// never leaves part of it.
 func (c *config) events(ctx context.Context, cl client, attempt string) ([]map[string]any, string, error) {
 	var out []map[string]any
 	runID := ""
@@ -601,7 +602,7 @@ func (c *config) events(ctx context.Context, cl client, attempt string) ([]map[s
 			if payload.RunID != "" {
 				runID = payload.RunID
 			}
-			text := payload.Event.Text
+			text := maskAttempt(payload.Event.Text, attempt)
 			if len(text) > 300 {
 				text = text[:300] + "..."
 			}

@@ -114,7 +114,7 @@ func TestACellForAnotherCLIVersionShowsUnverified(t *testing.T) {
 		"codex":  {Available: true, Version: codex.CLIVersion, Modes: []string{"readonly", "auto", "yolo"}, Options: codex.Options},
 		"claude": {Available: true, Version: "0.0.1"},
 	})
-	if got := same.backend("codex").cell("readonly", RowReadOnly); got.Status != Requested || got.Recorded != "" {
+	if got := same.backend("codex").cell("readonly", RowReadOnly); got.Status != Enforced || got.Recorded != "" {
 		t.Fatalf("same version: %+v", got)
 	}
 	claude := same.backend("claude")
@@ -127,17 +127,43 @@ func TestACellForAnotherCLIVersionShowsUnverified(t *testing.T) {
 	if claude.Installed == nil || claude.Installed.Version != "0.0.1" {
 		t.Fatalf("installed %+v", claude.Installed)
 	}
+	older := m.WithInstalled(map[string]Installed{
+		"codex": {Available: true, Version: "0.0.1", Modes: []string{"readonly", "auto", "yolo"}, Options: codex.Options},
+	})
+	if got := older.backend("codex").cell("readonly", RowReadOnly); got.Status != Unverified || got.Recorded != Enforced {
+		t.Fatalf("other codex version: read-only cell %+v", got)
+	}
 	missing := m.WithInstalled(nil)
 	if got := missing.backend("codex").cell("auto", RowWorkspaceWrites); got.Status != Unverified || got.Recorded != Requested {
 		t.Fatalf("no CLI found: %+v", got)
 	}
 	// The engine advertising other options than the table is a different engine.
 	other := m.WithInstalled(map[string]Installed{"codex": {Available: true, Version: codex.CLIVersion, Modes: []string{"readonly"}, Options: codex.Options}})
-	if got := other.backend("codex").cell("readonly", RowReadOnly); got.Status != Unverified {
+	if got := other.backend("codex").cell("readonly", RowReadOnly); got.Status != Unverified || got.Recorded != Enforced {
 		t.Fatalf("other engine answers: %+v", got)
 	}
 	if m.backend("claude").cell("readonly", RowReadOnly).Status != Requested {
 		t.Fatal("WithInstalled changed the static table")
+	}
+}
+
+func TestTheReadonlyCellsAreWhatTheLiveRunsShowed(t *testing.T) {
+	// M4.1's live runs (2026-10-25): codex's sandbox denied the write; claude's plan mode
+	// refused it but wrote its plan under the user's profile, and the project hook ran.
+	m := Capabilities()
+	codex := m.backend("codex").cell("readonly", RowReadOnly)
+	if codex.Status != Enforced || codex.By != "codex --sandbox read-only" || codex.Test != "cmd/ada-live readonly run (write asked, access denied)" ||
+		m.backend("codex").CLIVersion != "0.163.0-alpha.11" || m.backend("codex").Observed != "2026-10-25" {
+		t.Errorf("codex readonly read-only cell %+v", codex)
+	}
+	claude := m.backend("claude").cell("readonly", RowReadOnly)
+	if claude.Status != Requested || claude.By != "claude --permission-mode plan" {
+		t.Errorf("claude readonly read-only cell %+v", claude)
+	}
+	for _, want := range []string{"the CLI's own rule", "under the user's profile", "project hooks run"} {
+		if !strings.Contains(claude.Detail, want) {
+			t.Errorf("claude readonly detail %q does not say %q", claude.Detail, want)
+		}
 	}
 }
 
