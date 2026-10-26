@@ -146,6 +146,22 @@ type Execution struct {
 	// Capabilities reports the installed CLIs for GET /v1/capabilities; *executor.Executor satisfies
 	// it. nil shows every CLI-dependent cell unverified.
 	Capabilities CapabilityProber
+	// Branches reads the tip of a task's branch in Ada's clone; *source.Workspaces satisfies it.
+	// nil leaves every tip unknown, so every check result reads invalidated.
+	Branches BranchReader
+}
+
+// BranchReader reads the current commit of ada/<task> in a project's clone; "" when unknown.
+type BranchReader interface {
+	BranchTip(project, task string) string
+}
+
+// tip is the current commit of the task's branch, read through the source package.
+func (h *handler) tip(project, task string) string {
+	if h.exec.Branches == nil {
+		return ""
+	}
+	return h.exec.Branches.BranchTip(project, task)
 }
 
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
@@ -166,8 +182,7 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("GET /v1/tasks/{id}", h.get)
 	mux.HandleFunc("PUT /v1/tasks/{id}/checks", h.setChecks)
 	mux.HandleFunc("GET /v1/tasks/{id}/checks", h.getChecks)
-	mux.HandleFunc("POST /v1/tasks/{id}/ready", h.ready)
-	mux.HandleFunc("POST /v1/tasks/{id}/refine", h.transition(store.AwaitingReview, store.Refinement))
+	mux.HandleFunc("POST /v1/tasks/{id}/ready", h.transition(store.Draft, store.Ready))
 	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
 	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
@@ -542,6 +557,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]taskJSON, 0, len(tasks))
 	for _, task := range tasks {
+		task.Attempt.AtTip(h.tip(task.Project, task.ID))
 		result = append(result, taskValue(task))
 	}
 	writeJSON(w, 200, result)
@@ -557,6 +573,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
+	task.Attempt.AtTip(h.tip(task.Project, task.ID))
 	value := taskValue(task)
 	w.Header().Set("ETag", fmt.Sprintf("\"%d\"", task.Revision))
 	writeJSON(w, 200, value)
@@ -651,6 +668,10 @@ func (h *handler) cancel(w http.ResponseWriter, r *http.Request) {
 		case store.Running:
 			notify = true
 			return tx.Transition(ctx, id, store.Running, store.CancelRequested, revision)
+		case store.Verifying:
+			// The executor kills the running check and records the rest as not run.
+			notify = true
+			return nil
 		case store.Preparing:
 			_, err := tx.CancelQueued(ctx, id, revision, "withdrawn by "+tx.UserID())
 			if errors.Is(err, store.ErrAttemptLaunched) {

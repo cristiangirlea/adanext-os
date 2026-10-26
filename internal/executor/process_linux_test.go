@@ -75,3 +75,50 @@ func TestABackendGroupWhoseLeaderExitedIsStillKilled(t *testing.T) {
 		t.Fatalf("descendant in a leaderless group survived the kill: %v", err)
 	}
 }
+
+func TestASupervisorTakesNoProcessForSharingItsWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	hold := func(marker string) *exec.Cmd {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestHelperCheck$", "--", "hold_child", marker)
+		cmd.Dir = dir
+		return cmd
+	}
+	// Unrelated: in the test's session, a group of its own, working in dir.
+	unrelated := hold(filepath.Join(t.TempDir(), "unrelated"))
+	unrelated.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unrelated.Process.Kill(); _ = unrelated.Wait() })
+	root := hold(filepath.Join(t.TempDir(), "root"))
+	s, err := newProcessSupervisor(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Process.Kill(); _ = root.Wait() })
+	if err := s.started(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.signal = syscall.Kill; s.close() })
+	// Recorded, never sent.
+	var sent []int
+	s.signal = func(pid int, sig syscall.Signal) error { sent = append(sent, pid); return nil }
+	tree := s.stopAll()
+	for _, pid := range []int{unrelated.Process.Pid, os.Getpid()} {
+		if _, ok := tree[pid]; ok {
+			t.Errorf("the tree took %d, which only shares the working directory or its session", pid)
+		}
+	}
+	if _, ok := tree[root.Process.Pid]; !ok {
+		t.Errorf("the tree misses its root: %v", tree)
+	}
+	self, _ := readProcessRecord(os.Getpid())
+	for _, pid := range sent {
+		if pid == -unrelated.Process.Pid || pid == -self.group {
+			t.Errorf("signalled group %d", -pid)
+		}
+	}
+}

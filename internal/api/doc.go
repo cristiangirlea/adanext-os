@@ -92,12 +92,15 @@
 // Checks. A task carries its declared checks (name, argv, workdir, timeout up
 // to 30m, max_output_bytes up to 16 MiB, env keys; at most 16), set on
 // POST /v1/tasks or PUT /v1/tasks/{id}/checks under If-Match while the task is
-// in draft, ready or refinement. After an attempt ends ok in an imported
+// in draft or ready. After an attempt ends ok in an imported
 // workspace, Ada commits the agent's changes on ada/<task> and runs each check
 // in a fresh detached worktree against the snapshot's baseline, moving the task
-// running -> verifying -> awaiting_review. GET /v1/tasks/{id}/checks and the
-// task's attempt return the recorded check results, their baseline comparison
-// and whether a later commit on ada/<task> invalidated them; GET /v1/checks/{id}/log
-// (or GET /v1/tasks/{task}/checks/{id}/log) streams a check or baseline log
-// artifact with X-Ada-Truncated after checking project membership on each read.
+// running -> verifying -> awaiting_review; cancel during verifying kills the
+// running check and records the rest as not run. GET /v1/tasks/{id}/checks and
+// the task's attempt return the recorded check results, their baseline
+// comparison and invalidated, set unless the result binds the current tip of
+// ada/<task> (an unknown tip invalidates it); GET /v1/checks/{id}/log (or GET
+// /v1/tasks/{task}/checks/{id}/log, only for that task's runs and the
+// baselines they were compared with) streams a check or baseline log artifact
+// with X-Ada-Truncated after checking project membership on each read.
 package api

@@ -71,9 +71,6 @@ func (e *Executor) checkEnvironment(extra []string) []string {
 	for _, k := range extra {
 		add(k)
 	}
-	if race := os.Getenv("GORACE"); race != "" {
-		env = append(env, "GORACE="+race)
-	}
 	return env
 }
 
@@ -96,6 +93,11 @@ func (e *Executor) commitAndVerify(a store.Attempt, active *active) {
 		e.recoverWorkspaceVerify(a, "workspace verification failed", err.Error())
 		return
 	}
+	configSHA256, err := e.cfg.Store.CloneConfig(ctx, row.Project)
+	if err != nil {
+		e.recoverWorkspaceVerify(a, "workspace verification failed", err.Error())
+		return
+	}
 	m := source.Manifest{
 		Version:      row.ManifestVersion,
 		Project:      row.Project,
@@ -109,6 +111,7 @@ func (e *Executor) commitAndVerify(a store.Attempt, active *active) {
 		Path:         row.Path,
 		Executor:     row.Executor,
 		Policy:       row.Policy,
+		ConfigSHA256: configSHA256,
 	}
 	adminManifest := filepath.Join(e.cfg.Workspaces.Root, row.Project, "repo.git", "worktrees", row.Attempt, "ada-manifest.json")
 	var importedCommit string
@@ -162,7 +165,7 @@ func (e *Executor) commitAndVerify(a store.Attempt, active *active) {
 	if !verifying {
 		return
 	}
-	e.verifyAttempt(ctx, a, active, row, importedCommit, testedCommit)
+	e.verifyAttempt(ctx, a, active, row, importedCommit, testedCommit, configSHA256)
 }
 
 func (e *Executor) recoverWorkspaceVerify(a store.Attempt, reason, detail string) {
@@ -217,167 +220,37 @@ func (e *Executor) sweepCheckWorktrees(ctx context.Context, project string) {
 	}
 }
 
-func (e *Executor) verifyAttempt(ctx context.Context, a store.Attempt, active *active, ws store.Workspace, importedCommit, testedCommit string) {
+// verifyAttempt runs the task's checks and moves the task to awaiting_review.
+// A storage error ends verification there too: it is recorded, and the checks
+// without a result are recorded as not run.
+func (e *Executor) verifyAttempt(ctx context.Context, a store.Attempt, active *active, ws store.Workspace, importedCommit, testedCommit, configSHA256 string) {
 	e.sweepCheckWorktrees(ctx, ws.Project)
 	defs, err := e.cfg.Store.TaskChecks(ctx, a.Task)
+	next := 0
+	if err == nil {
+		next, err = e.runChecks(ctx, a, active, ws, defs, importedCommit, testedCommit, configSHA256)
+	}
 	if err != nil {
-		return
+		e.recordCause(a, fmt.Errorf("verify: %w", err))
 	}
-	isStopped := func() bool {
-		select {
-		case <-active.cancel:
-			return true
-		default:
-			return false
-		}
-	}
-	recordRemainingNotRun := func(from int) {
-		_ = e.owned(a.ID, func(tx *store.Tx) error {
-			for i := from; i < len(defs); i++ {
-				def := defs[i]
-				if err := tx.RecordCheckResult(ctx, store.CheckResult{
-					ID:             newRunID("chk_"),
-					Task:           a.Task,
-					Attempt:        a.ID,
-					Ord:            i,
-					Name:           def.Name,
-					DefinitionHash: store.CheckDefinitionHash(def),
-					Definition:     def,
-					State:          store.CheckNotRun,
-					TestedCommit:   testedCommit,
-					BoundCommit:    "",
-				}); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-	}
-
-	for ord, def := range defs {
-		if isStopped() {
-			recordRemainingNotRun(ord)
-			break
-		}
-		defHash := store.CheckDefinitionHash(def)
-		runID := newRunID("chk_")
-		startedAt := time.Now().UTC().Format(time.RFC3339Nano)
-		if err := e.owned(a.ID, func(tx *store.Tx) error {
-			return tx.RecordCheckResult(ctx, store.CheckResult{
-				ID:             runID,
+	_ = e.owned(a.ID, func(tx *store.Tx) error {
+		for ord := next; ord < len(defs); ord++ {
+			if err := tx.RecordCheckResult(ctx, store.CheckResult{
+				ID:             newRunID("chk_"),
 				Task:           a.Task,
 				Attempt:        a.ID,
 				Ord:            ord,
-				Name:           def.Name,
-				DefinitionHash: defHash,
-				Definition:     def,
-				State:          store.CheckRunning,
+				Name:           defs[ord].Name,
+				DefinitionHash: store.CheckDefinitionHash(defs[ord]),
+				Definition:     defs[ord],
+				State:          store.CheckNotRun,
 				TestedCommit:   testedCommit,
-				StartedAt:      startedAt,
-			})
-		}); err != nil {
-			return
-		}
-
-		baseline, err := e.cfg.Store.BaselineForCheck(ctx, ws.Snapshot, defHash)
-		if err != nil {
-			return
-		}
-		if baseline == nil {
-			bID := newRunID("base_")
-			bOut := e.runSingleCheck(ctx, a, active, ws.Project, bID, def, importedCommit)
-			if bOut.state == store.CheckKilled {
-				_ = e.owned(a.ID, func(tx *store.Tx) error {
-					return tx.RecordCheckResult(ctx, store.CheckResult{
-						ID:             runID,
-						Task:           a.Task,
-						Attempt:        a.ID,
-						Ord:            ord,
-						Name:           def.Name,
-						DefinitionHash: defHash,
-						Definition:     def,
-						State:          store.CheckKilled,
-						TestedCommit:   testedCommit,
-						BoundCommit:    "",
-						StartedAt:      startedAt,
-					})
-				})
-				recordRemainingNotRun(ord + 1)
-				break
+			}); err != nil {
+				return err
 			}
-			defBytes, _ := json.Marshal(def)
-			bRec := store.CheckBaseline{
-				ID:             bID,
-				Project:        ws.Project,
-				Snapshot:       ws.Snapshot,
-				DefinitionHash: defHash,
-				DefinitionJSON: string(defBytes),
-				State:          bOut.state,
-				ExitCode:       bOut.exitCode,
-				TestedCommit:   importedCommit,
-				BoundCommit:    bOut.boundCommit,
-				OutputArtifact: bOut.artifactHash,
-				OutputSize:     bOut.outputSize,
-				Truncated:      bOut.truncated,
-				StartedAt:      bOut.startedAt,
-				EndedAt:        bOut.endedAt,
-			}
-			if err := e.saveCheckBaseline(ctx, a.ID, bRec, bOut.outputBytes); err != nil {
-				return
-			}
-			baseline = &bRec
 		}
-
-		if isStopped() {
-			_ = e.owned(a.ID, func(tx *store.Tx) error {
-				return tx.RecordCheckResult(ctx, store.CheckResult{
-					ID:             runID,
-					Task:           a.Task,
-					Attempt:        a.ID,
-					Ord:            ord,
-					Name:           def.Name,
-					DefinitionHash: defHash,
-					Definition:     def,
-					State:          store.CheckKilled,
-					TestedCommit:   testedCommit,
-					BoundCommit:    "",
-					BaselineID:     baseline.ID,
-					StartedAt:      startedAt,
-				})
-			})
-			recordRemainingNotRun(ord + 1)
-			break
-		}
-
-		cOut := e.runSingleCheck(ctx, a, active, ws.Project, runID, def, testedCommit)
-		res := store.CheckResult{
-			ID:             runID,
-			Task:           a.Task,
-			Attempt:        a.ID,
-			Ord:            ord,
-			Name:           def.Name,
-			DefinitionHash: defHash,
-			Definition:     def,
-			State:          cOut.state,
-			ExitCode:       cOut.exitCode,
-			TestedCommit:   testedCommit,
-			BoundCommit:    cOut.boundCommit,
-			OutputArtifact: cOut.artifactHash,
-			OutputSize:     cOut.outputSize,
-			Truncated:      cOut.truncated,
-			BaselineID:     baseline.ID,
-			StartedAt:      startedAt,
-			EndedAt:        cOut.endedAt,
-		}
-		if err := e.saveCheckResult(ctx, a.ID, res, cOut.outputBytes); err != nil {
-			return
-		}
-		if cOut.state == store.CheckKilled {
-			recordRemainingNotRun(ord + 1)
-			break
-		}
-	}
-
+		return nil
+	})
 	_ = e.owned(a.ID, func(tx *store.Tx) error {
 		var state store.State
 		var rev int64
@@ -394,20 +267,131 @@ func (e *Executor) verifyAttempt(ctx context.Context, a store.Attempt, active *a
 	}
 }
 
-type singleCheckOutcome struct {
-	state        store.CheckState
-	exitCode     *int
-	boundCommit  string
-	outputBytes  []byte
-	artifactHash string
-	outputSize   int64
-	truncated    bool
-	startedAt    string
-	endedAt      string
+// runChecks runs each check after its baseline and returns the ord of the
+// first check left without a result.
+func (e *Executor) runChecks(ctx context.Context, a store.Attempt, active *active, ws store.Workspace, defs []store.CheckDefinition, importedCommit, testedCommit, configSHA256 string) (int, error) {
+	isStopped := func() bool {
+		select {
+		case <-active.cancel:
+			return true
+		default:
+			return false
+		}
+	}
+	for ord, def := range defs {
+		if isStopped() {
+			return ord, nil
+		}
+		defHash := store.CheckDefinitionHash(def)
+		result := store.CheckResult{
+			ID:             newRunID("chk_"),
+			Task:           a.Task,
+			Attempt:        a.ID,
+			Ord:            ord,
+			Name:           def.Name,
+			DefinitionHash: defHash,
+			Definition:     def,
+			State:          store.CheckRunning,
+			TestedCommit:   testedCommit,
+			StartedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		if err := e.owned(a.ID, func(tx *store.Tx) error { return tx.RecordCheckResult(ctx, result) }); err != nil {
+			return ord, err
+		}
+		killed := func() (int, error) {
+			result.State = store.CheckKilled
+			if err := e.saveCheckResult(ctx, a.ID, result, nil); err != nil {
+				return ord, err
+			}
+			return ord + 1, nil
+		}
+
+		baseline, err := e.cfg.Store.BaselineForCheck(ctx, ws.Snapshot, defHash)
+		if err != nil {
+			return ord, err
+		}
+		if baseline == nil {
+			bID := newRunID("base_")
+			bOut := e.runSingleCheck(ctx, a, active, ws.Project, bID, def, importedCommit, configSHA256)
+			if bOut.state == store.CheckKilled {
+				return killed()
+			}
+			// A refused run says nothing about the snapshot: it is not kept, so
+			// the next attempt runs the baseline again.
+			if !bOut.refused {
+				defBytes, _ := json.Marshal(def)
+				b := store.CheckBaseline{
+					ID:             bID,
+					Project:        ws.Project,
+					Snapshot:       ws.Snapshot,
+					DefinitionHash: defHash,
+					DefinitionJSON: string(defBytes),
+					State:          bOut.state,
+					ExitCode:       bOut.exitCode,
+					TestedCommit:   importedCommit,
+					BoundCommit:    bOut.boundCommit,
+					OutputSize:     bOut.outputSize,
+					Truncated:      bOut.truncated,
+					EnvKeys:        bOut.envKeys,
+					DurationMS:     bOut.durationMS,
+					StartedAt:      bOut.startedAt,
+					EndedAt:        bOut.endedAt,
+				}
+				if err := e.saveCheckBaseline(ctx, a.ID, b, bOut.outputBytes); err != nil {
+					return ord, err
+				}
+				baseline = &b
+			}
+		}
+		if baseline != nil {
+			result.BaselineID = baseline.ID
+		}
+		if isStopped() {
+			return killed()
+		}
+
+		out := e.runSingleCheck(ctx, a, active, ws.Project, result.ID, def, testedCommit, configSHA256)
+		result.State, result.ExitCode, result.BoundCommit = out.state, out.exitCode, out.boundCommit
+		result.OutputSize, result.Truncated, result.EnvKeys, result.DurationMS, result.EndedAt = out.outputSize, out.truncated, out.envKeys, out.durationMS, out.endedAt
+		if err := e.saveCheckResult(ctx, a.ID, result, out.outputBytes); err != nil {
+			return ord, err
+		}
+		if out.state == store.CheckKilled {
+			return ord + 1, nil
+		}
+	}
+	return len(defs), nil
 }
 
-func (e *Executor) runSingleCheck(ctx context.Context, a store.Attempt, active *active, project, runID string, def store.CheckDefinition, commit string) singleCheckOutcome {
+type singleCheckOutcome struct {
+	state       store.CheckState
+	refused     bool // Ada could not run it: nothing is said about the commit.
+	exitCode    *int
+	boundCommit string
+	outputBytes []byte
+	outputSize  int64
+	truncated   bool
+	envKeys     []string
+	durationMS  int64
+	startedAt   string
+	endedAt     string
+}
+
+func (e *Executor) runSingleCheck(ctx context.Context, a store.Attempt, active *active, project, runID string, def store.CheckDefinition, commit, configSHA256 string) singleCheckOutcome {
 	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	// refuse is a check Ada did not run: not run, binding nothing.
+	refuse := func(format string, args ...any) singleCheckOutcome {
+		msg := []byte(fmt.Sprintf(format+"\n", args...))
+		return singleCheckOutcome{
+			state:       store.CheckNotRun,
+			refused:     true,
+			outputBytes: msg,
+			outputSize:  int64(len(msg)),
+			envKeys:     []string{},
+			startedAt:   startedAt,
+			endedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+		}
+	}
 	adminName := runID
 	_ = e.cfg.Store.RecordCheckWorktree(ctx, store.CheckWorktreeLease{
 		Project:   project,
@@ -415,7 +399,7 @@ func (e *Executor) runSingleCheck(ctx context.Context, a store.Attempt, active *
 		RunID:     runID,
 		AdminName: adminName,
 	})
-	wt, prepAdmin, err := e.cfg.Workspaces.PrepareCheckWorktree(ctx, project, a.ID, runID, commit)
+	wt, prepAdmin, err := e.cfg.Workspaces.PrepareCheckWorktree(ctx, project, a.ID, runID, commit, configSHA256)
 	if prepAdmin != "" {
 		adminName = prepAdmin
 	}
@@ -425,28 +409,12 @@ func (e *Executor) runSingleCheck(ctx context.Context, a store.Attempt, active *
 		}
 	}()
 	if err != nil {
-		msg := []byte(fmt.Sprintf("prepare check worktree: %v\n", err))
-		return singleCheckOutcome{
-			state:       store.CheckFailed,
-			boundCommit: commit,
-			outputBytes: msg,
-			outputSize:  int64(len(msg)),
-			startedAt:   startedAt,
-			endedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		}
+		return refuse("prepare check worktree: %v", err)
 	}
 
 	resolvedDir, err := source.ResolveWorkdirNoFollow(wt, def.Workdir)
 	if err != nil {
-		msg := []byte(fmt.Sprintf("resolve check workdir: %v\n", err))
-		return singleCheckOutcome{
-			state:       store.CheckFailed,
-			boundCommit: commit,
-			outputBytes: msg,
-			outputSize:  int64(len(msg)),
-			startedAt:   startedAt,
-			endedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		}
+		return refuse("resolve check workdir: %v", err)
 	}
 
 	maxOut := def.MaxOutputBytes
@@ -464,62 +432,36 @@ func (e *Executor) runSingleCheck(ctx context.Context, a store.Attempt, active *
 	cmd.Dir = resolvedDir
 	cmd.Env = e.checkEnvironment(def.Env)
 	cmd.WaitDelay = e.cfg.CancelGrace
+	keys := make([]string, 0, len(cmd.Env))
+	for _, kv := range cmd.Env {
+		k, _, _ := strings.Cut(kv, "=")
+		keys = append(keys, k)
+	}
 	supervisor, err := newProcessSupervisor(cmd)
 	if err != nil {
-		msg := []byte(fmt.Sprintf("process supervision: %v\n", err))
-		return singleCheckOutcome{
-			state:       store.CheckFailed,
-			boundCommit: commit,
-			outputBytes: msg,
-			outputSize:  int64(len(msg)),
-			startedAt:   startedAt,
-			endedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		}
+		return refuse("process supervision: %v", err)
 	}
 	defer supervisor.close()
 
 	outReader, outWriter, err := os.Pipe()
 	if err != nil {
-		msg := []byte(fmt.Sprintf("pipe: %v\n", err))
-		return singleCheckOutcome{
-			state:       store.CheckFailed,
-			boundCommit: commit,
-			outputBytes: msg,
-			outputSize:  int64(len(msg)),
-			startedAt:   startedAt,
-			endedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		}
+		return refuse("pipe: %v", err)
 	}
 	cmd.Stdout = outWriter
 	cmd.Stderr = outWriter
 
+	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		_ = outWriter.Close()
 		_ = outReader.Close()
-		msg := []byte(fmt.Sprintf("start check: %v\n", err))
-		return singleCheckOutcome{
-			state:       store.CheckFailed,
-			boundCommit: commit,
-			outputBytes: msg,
-			outputSize:  int64(len(msg)),
-			startedAt:   startedAt,
-			endedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		}
+		return refuse("start check: %v", err)
 	}
 	if err := supervisor.started(cmd); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		_ = outWriter.Close()
 		_ = outReader.Close()
-		msg := []byte(fmt.Sprintf("supervise check: %v\n", err))
-		return singleCheckOutcome{
-			state:       store.CheckFailed,
-			boundCommit: commit,
-			outputBytes: msg,
-			outputSize:  int64(len(msg)),
-			startedAt:   startedAt,
-			endedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		}
+		return refuse("supervise check: %v", err)
 	}
 	_ = outWriter.Close()
 
@@ -572,64 +514,48 @@ func (e *Executor) runSingleCheck(ctx context.Context, a store.Attempt, active *
 		_ = outReader.Close()
 		waitErr = <-waitCh
 	}
+	duration := time.Since(start).Milliseconds()
 	// Terminate and wait for any remaining descendants before closing outReader
 	// and before inspecting or removing the check's worktree.
 	supervisor.close()
 	_ = outReader.Close()
 	<-readDone
 
-	endedAt := time.Now().UTC().Format(time.RFC3339Nano)
-	var exitCode *int
-	if cmd.ProcessState != nil {
-		c := cmd.ProcessState.ExitCode()
-		exitCode = &c
-	}
-
-	if stopped {
-		return singleCheckOutcome{
-			state:       store.CheckKilled,
-			exitCode:    exitCode,
-			boundCommit: "",
-			outputBytes: captured.Bytes(),
-			outputSize:  int64(captured.Len()),
-			truncated:   truncated,
-			startedAt:   startedAt,
-			endedAt:     endedAt,
-		}
-	}
-
-	unchanged, checkErr := e.cfg.Workspaces.CheckTreeUnchanged(ctx, project, a.ID, runID, adminName, commit)
-	if checkErr != nil || !unchanged {
-		return singleCheckOutcome{
-			state:       store.CheckChangedTree,
-			exitCode:    exitCode,
-			boundCommit: "",
-			outputBytes: captured.Bytes(),
-			outputSize:  int64(captured.Len()),
-			truncated:   truncated,
-			startedAt:   startedAt,
-			endedAt:     endedAt,
-		}
-	}
-
-	state := store.CheckPassed
-	switch {
-	case timedOut:
-		state = store.CheckTimedOut
-	case waitErr != nil && (!errors.Is(waitErr, exec.ErrWaitDelay) || !cmd.ProcessState.Success()):
-		state = store.CheckFailed
-	}
-
-	return singleCheckOutcome{
-		state:       state,
-		exitCode:    exitCode,
-		boundCommit: commit,
+	out := singleCheckOutcome{
 		outputBytes: captured.Bytes(),
 		outputSize:  int64(captured.Len()),
 		truncated:   truncated,
+		envKeys:     keys,
+		durationMS:  duration,
 		startedAt:   startedAt,
-		endedAt:     endedAt,
+		endedAt:     time.Now().UTC().Format(time.RFC3339Nano),
 	}
+	if cmd.ProcessState != nil {
+		c := cmd.ProcessState.ExitCode()
+		out.exitCode = &c
+	}
+	if stopped {
+		out.state = store.CheckKilled
+		return out
+	}
+
+	unchanged, err := e.cfg.Workspaces.CheckTreeUnchanged(ctx, project, a.ID, runID, adminName, commit, configSHA256)
+	if err != nil {
+		return refuse("inspect check worktree: %v", err)
+	}
+	if !unchanged {
+		out.state = store.CheckChangedTree
+		return out
+	}
+
+	out.state, out.boundCommit = store.CheckPassed, commit
+	switch {
+	case timedOut:
+		out.state = store.CheckTimedOut
+	case waitErr != nil && (!errors.Is(waitErr, exec.ErrWaitDelay) || !cmd.ProcessState.Success()):
+		out.state = store.CheckFailed
+	}
+	return out
 }
 
 func (e *Executor) saveCheckBaseline(ctx context.Context, attemptID string, b store.CheckBaseline, output []byte) error {

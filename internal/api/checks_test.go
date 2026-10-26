@@ -173,6 +173,15 @@ func TestCheckResultsAndCheckLogEnforceMembershipOnEachRead(t *testing.T) {
 		t.Fatalf("bob GET log = %d, trunc=%q, body=%q", status, truncHeader, gotLog)
 	}
 
+	// The task-scoped route serves only that task's runs.
+	other := create(t, f, "create-other-task", "other task")["id"].(string)
+	if status, _, _ := getLog("bob", "/v1/tasks/"+other+"/checks/chk_1/log"); status != 404 {
+		t.Fatalf("GET another task's run through /v1/tasks/{other}/checks = %d, want 404", status)
+	}
+	if status, _, _ := getLog("bob", "/v1/tasks/"+taskID+"/checks/chk_1/log"); status != 200 {
+		t.Fatalf("GET /v1/tasks/{task}/checks/{id}/log = %d, want 200", status)
+	}
+
 	// Remove bob from project "a": both routes now return 404 on every read.
 	if err := f.s.RemoveMember(ctx, "a", "bob"); err != nil {
 		t.Fatal(err)
@@ -184,5 +193,103 @@ func TestCheckResultsAndCheckLogEnforceMembershipOnEachRead(t *testing.T) {
 	status, _, _ = getLog("bob", "/v1/tasks/"+taskID+"/checks/chk_1/log")
 	if status != 404 {
 		t.Fatalf("removed member GET /v1/tasks/{id}/checks/chk_1/log = %d, want 404", status)
+	}
+}
+
+func setTaskState(t *testing.T, f *fixture, id string, state store.State, revision int64) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := f.s.Do(ctx, "alice", "state-"+id+string(state), "state", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, "UPDATE tasks SET state=?,revision=? WHERE id=?", state, revision, id)
+		return []byte("ok"), err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCancelDuringVerifyingAsksTheExecutorToStopTheChecks(t *testing.T) {
+	runner := &recordingRunner{}
+	f := newFixture(t, Execution{Runner: runner})
+	id := create(t, f, "create-verifying", "verify")["id"].(string)
+	setTaskState(t, f, id, store.Verifying, 3)
+	if code, body := f.request(t, "POST", "/v1/tasks/"+id+"/cancel", "cancel-verifying", "3", nil); code != 200 {
+		t.Fatalf("cancel while verifying = %d %s", code, body)
+	}
+	if got := runner.cancels(); len(got) != 1 || got[0] != id {
+		t.Fatalf("cancels = %v, want [%s]", got, id)
+	}
+}
+
+func TestThisSliceOffersNoRefine(t *testing.T) {
+	f := newFixture(t)
+	id := create(t, f, "create-review", "review")["id"].(string)
+	setTaskState(t, f, id, store.AwaitingReview, 2)
+	if code, body := f.request(t, "POST", "/v1/tasks/"+id+"/refine", "refine", "2", nil); code == 200 {
+		t.Fatalf("refine = %d %s, want no such route", code, body)
+	}
+	setTaskState(t, f, id, store.Refinement, 2)
+	if code, body := f.request(t, "POST", "/v1/tasks/"+id+"/ready", "ready-from-refinement", "2", nil); code == 200 {
+		t.Fatalf("ready from refinement = %d %s, want refused", code, body)
+	}
+}
+
+// fixedTips is a BranchReader over a map of project/task to tip.
+type fixedTips map[string]string
+
+func (f fixedTips) BranchTip(project, task string) string { return f[project+"/"+task] }
+
+func TestCheckResultsAreInvalidatedUnlessTheyBindTheBranchTip(t *testing.T) {
+	ctx := context.Background()
+	tips := fixedTips{}
+	f := newFixture(t, Execution{Branches: tips})
+	id := create(t, f, "create-tip", "tip")["id"].(string)
+	bound := strings.Repeat("a", 40)
+	if _, err := f.s.Do(ctx, "alice", "seed-tip", "seed", nil, func(tx *store.Tx) ([]byte, error) {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO attempts(id,task,actor,backend,model,effort,mode,executor,ownership_generation,engine_sha256,state,started) VALUES('att1',?,'alice','claude','sonnet','medium','readonly','local',1,'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855','ended_ok','2026-10-25T00:00:00Z')", id); err != nil {
+			return nil, err
+		}
+		for i, r := range []store.CheckResult{
+			{ID: "chk_bound", State: store.CheckPassed, BoundCommit: bound},
+			{ID: "chk_unbound", State: store.CheckChangedTree},
+		} {
+			r.Task, r.Attempt, r.Ord, r.TestedCommit = id, "att1", i, bound
+			r.Definition = store.CheckDefinition{Argv: []string{"bin"}}
+			if err := tx.RecordCheckResult(ctx, r); err != nil {
+				return nil, err
+			}
+		}
+		return []byte("ok"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (list, attempt []store.CheckResult) {
+		t.Helper()
+		code, body := f.request(t, "GET", "/v1/tasks/"+id+"/checks", "", "", nil)
+		if code != 200 || json.Unmarshal(body, &list) != nil {
+			t.Fatalf("GET checks = %d %s", code, body)
+		}
+		code, body = f.request(t, "GET", "/v1/tasks/"+id, "", "", nil)
+		var task taskJSON
+		if code != 200 || json.Unmarshal(body, &task) != nil || task.Attempt == nil {
+			t.Fatalf("GET task = %d %s", code, body)
+		}
+		return list, task.Attempt.Checks
+	}
+	for _, tc := range []struct {
+		tip       string
+		boundOK   bool
+		situation string
+	}{
+		{"", false, "an unknown tip"},
+		{bound, true, "the tip it binds"},
+		{strings.Repeat("b", 40), false, "a moved tip"},
+	} {
+		tips["a/"+id] = tc.tip
+		list, attempt := read()
+		for _, results := range [][]store.CheckResult{list, attempt} {
+			if len(results) != 2 || results[0].Invalidated == tc.boundOK || !results[1].Invalidated {
+				t.Fatalf("at %s: %+v", tc.situation, results)
+			}
+		}
 	}
 }

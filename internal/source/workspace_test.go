@@ -709,19 +709,19 @@ func TestCommitAgentChangesKeepsAgentCommitsAndRefusesTampering(t *testing.T) {
 	}
 
 	// Check worktree at tested commit excludes the ignored file, verifies tracked files, and removes cleanly.
-	wt, adminName, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", tested)
+	wt, adminName, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", tested, m.ConfigSHA256)
 	if err != nil {
 		t.Fatalf("PrepareCheckWorktree: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(wt, "ignored.txt")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("ignored file reached check worktree: %v", err)
 	}
-	unchanged, err := w.CheckTreeUnchanged(context.Background(), m.Project, m.Attempt, "run1", adminName, tested)
+	unchanged, err := w.CheckTreeUnchanged(context.Background(), m.Project, m.Attempt, "run1", adminName, tested, m.ConfigSHA256)
 	if err != nil || !unchanged {
 		t.Fatalf("clean check worktree unchanged = %v, %v", unchanged, err)
 	}
 	write(t, filepath.Join(wt, "README.md"), "mutated by check\n")
-	unchanged, err = w.CheckTreeUnchanged(context.Background(), m.Project, m.Attempt, "run1", adminName, tested)
+	unchanged, err = w.CheckTreeUnchanged(context.Background(), m.Project, m.Attempt, "run1", adminName, tested, m.ConfigSHA256)
 	if err != nil || unchanged {
 		t.Fatalf("mutated check worktree unchanged = %v, %v", unchanged, err)
 	}

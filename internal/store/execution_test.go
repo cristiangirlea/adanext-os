@@ -28,7 +28,7 @@ func TestVersionThreeAttemptMigratesForwardWithEmptyMode(t *testing.T) {
 	for _, column := range []string{"max_turns", "timeout", "provider_changes"} {
 		execute(t, s, "ALTER TABLE attempts DROP COLUMN "+column)
 	}
-	for _, query := range []string{"DROP TABLE check_results", "DROP TABLE check_baselines", "DROP TABLE check_worktrees", "ALTER TABLE workspaces DROP COLUMN tested_commit", "ALTER TABLE tasks DROP COLUMN checks_json"} {
+	for _, query := range []string{"DROP TABLE check_results", "DROP TABLE check_baselines", "DROP TABLE check_worktrees", "DROP TABLE clone_configs", "ALTER TABLE workspaces DROP COLUMN tested_commit", "ALTER TABLE tasks DROP COLUMN checks_json"} {
 		execute(t, s, query)
 	}
 	execute(t, s, "ALTER TABLE attempts DROP COLUMN mode")

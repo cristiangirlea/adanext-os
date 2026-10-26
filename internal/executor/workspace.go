@@ -56,9 +56,11 @@ func (e *Executor) prepare(a store.Attempt, active *active, scratch string) (str
 		return "", false, err
 	}
 	err = e.owned(a.ID, func(tx *store.Tx) error {
-		_, err := tx.RecordWorkspace(ctx, store.Workspace{Attempt: m.Attempt, Project: m.Project, Task: m.Task, Snapshot: m.Snapshot, BaseCommit: m.BaseCommit,
-			Branch: m.Branch, Path: m.Path, ManifestVersion: m.Version, TaskRevision: m.TaskRevision, Generation: m.Generation, ManifestHash: m.Hash(), Executor: m.Executor, Policy: m.Policy})
-		return err
+		if _, err := tx.RecordWorkspace(ctx, store.Workspace{Attempt: m.Attempt, Project: m.Project, Task: m.Task, Snapshot: m.Snapshot, BaseCommit: m.BaseCommit,
+			Branch: m.Branch, Path: m.Path, ManifestVersion: m.Version, TaskRevision: m.TaskRevision, Generation: m.Generation, ManifestHash: m.Hash(), Executor: m.Executor, Policy: m.Policy}); err != nil {
+			return err
+		}
+		return tx.RecordCloneConfig(ctx, m.Project, m.ConfigSHA256)
 	})
 	return m.Path, true, err
 }

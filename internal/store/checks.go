@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -58,6 +56,8 @@ type CheckBaseline struct {
 	OutputArtifact string     `json:"-"`
 	OutputSize     int64      `json:"output_size"`
 	Truncated      bool       `json:"truncated"`
+	EnvKeys        []string   `json:"env_keys"`
+	DurationMS     int64      `json:"duration_ms"`
 	StartedAt      string     `json:"-"`
 	EndedAt        string     `json:"-"`
 }
@@ -82,8 +82,11 @@ type CheckResult struct {
 	Baseline        *CheckBaseline  `json:"baseline,omitempty"`
 	NewFailure      bool            `json:"new_failure"`
 	BaselineFailure bool            `json:"baseline_failure"`
-	StartedAt       string          `json:"-"`
-	EndedAt         string          `json:"-"`
+	// EnvKeys names the variables the check's environment held, without values.
+	EnvKeys    []string `json:"env_keys"`
+	DurationMS int64    `json:"duration_ms"`
+	StartedAt  string   `json:"-"`
+	EndedAt    string   `json:"-"`
 }
 
 type CheckWorktreeLease struct {
@@ -277,8 +280,8 @@ func (tx *Tx) SetTaskChecks(ctx context.Context, taskID string, expectedRevision
 	if rev != expectedRevision {
 		return fmt.Errorf("%w: task %s, expected %d, current %d", ErrStaleRevision, taskID, expectedRevision, rev)
 	}
-	switch state {
-	case Preparing, Running, Verifying, CancelRequested, Interrupted:
+	// Checks are part of the revision an attempt starts from.
+	if state != Draft && state != Ready {
 		return fmt.Errorf("%w: cannot edit checks while task is %s", ErrInvalidTransition, state)
 	}
 	_, err = tx.ExecContext(ctx, "UPDATE tasks SET checks_json=?,revision=revision+1,updated=? WHERE id=? AND revision=?", raw, now(), taskID, expectedRevision)
@@ -300,9 +303,10 @@ func (s *Store) BaselineForCheck(ctx context.Context, snapshot, defHash string) 
 	var b CheckBaseline
 	var code sql.NullInt64
 	var trunc int
-	err := s.db.QueryRowContext(ctx, `SELECT id,project,snapshot,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,started_at,ended_at
+	var envKeys string
+	err := s.db.QueryRowContext(ctx, `SELECT id,project,snapshot,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,env_keys,duration_ms,started_at,ended_at
 		FROM check_baselines WHERE snapshot=? AND definition_hash=?`, snapshot, defHash).Scan(
-		&b.ID, &b.Project, &b.Snapshot, &b.DefinitionHash, &b.DefinitionJSON, &b.TestedCommit, &b.BoundCommit, &b.State, &code, &b.OutputArtifact, &b.OutputSize, &trunc, &b.StartedAt, &b.EndedAt,
+		&b.ID, &b.Project, &b.Snapshot, &b.DefinitionHash, &b.DefinitionJSON, &b.TestedCommit, &b.BoundCommit, &b.State, &code, &b.OutputArtifact, &b.OutputSize, &trunc, &envKeys, &b.DurationMS, &b.StartedAt, &b.EndedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -315,6 +319,7 @@ func (s *Store) BaselineForCheck(ctx context.Context, snapshot, defHash string) 
 		b.ExitCode = &v
 	}
 	b.Truncated = trunc != 0
+	b.EnvKeys = decodeEnvKeys(envKeys)
 	if b.State != CheckPassed && b.State != CheckFailed && b.State != CheckTimedOut && b.State != CheckChangedTree {
 		return nil, nil
 	}
@@ -339,13 +344,14 @@ func (tx *Tx) RecordCheckBaseline(ctx context.Context, b CheckBaseline) error {
 	if b.Truncated {
 		trunc = 1
 	}
-	_, err := tx.tx.ExecContext(ctx, `INSERT INTO check_baselines(id,project,snapshot,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,started_at,ended_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := tx.tx.ExecContext(ctx, `INSERT INTO check_baselines(id,project,snapshot,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,env_keys,duration_ms,started_at,ended_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(snapshot,definition_hash) DO UPDATE SET
 			id=excluded.id,tested_commit=excluded.tested_commit,bound_commit=excluded.bound_commit,state=excluded.state,
 			exit_code=excluded.exit_code,output_artifact=excluded.output_artifact,output_size=excluded.output_size,
-			output_truncated=excluded.output_truncated,started_at=excluded.started_at,ended_at=excluded.ended_at`,
-		b.ID, b.Project, b.Snapshot, b.DefinitionHash, b.DefinitionJSON, b.TestedCommit, b.BoundCommit, b.State, code, b.OutputArtifact, b.OutputSize, trunc, b.StartedAt, b.EndedAt)
+			output_truncated=excluded.output_truncated,env_keys=excluded.env_keys,duration_ms=excluded.duration_ms,
+			started_at=excluded.started_at,ended_at=excluded.ended_at`,
+		b.ID, b.Project, b.Snapshot, b.DefinitionHash, b.DefinitionJSON, b.TestedCommit, b.BoundCommit, b.State, code, b.OutputArtifact, b.OutputSize, trunc, encodeEnvKeys(b.EnvKeys), b.DurationMS, b.StartedAt, b.EndedAt)
 	return err
 }
 
@@ -371,15 +377,33 @@ func (tx *Tx) RecordCheckResult(ctx context.Context, r CheckResult) error {
 	if r.Truncated {
 		trunc = 1
 	}
-	_, err = tx.tx.ExecContext(ctx, `INSERT INTO check_results(id,task,attempt,ord,name,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,baseline_id,started_at,ended_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err = tx.tx.ExecContext(ctx, `INSERT INTO check_results(id,task,attempt,ord,name,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,baseline_id,env_keys,duration_ms,started_at,ended_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(attempt,ord) DO UPDATE SET
 			id=excluded.id,name=excluded.name,definition_hash=excluded.definition_hash,definition_json=excluded.definition_json,
 			tested_commit=excluded.tested_commit,bound_commit=excluded.bound_commit,state=excluded.state,exit_code=excluded.exit_code,
 			output_artifact=excluded.output_artifact,output_size=excluded.output_size,output_truncated=excluded.output_truncated,
-			baseline_id=excluded.baseline_id,started_at=excluded.started_at,ended_at=excluded.ended_at`,
-		r.ID, r.Task, r.Attempt, r.Ord, r.Name, r.DefinitionHash, string(defBytes), r.TestedCommit, r.BoundCommit, r.State, code, r.OutputArtifact, r.OutputSize, trunc, r.BaselineID, r.StartedAt, r.EndedAt)
+			baseline_id=excluded.baseline_id,env_keys=excluded.env_keys,duration_ms=excluded.duration_ms,
+			started_at=excluded.started_at,ended_at=excluded.ended_at`,
+		r.ID, r.Task, r.Attempt, r.Ord, r.Name, r.DefinitionHash, string(defBytes), r.TestedCommit, r.BoundCommit, r.State, code, r.OutputArtifact, r.OutputSize, trunc, r.BaselineID, encodeEnvKeys(r.EnvKeys), r.DurationMS, r.StartedAt, r.EndedAt)
 	return err
+}
+
+func encodeEnvKeys(keys []string) string {
+	if keys == nil {
+		keys = []string{}
+	}
+	data, _ := json.Marshal(keys)
+	return string(data)
+}
+
+func decodeEnvKeys(raw string) []string {
+	keys := []string{}
+	_ = json.Unmarshal([]byte(raw), &keys)
+	if keys == nil {
+		keys = []string{}
+	}
+	return keys
 }
 
 func (tx *Tx) RecordTestedCommit(ctx context.Context, attemptID, commit string) error {
@@ -387,7 +411,12 @@ func (tx *Tx) RecordTestedCommit(ctx context.Context, attemptID, commit string) 
 	return err
 }
 
-func (s *Store) CheckResults(ctx context.Context, userID, taskID string) ([]CheckResult, error) {
+// BranchTip reads the current commit of a task's branch ada/<task>; "" when unknown.
+type BranchTip func(project, task string) string
+
+// CheckResults reads the newest attempt's results, each invalidated unless it
+// binds the commit tip returns for the task's branch.
+func (s *Store) CheckResults(ctx context.Context, userID, taskID string, tip BranchTip) ([]CheckResult, error) {
 	var project, attemptID string
 	err := s.db.QueryRowContext(ctx, `SELECT t.project, COALESCE((SELECT a.id FROM attempts a WHERE a.task=t.id ORDER BY a.rowid DESC LIMIT 1), '')
 		FROM tasks t WHERE t.id=?`, taskID).Scan(&project, &attemptID)
@@ -403,12 +432,39 @@ func (s *Store) CheckResults(ctx context.Context, userID, taskID string) ([]Chec
 	if attemptID == "" {
 		return []CheckResult{}, nil
 	}
-	return s.attemptCheckResults(ctx, project, taskID, attemptID)
+	results, err := s.attemptCheckResults(ctx, attemptID)
+	if err != nil || tip == nil {
+		return results, err
+	}
+	markTip(results, tip(project, taskID))
+	return results, nil
 }
 
-func (s *Store) attemptCheckResults(ctx context.Context, project, taskID, attemptID string) ([]CheckResult, error) {
+// checkInvalidated is a result that binds no commit, or not tip, the branch's
+// current commit; an unknown tip invalidates every result.
+func checkInvalidated(bound, tip string) bool {
+	return bound == "" || tip == "" || bound != tip
+}
+
+func markTip(results []CheckResult, tip string) {
+	for i := range results {
+		results[i].Invalidated = checkInvalidated(results[i].BoundCommit, tip)
+	}
+}
+
+// AtTip marks the attempt's results against tip, the current commit of the
+// task's branch, as read through the source package.
+func (a *TaskAttempt) AtTip(tip string) {
+	if a.Checks != nil {
+		markTip(*a.Checks, tip)
+	}
+}
+
+// attemptCheckResults reads an attempt's results; with no tip known yet, each
+// reads invalidated until AtTip or CheckResults marks it.
+func (s *Store) attemptCheckResults(ctx context.Context, attemptID string) ([]CheckResult, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT
-		r.id,r.task,r.attempt,r.ord,r.name,r.definition_hash,r.definition_json,r.tested_commit,r.bound_commit,r.state,r.exit_code,r.output_artifact,r.output_size,r.output_truncated,r.baseline_id,r.started_at,r.ended_at,
+		r.id,r.task,r.attempt,r.ord,r.name,r.definition_hash,r.definition_json,r.tested_commit,r.bound_commit,r.state,r.exit_code,r.output_artifact,r.output_size,r.output_truncated,r.baseline_id,r.env_keys,r.duration_ms,r.started_at,r.ended_at,
 		COALESCE(b.id,''),COALESCE(b.snapshot,''),COALESCE(b.state,''),b.exit_code,COALESCE(b.tested_commit,''),COALESCE(b.bound_commit,''),COALESCE(b.output_size,0),COALESCE(b.output_truncated,0)
 		FROM check_results r
 		LEFT JOIN check_baselines b ON b.id=r.baseline_id
@@ -417,7 +473,6 @@ func (s *Store) attemptCheckResults(ctx context.Context, project, taskID, attemp
 		return nil, err
 	}
 	defer rows.Close()
-	branchTip := s.resolveBranchTip(ctx, project, taskID, attemptID)
 	results := []CheckResult{}
 	for rows.Next() {
 		var r CheckResult
@@ -425,8 +480,9 @@ func (s *Store) attemptCheckResults(ctx context.Context, project, taskID, attemp
 		var rCode, bCode sql.NullInt64
 		var rTrunc, bTrunc int
 		var b CheckBaseline
+		var envKeys string
 		if err := rows.Scan(
-			&r.ID, &r.Task, &r.Attempt, &r.Ord, &r.Name, &r.DefinitionHash, &defJSON, &r.TestedCommit, &r.BoundCommit, &r.State, &rCode, &r.OutputArtifact, &r.OutputSize, &rTrunc, &r.BaselineID, &r.StartedAt, &r.EndedAt,
+			&r.ID, &r.Task, &r.Attempt, &r.Ord, &r.Name, &r.DefinitionHash, &defJSON, &r.TestedCommit, &r.BoundCommit, &r.State, &rCode, &r.OutputArtifact, &r.OutputSize, &rTrunc, &r.BaselineID, &envKeys, &r.DurationMS, &r.StartedAt, &r.EndedAt,
 			&b.ID, &b.Snapshot, &b.State, &bCode, &b.TestedCommit, &b.BoundCommit, &b.OutputSize, &bTrunc,
 		); err != nil {
 			return nil, err
@@ -437,6 +493,7 @@ func (s *Store) attemptCheckResults(ctx context.Context, project, taskID, attemp
 			r.ExitCode = &v
 		}
 		r.Truncated = rTrunc != 0
+		r.EnvKeys = decodeEnvKeys(envKeys)
 		if b.ID != "" {
 			if bCode.Valid {
 				v := int(bCode.Int64)
@@ -454,56 +511,23 @@ func (s *Store) attemptCheckResults(ctx context.Context, project, taskID, attemp
 				r.NewFailure = true
 			}
 		}
-		if r.BoundCommit != "" && branchTip != "" && r.BoundCommit != branchTip {
-			r.Invalidated = true
-		}
+		r.Invalidated = checkInvalidated(r.BoundCommit, "")
 		results = append(results, r)
 	}
 	return results, rows.Err()
 }
 
-func (s *Store) resolveBranchTip(ctx context.Context, project, taskID, attemptID string) string {
-	if s.path != "" && s.path != ":memory:" {
-		repo := filepath.Join(filepath.Dir(s.path), "projects", project, "repo.git")
-		if tip := readRefFromRepo(repo, "refs/heads/ada/"+taskID); tip != "" {
-			return tip
-		}
-	}
-	var tested string
-	_ = s.db.QueryRowContext(ctx, "SELECT COALESCE(tested_commit,'') FROM workspaces WHERE attempt=?", attemptID).Scan(&tested)
-	return tested
-}
-
-func readRefFromRepo(repo, ref string) string {
-	if data, err := os.ReadFile(filepath.Join(repo, filepath.FromSlash(ref))); err == nil {
-		if s := strings.TrimSpace(string(data)); (len(s) == 40 || len(s) == 64) && !strings.HasPrefix(s, "ref:") {
-			return s
-		}
-	}
-	if data, err := os.ReadFile(filepath.Join(repo, "packed-refs")); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || line[0] == '#' || line[0] == '^' {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) == 2 && fields[1] == ref {
-				return fields[0]
-			}
-		}
-	}
-	return ""
-}
-
-// CheckLog resolves a check or baseline run's log artifact after checking the caller's project membership.
-func (s *Store) CheckLog(ctx context.Context, userID, runID string) (hash string, size int64, truncated bool, err error) {
+// CheckLog resolves a check or baseline run's log artifact after checking the
+// caller's project membership; with taskID, only a run of that task, or a
+// baseline one of its results was compared with.
+func (s *Store) CheckLog(ctx context.Context, userID, taskID, runID string) (hash string, size int64, truncated bool, err error) {
 	var project string
 	var trunc int
 	err = s.db.QueryRowContext(ctx, `SELECT t.project,r.output_artifact,r.output_size,r.output_truncated
-		FROM check_results r JOIN tasks t ON t.id=r.task WHERE r.id=?`, runID).Scan(&project, &hash, &size, &trunc)
+		FROM check_results r JOIN tasks t ON t.id=r.task WHERE r.id=? AND (?='' OR r.task=?)`, runID, taskID, taskID).Scan(&project, &hash, &size, &trunc)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = s.db.QueryRowContext(ctx, `SELECT b.project,b.output_artifact,b.output_size,b.output_truncated
-			FROM check_baselines b WHERE b.id=?`, runID).Scan(&project, &hash, &size, &trunc)
+			FROM check_baselines b WHERE b.id=? AND (?='' OR EXISTS(SELECT 1 FROM check_results r WHERE r.baseline_id=b.id AND r.task=?))`, runID, taskID, taskID).Scan(&project, &hash, &size, &trunc)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, false, fmt.Errorf("%w: check run %s", ErrNotFound, runID)
@@ -597,7 +621,7 @@ func recoverVerifyingTasks(ctx context.Context, tx *sql.Tx, generation int64) ([
 			if errors.Is(err, sql.ErrNoRows) {
 				defBytes, _ := json.Marshal(def)
 				if _, err := tx.ExecContext(ctx, `INSERT INTO check_results(id,task,attempt,ord,name,definition_hash,definition_json,tested_commit,bound_commit,state,started_at,ended_at)
-					VALUES(?,?,?,?,?,?,?,?,'','interrupted',?,?)`,
+					VALUES(?,?,?,?,?,?,?,?,'','not_run',?,?)`,
 					newCheckID(), v.id, v.attempt, ord, def.Name, CheckDefinitionHash(def), string(defBytes), v.testedCommit, now(), now()); err != nil {
 					return nil, err
 				}
@@ -613,4 +637,21 @@ func recoverVerifyingTasks(ctx context.Context, tx *sql.Tx, generation int64) ([
 		recovered = append(recovered, v.attempt)
 	}
 	return recovered, nil
+}
+
+// RecordCloneConfig keeps the SHA-256 of the clone config Ada wrote for project.
+func (tx *Tx) RecordCloneConfig(ctx context.Context, project, sha string) error {
+	_, err := tx.tx.ExecContext(ctx, `INSERT INTO clone_configs(project,sha256,updated) VALUES(?,?,?)
+		ON CONFLICT(project) DO UPDATE SET sha256=excluded.sha256,updated=excluded.updated`, project, sha, now())
+	return err
+}
+
+// CloneConfig reads the SHA-256 of the clone config Ada last wrote for project; "" when none.
+func (s *Store) CloneConfig(ctx context.Context, project string) (string, error) {
+	var sha string
+	err := s.db.QueryRowContext(ctx, "SELECT sha256 FROM clone_configs WHERE project=?", project).Scan(&sha)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return sha, err
 }

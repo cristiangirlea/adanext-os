@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,38 @@ func TestHelperCheck(t *testing.T) {
 			}
 		}
 		os.Exit(3)
+	case "reparent_then_setsid":
+		marker := args[1]
+		step := exec.Command(os.Args[0], "-test.run=^TestHelperCheck$", "--", "reparent_step", marker)
+		if err := step.Run(); err != nil {
+			os.Exit(2)
+		}
+		for deadline := time.Now().Add(markerBound); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			if data, _ := os.ReadFile(marker); strings.HasPrefix(string(data), "child:") {
+				os.Exit(0)
+			}
+		}
+		os.Exit(3)
+	case "reparent_step":
+		daemon := exec.Command(os.Args[0], "-test.run=^TestHelperCheck$", "--", "setsid_after_reparent", args[1], fmt.Sprint(os.Getpid()))
+		if err := daemon.Start(); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	case "setsid_after_reparent":
+		// Reparented first, then out of the check's session and directory.
+		parent, _ := strconv.Atoi(args[2])
+		for deadline := time.Now().Add(markerBound); os.Getppid() == parent && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		}
+		_ = os.Chdir("/")
+		if err := setsidSelf(); err != nil {
+			os.Exit(4)
+		}
+		id, _ := processIdentity(os.Getpid())
+		_ = os.WriteFile(args[1], []byte(fmt.Sprintf("child:%d:%s\n", os.Getpid(), id)), 0o600)
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "double_fork_step":
 		marker := args[1]
 		grand := exec.Command(os.Args[0], "-test.run=^TestHelperCheck$", "--", "hold_child", marker)
@@ -178,6 +211,28 @@ func runFakeAgentScript(script string) {
 		runGit("config", "gpg.program", "evil-gpg")
 	case "tamper_gitfile":
 		_ = os.WriteFile(filepath.Join(cwd, ".git"), []byte("gitdir: "+filepath.ToSlash(cwd)+"/.fake-git\n"), 0o600)
+	case "tamper_both_configs":
+		// An allowed key, written to the clone config and to every copy of it.
+		data, _ := os.ReadFile(filepath.Join(cwd, ".git"))
+		admin := filepath.FromSlash(strings.TrimSpace(strings.TrimPrefix(string(data), "gitdir:")))
+		repo := filepath.Dir(filepath.Dir(admin))
+		cfg, _ := os.ReadFile(filepath.Join(repo, "config"))
+		cfg = append(cfg, "[gc]\n\tauto = 1\n"...)
+		for _, p := range []string{filepath.Join(repo, "config"), filepath.Join(repo, "ada-config"), filepath.Join(admin, "ada-config"), filepath.Join(filepath.Dir(repo), "ada-config")} {
+			_ = os.WriteFile(p, cfg, 0o600)
+		}
+	case "tamper_commondir":
+		// A common dir whose config runs a clean filter on git add.
+		evil := filepath.Join(filepath.Dir(os.Getenv("ADA_FAKE_HOOK_MARKER")), "evil.git")
+		runGit("init", "-q", "--bare", evil)
+		f, _ := os.OpenFile(filepath.Join(evil, "config"), os.O_APPEND|os.O_WRONLY, 0o600)
+		fmt.Fprintf(f, "[filter \"evil\"]\n\tclean = touch '%s'\n", filepath.ToSlash(os.Getenv("ADA_FAKE_HOOK_MARKER")))
+		f.Close()
+		_ = os.WriteFile(filepath.Join(cwd, ".gitattributes"), []byte("* filter=evil\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("agent\n"), 0o644)
+		data, _ := os.ReadFile(filepath.Join(cwd, ".git"))
+		admin := filepath.FromSlash(strings.TrimSpace(strings.TrimPrefix(string(data), "gitdir:")))
+		_ = os.WriteFile(filepath.Join(admin, "commondir"), []byte(filepath.ToSlash(evil)+"\n"), 0o600)
 	case "tamper_reset_below":
 		runGit("reset", "-q", "--hard", "HEAD~1")
 	case "agent_link_workdir":
@@ -290,7 +345,7 @@ func TestCheckOutputPastCapEndsWithItsOwnExitCodeAndMarksTruncated(t *testing.T)
 	if len(results) != 1 || results[0].State != store.CheckFailed || *results[0].ExitCode != 5 || !results[0].Truncated || results[0].OutputSize != 1024 {
 		t.Fatalf("result = %+v", results)
 	}
-	hash, size, trunc, err := s.CheckLog(context.Background(), "u", results[0].ID)
+	hash, size, trunc, err := s.CheckLog(context.Background(), "u", "", results[0].ID)
 	if err != nil || size != 1024 || !trunc {
 		t.Fatalf("log = %s %d %v %v", hash, size, trunc, err)
 	}
@@ -378,6 +433,7 @@ func TestCheckEnvironmentAndNoRepoScriptAutoDiscovery(t *testing.T) {
 	t.Setenv("ADA_SECRET", "secret-ada2")
 	t.Setenv("UNLISTED_CHECK_VAR", "unlisted")
 	t.Setenv("NAMED_CHECK_VAR", "named-ok")
+	t.Setenv("GORACE", "halt_on_error=1")
 	setTaskChecksForTest(t, s, []store.CheckDefinition{
 		{Name: "env", Argv: checkHelperArgv("dump_env"), Env: []string{"NAMED_CHECK_VAR"}},
 	})
@@ -388,7 +444,7 @@ func TestCheckEnvironmentAndNoRepoScriptAutoDiscovery(t *testing.T) {
 	}
 	_ = worktree
 	results := task.Attempt.CheckResults()
-	hash, _, _, err := s.CheckLog(context.Background(), "u", results[0].ID)
+	hash, _, _, err := s.CheckLog(context.Background(), "u", "", results[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +458,12 @@ func TestCheckEnvironmentAndNoRepoScriptAutoDiscovery(t *testing.T) {
 	if !strings.Contains(logStr, "NAMED_CHECK_VAR=named-ok") {
 		t.Fatalf("named variable missing from check env:\n%s", logStr)
 	}
-	for _, forbidden := range []string{"CLAUDE_CONFIG_DIR=", "CODEX_HOME=", "ANTHROPIC_API_KEY=", "FOO_TOKEN=", "ADANEXT_", "ADA_", "UNLISTED_CHECK_VAR="} {
+	// The keys are recorded with the check, never the values, and so is its duration.
+	keys := strings.Join(results[0].EnvKeys, ",")
+	if !strings.Contains(keys, "NAMED_CHECK_VAR") || !strings.Contains(keys, "PATH") || strings.Contains(keys, "=") || strings.Contains(keys, "named-ok") || results[0].DurationMS <= 0 {
+		t.Fatalf("recorded keys %q, duration %d", keys, results[0].DurationMS)
+	}
+	for _, forbidden := range []string{"CLAUDE_CONFIG_DIR=", "CODEX_HOME=", "ANTHROPIC_API_KEY=", "FOO_TOKEN=", "ADANEXT_", "ADA_", "UNLISTED_CHECK_VAR=", "GORACE="} {
 		for _, line := range strings.Split(logStr, "\n") {
 			if strings.HasPrefix(line, forbidden) {
 				t.Fatalf("forbidden variable in check env: %s", line)
@@ -443,7 +504,7 @@ func TestDaemonizingCheckLeavesNothingRunningWhenItEnds(t *testing.T) {
 }
 
 func TestAgentTamperingGoesToRecoveryAndCreatesNoMarker(t *testing.T) {
-	for _, tc := range []string{"tamper_hookspath", "tamper_fsmonitor", "tamper_gpg", "tamper_gitfile", "tamper_reset_below"} {
+	for _, tc := range []string{"tamper_hookspath", "tamper_fsmonitor", "tamper_gpg", "tamper_gitfile", "tamper_reset_below", "tamper_both_configs", "tamper_commondir"} {
 		t.Run(tc, func(t *testing.T) {
 			e, s, _, _, _ := workspaceExecutor(t, tc)
 			e.cfg.CancelGrace = naturalExitGrace
@@ -516,6 +577,7 @@ func TestAgentCommitIsKeptBeneathAdasCommitAndBranchMoveInvalidatesResult(t *tes
 	if got := fixtureGit(t, worktree, "log", "-2", "--format=%s <%ae>"); got != "Agent changes <ada@adanext.invalid>\nagent commit <agent@example.com>" {
 		t.Fatalf("commit log =\n%s", got)
 	}
+	task.Attempt.AtTip(e.cfg.Workspaces.BranchTip("p", "task"))
 	results := task.Attempt.CheckResults()
 	if len(results) != 1 || results[0].State != store.CheckPassed || results[0].Invalidated {
 		t.Fatalf("results before edit = %+v", results)
@@ -528,6 +590,7 @@ func TestAgentCommitIsKeptBeneathAdasCommitAndBranchMoveInvalidatesResult(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	task.Attempt.AtTip(e.cfg.Workspaces.BranchTip("p", "task"))
 	results = task.Attempt.CheckResults()
 	if len(results) != 1 || !results[0].Invalidated {
 		t.Fatalf("results after edit = %+v", results)
@@ -602,7 +665,85 @@ func TestCheckWorkdirLinkToOutsideIsRefused(t *testing.T) {
 	e.LaunchAttempt("attempt")
 	task := waitTaskState(t, s, store.AwaitingReview)
 	results := task.Attempt.CheckResults()
-	if len(results) != 1 || results[0].State != store.CheckFailed {
-		t.Fatalf("expected linked workdir check to fail, got %+v", results)
+	// Refused before it starts: not run, binding nothing, and no baseline kept for it.
+	if len(results) != 1 || results[0].State != store.CheckNotRun || results[0].BoundCommit != "" || results[0].Baseline != nil {
+		t.Fatalf("expected linked workdir check refused, got %+v", results)
+	}
+	if b, err := s.BaselineForCheck(context.Background(), "snap", store.CheckDefinitionHash(results[0].Definition)); err != nil || b != nil {
+		t.Fatalf("a refused baseline was kept: %+v, %v", b, err)
+	}
+}
+
+// storeExec runs one statement against the test's database.
+func storeExec(t *testing.T, s *store.Store, query string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.Do(ctx, "u", "exec-"+fmt.Sprint(time.Now().UnixNano()), "exec", nil, func(tx *store.Tx) ([]byte, error) {
+		_, err := tx.ExecContext(ctx, query)
+		return []byte("ok"), err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAStorageErrorWhileVerifyingStillEndsTheTaskInAwaitingReview(t *testing.T) {
+	e, s, _, _, _ := workspaceExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
+	setTaskChecksForTest(t, s, []store.CheckDefinition{
+		{Name: "first", Argv: checkHelperArgv("pass")},
+		{Name: "second", Argv: checkHelperArgv("pass")},
+	})
+	storeExec(t, s, "CREATE TRIGGER fail_baselines BEFORE INSERT ON check_baselines BEGIN SELECT RAISE(ABORT, 'injected'); END")
+	e.LaunchAttempt("attempt")
+	task := waitTaskState(t, s, store.AwaitingReview)
+	results := task.Attempt.CheckResults()
+	if len(results) != 2 || results[0].State != store.CheckNotRun || results[1].State != store.CheckNotRun || results[0].BoundCommit != "" {
+		t.Fatalf("results = %+v", results)
+	}
+}
+
+func TestACheckDaemonThatLeavesItsSessionAfterReparentingIsKilled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sessions and reparenting as on Linux")
+	}
+	e, s, _, _, _ := workspaceExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
+	marker := filepath.Join(t.TempDir(), "daemon-marker")
+	cleanupGrandchild(t, marker)
+	setTaskChecksForTest(t, s, []store.CheckDefinition{
+		{Name: "daemon", Argv: checkHelperArgv("reparent_then_setsid", marker)},
+	})
+	e.LaunchAttempt("attempt")
+	task := waitTaskState(t, s, store.AwaitingReview)
+	if results := task.Attempt.CheckResults(); len(results) != 1 || results[0].State != store.CheckPassed {
+		t.Fatalf("results = %+v", results)
+	}
+	var pid int
+	var id string
+	if _, err := fmt.Sscanf(markerLines(t, marker)[0], "child:%d:%s", &pid, &id); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitProcessGone(pid, id, 0); err != nil {
+		t.Fatalf("the daemon outlived its check: %v", err)
+	}
+}
+
+func TestCancelDuringVerifyingKillsTheCheckAndEndsInAwaitingReview(t *testing.T) {
+	e, s, _, _, _ := workspaceExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
+	childMarker := filepath.Join(t.TempDir(), "cancel-verifying-child")
+	cleanupGrandchild(t, childMarker)
+	setTaskChecksForTest(t, s, []store.CheckDefinition{
+		{Name: "running-check", Argv: checkHelperArgv("timeout_tree", childMarker)},
+		{Name: "later-check", Argv: checkHelperArgv("pass")},
+	})
+	e.LaunchAttempt("attempt")
+	waitTaskState(t, s, store.Verifying)
+	waitGrandchildMarker(t, childMarker)
+	e.CancelTask("task")
+	task := waitTaskState(t, s, store.AwaitingReview)
+	results := task.Attempt.CheckResults()
+	if len(results) != 2 || results[0].State != store.CheckKilled || results[1].State != store.CheckNotRun {
+		t.Fatalf("results = %+v", results)
 	}
 }

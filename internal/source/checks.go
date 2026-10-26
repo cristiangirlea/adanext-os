@@ -45,19 +45,24 @@ func allowedCloneConfigKey(key string) bool {
 	return false
 }
 
-func (w *Workspaces) verifyCloneConfig(repo, admin string) error {
+// verifyCloneConfig checks the clone config against the copy Ada wrote outside
+// the clone, and that copy against want, its SHA-256 from SQLite; with admin,
+// also the worktree's git directory: no config of its own, and the clone as
+// its common dir.
+func (w *Workspaces) verifyCloneConfig(project, want, admin string) error {
+	repo := w.repo(project)
 	cfgData, _, err := readUnder(repo, filepath.Join(repo, "config"), maxFileSize)
 	if err != nil {
 		return mismatch("the clone config cannot be read")
 	}
-	expected, _, err := readUnder(repo, filepath.Join(repo, "ada-config"), maxFileSize)
-	if err != nil || !bytes.Equal(cfgData, expected) {
+	expected, _, err := readUnder(w.Root, w.configCopy(project), maxFileSize)
+	sum := sha256.Sum256(expected)
+	if err != nil || want == "" || hex.EncodeToString(sum[:]) != want || !bytes.Equal(cfgData, expected) {
 		return mismatch("the clone config differs from the copy Ada wrote")
 	}
 	if admin != "" {
-		adminExpected, _, err := readUnder(admin, filepath.Join(admin, "ada-config"), maxFileSize)
-		if err != nil || !bytes.Equal(cfgData, adminExpected) {
-			return mismatch("the clone config differs from the copy Ada wrote")
+		if !sharesCommonDir(admin, repo) {
+			return mismatch("the worktree git directory names another common dir")
 		}
 		for _, name := range []string{"config", "config.worktree"} {
 			if _, err := os.Lstat(filepath.Join(admin, name)); !errors.Is(err, fs.ErrNotExist) {
@@ -105,7 +110,7 @@ func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash st
 	if !pointsTo(m.Path, admin) {
 		return "", mismatch("the worktree does not use its git directory")
 	}
-	if err := w.verifyCloneConfig(repo, admin); err != nil {
+	if err := w.verifyCloneConfig(m.Project, m.ConfigSHA256, admin); err != nil {
 		return "", err
 	}
 	stored, _, err := readUnder(admin, filepath.Join(admin, manifestFile), maxFileSize)
@@ -140,14 +145,26 @@ func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash st
 		}
 	}
 
-	addCmd := g.commandWith(ctx, flags, admin, m.Path, "add", "-A", "--")
-	addCmd.Dir = m.Path
-	if _, err := output(addCmd, "add"); err != nil {
+	// Staged through a fresh index read from head: the agent's own index could
+	// mark a changed file assume-unchanged or skip-worktree.
+	scratch, err := os.MkdirTemp("", "ada-index-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(scratch)
+	inIndex := func(args ...string) *exec.Cmd {
+		cmd := g.worktreeCommand(ctx, flags, repo, admin, m.Path, args...)
+		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+filepath.Join(scratch, "index"))
+		return cmd
+	}
+	if _, err := output(inIndex("read-tree", head), "read-tree"); err != nil {
+		return "", mismatch("read the branch head: %v", err)
+	}
+	if _, err := output(inIndex("add", "-A", "--"), "add"); err != nil {
 		return "", mismatch("stage agent changes: %v", err)
 	}
 
-	diffCmd := g.commandWith(ctx, flags, admin, m.Path, "diff", "--cached", "--quiet")
-	diffCmd.Dir = m.Path
+	diffCmd := inIndex("diff", "--cached", "--quiet")
 	dirty := false
 	if _, err := output(diffCmd, "diff"); err != nil {
 		if e, ok := errors.AsType[*exec.ExitError](err); ok && e.ExitCode() == 1 {
@@ -162,8 +179,7 @@ func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash st
 		if !dirty {
 			args = append(args, "--allow-empty")
 		}
-		commitCmd := g.commandWith(ctx, flags, admin, m.Path, args...)
-		commitCmd.Dir = m.Path
+		commitCmd := inIndex(args...)
 		commitCmd.Env = append(commitCmd.Env,
 			"GIT_AUTHOR_NAME=Ada", "GIT_AUTHOR_EMAIL=ada@adanext.invalid",
 			"GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=ada@adanext.invalid",
@@ -182,7 +198,7 @@ func (w *Workspaces) CommitAgentChanges(ctx context.Context, m Manifest, hash st
 
 // PrepareCheckWorktree creates a fresh detached worktree at commit under
 // <Root>/<project>/checks/<attempt>/<runID>.
-func (w *Workspaces) PrepareCheckWorktree(ctx context.Context, project, attempt, runID, commit string) (string, string, error) {
+func (w *Workspaces) PrepareCheckWorktree(ctx context.Context, project, attempt, runID, commit, configSHA256 string) (string, string, error) {
 	for _, id := range []string{project, attempt, runID} {
 		if !safeName(id) {
 			return "", "", fmt.Errorf("identifier %q cannot name a check worktree", id)
@@ -194,7 +210,7 @@ func (w *Workspaces) PrepareCheckWorktree(ctx context.Context, project, attempt,
 	defer w.lock(project)()
 
 	repo := w.repo(project)
-	if err := w.verifyCloneConfig(repo, ""); err != nil {
+	if err := w.verifyCloneConfig(project, configSHA256, ""); err != nil {
 		return "", "", err
 	}
 	adminName := runID
@@ -211,7 +227,7 @@ func (w *Workspaces) PrepareCheckWorktree(ctx context.Context, project, attempt,
 		return "", "", err
 	}
 	adminDir := filepath.Join(repo, "worktrees", adminName)
-	if !pointsTo(wt, adminDir) {
+	if !pointsTo(wt, adminDir) || !sharesCommonDir(adminDir, repo) {
 		_ = w.removeCheckWorktreeLocked(project, attempt, runID, adminName)
 		return "", "", fmt.Errorf("check worktree %s does not use %s", wt, adminDir)
 	}
@@ -220,7 +236,7 @@ func (w *Workspaces) PrepareCheckWorktree(ctx context.Context, project, attempt,
 
 // CheckTreeUnchanged reports whether the tracked files of a check's worktree
 // still match commit.
-func (w *Workspaces) CheckTreeUnchanged(ctx context.Context, project, attempt, runID, adminName, commit string) (bool, error) {
+func (w *Workspaces) CheckTreeUnchanged(ctx context.Context, project, attempt, runID, adminName, commit, configSHA256 string) (bool, error) {
 	for _, id := range []string{project, attempt, runID} {
 		if !safeName(id) {
 			return false, fmt.Errorf("invalid check worktree identifier %q", id)
@@ -244,33 +260,26 @@ func (w *Workspaces) CheckTreeUnchanged(ctx context.Context, project, attempt, r
 	if !pointsTo(wt, adminDir) {
 		return false, nil
 	}
-	if err := w.verifyCloneConfig(repo, ""); err != nil {
+	if err := w.verifyCloneConfig(project, configSHA256, adminDir); err != nil {
 		return false, nil
-	}
-	for _, name := range []string{"config", "config.worktree"} {
-		if _, err := os.Lstat(filepath.Join(adminDir, name)); !errors.Is(err, fs.ErrNotExist) {
-			return false, nil
-		}
 	}
 	head, branch, err := resolveHead(layout{gitDir: adminDir, commonDir: repo}, len(commit)/2)
 	if err != nil || branch != "" || head != commit {
 		return false, nil
 	}
+	// A fresh index read from commit: the check's own index could mark a
+	// changed file assume-unchanged or skip-worktree.
+	scratch, err := os.MkdirTemp("", "ada-index-")
+	if err != nil {
+		return false, err
+	}
+	defer os.RemoveAll(scratch)
 	g := w.Inspector.Git
 	flags := w.safeConfigFlags()
-	statusCmd := g.commandWith(ctx, flags, adminDir, wt, "status", "--porcelain=v1", "-z", "--untracked-files=no")
-	statusCmd.Dir = wt
-	out, err := output(statusCmd, "status")
-	if err != nil || len(out) != 0 {
-		return false, nil
-	}
-	for _, args := range [][]string{
-		{"diff", "--quiet", commit, "--"},
-		{"diff", "--cached", "--quiet", commit, "--"},
-	} {
-		cmd := g.commandWith(ctx, flags, adminDir, wt, args...)
-		cmd.Dir = wt
-		if _, err := output(cmd, "diff"); err != nil {
+	for _, args := range [][]string{{"read-tree", commit}, {"diff", "--quiet", commit, "--"}} {
+		cmd := g.worktreeCommand(ctx, flags, repo, adminDir, wt, args...)
+		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+filepath.Join(scratch, "index"))
+		if _, err := output(cmd, args[0]); err != nil {
 			return false, nil
 		}
 	}
@@ -377,12 +386,19 @@ func (w *Workspaces) BranchTip(project, task string) string {
 	}
 	repo := w.repo(project)
 	ref := "refs/heads/ada/" + task
-	if data, err := os.ReadFile(filepath.Join(repo, filepath.FromSlash(ref))); err == nil {
+	// Read without following a link anywhere under the state root; a loose ref
+	// that is not a commit id leaves the tip unknown.
+	data, _, err := readUnder(w.Root, filepath.Join(repo, filepath.FromSlash(ref)), maxFileSize)
+	if err == nil {
 		if s := strings.TrimSpace(string(data)); (len(s) == 40 || len(s) == 64) && isHex(s) {
 			return s
 		}
+		return ""
 	}
-	if data, err := os.ReadFile(filepath.Join(repo, "packed-refs")); err == nil {
+	if !errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	if data, _, err := readUnder(w.Root, filepath.Join(repo, "packed-refs"), maxFileSize); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || line[0] == '#' || line[0] == '^' {

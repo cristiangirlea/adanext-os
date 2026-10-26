@@ -53,6 +53,8 @@ type Manifest struct {
 	Executor     string `json:"executor"`
 	Policy       string `json:"policy"`
 	Head         string `json:"head"`
+	// ConfigSHA256 is the hash of the clone config Ada wrote, kept in SQLite, not in the manifest.
+	ConfigSHA256 string `json:"-"`
 }
 
 // Encode is the manifest as stored beside the worktree.
@@ -154,7 +156,8 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 		return Manifest{}, fmt.Errorf("base commit %q is not an object ID", m.BaseCommit)
 	}
 	defer w.lock(m.Project)()
-	if err := w.sync(ctx, m.Project, source, m.BaseCommit); err != nil {
+	configHash, err := w.sync(ctx, m.Project, source, m.BaseCommit)
+	if err != nil {
 		return Manifest{}, fmt.Errorf("update the clone: %w", err)
 	}
 	g, repo := w.Inspector.Git, w.repo(m.Project)
@@ -173,22 +176,17 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 		return Manifest{}, err
 	}
 	admin := w.adminDir(m.Project, m.Attempt)
-	if !pointsTo(m.Path, admin) {
+	if !pointsTo(m.Path, admin) || !sharesCommonDir(admin, repo) {
 		return Manifest{}, fmt.Errorf("the worktree at %s does not use %s", m.Path, admin)
 	}
-	if err := w.commitChanges(ctx, admin, m.Path, changes); err != nil {
+	if err := w.commitChanges(ctx, repo, admin, m.Path, changes); err != nil {
 		return Manifest{}, err
 	}
 	head, branch, err := resolveHead(layout{gitDir: admin, commonDir: repo}, len(m.BaseCommit)/2)
 	if err != nil || branch != m.Branch {
 		return Manifest{}, fmt.Errorf("the worktree's HEAD is not on %s: %q, %v", m.Branch, branch, err)
 	}
-	m.Head = head
-	if cfgData, _, err := readUnder(repo, filepath.Join(repo, "config"), maxFileSize); err == nil {
-		if err := os.WriteFile(filepath.Join(admin, "ada-config"), cfgData, 0o600); err != nil {
-			return Manifest{}, err
-		}
-	}
+	m.Head, m.ConfigSHA256 = head, configHash
 	if err := os.WriteFile(filepath.Join(admin, manifestFile), m.Encode(), 0o600); err != nil {
 		return Manifest{}, err
 	}
@@ -200,26 +198,27 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 // reads the original's config, and --no-local makes pack-objects copy what
 // the mirror reaches through alternates into the clone's own pack. The mirror
 // names base as refs/ada/base when it has the commit, so the clone gets it
-// however the original's refs have moved since the snapshot.
-func (w *Workspaces) sync(ctx context.Context, project, source, base string) error {
+// however the original's refs have moved since the snapshot. It returns the
+// SHA-256 of the config it wrote.
+func (w *Workspaces) sync(ctx context.Context, project, source, base string) (string, error) {
 	in := w.Inspector
 	dir := filepath.Join(w.Root, project)
 	for _, d := range []string{dir, in.MirrorRoot} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
+			return "", err
 		}
 	}
 	mirror, err := os.MkdirTemp(in.MirrorRoot, "w")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(mirror)
 	r, src, err := in.inspectMirror(ctx, source, mirror)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if src == nil {
-		return &BlockedError{Blockers: r.Blockers}
+		return "", &BlockedError{Blockers: r.Blockers}
 	}
 	// A base the original has pruned gets no ref: the clone may still hold
 	// it, else Prepare names it missing.
@@ -227,58 +226,59 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) err
 	hasBase := err == nil
 	if hasBase {
 		if err := os.MkdirAll(filepath.Join(mirror, "refs", "ada"), 0o700); err != nil {
-			return err
+			return "", err
 		}
 		if err := os.WriteFile(filepath.Join(mirror, "refs", "ada", "base"), []byte(base+"\n"), 0o600); err != nil {
-			return err
+			return "", err
 		}
 	}
 	transport := []string{"protocol.file.allow=always", "transfer.bundleURI=false"}
 	repo := w.repo(project)
 	_, err = os.Lstat(repo)
 	cloned := errors.Is(err, fs.ErrNotExist)
+	var configHash string
 	if err != nil && !cloned {
-		return err
+		return "", err
 	}
 	if cloned {
 		// A clone a crash interrupted never reached repo.git.
 		stale, _ := filepath.Glob(filepath.Join(dir, "clone-*"))
 		for _, s := range stale {
 			if err := os.RemoveAll(s); err != nil {
-				return err
+				return "", err
 			}
 		}
 		tmp, err := os.MkdirTemp(dir, "clone-")
 		if err != nil {
-			return err
+			return "", err
 		}
 		if _, err := output(in.Git.commandWith(ctx, transport, "", "", "clone", "-q", "--bare", "--no-local", "--no-hardlinks", "--template=", "--", mirror, tmp), "clone"); err != nil {
 			os.RemoveAll(tmp)
-			return err
+			return "", err
 		}
 		if err := w.dropAdaBranches(ctx, tmp); err != nil {
 			os.RemoveAll(tmp)
-			return err
+			return "", err
 		}
-		if err := w.writeConfig(tmp, mirror, *src); err != nil {
+		if configHash, err = w.writeConfig(project, tmp, mirror, *src); err != nil {
 			os.RemoveAll(tmp)
-			return err
+			return "", err
 		}
 		if err := os.Rename(tmp, repo); err != nil {
 			os.RemoveAll(tmp)
-			return err
+			return "", err
 		}
 	} else {
 		if err := removeLocks(repo); err != nil {
-			return err
+			return "", err
 		}
-		if err := w.writeConfig(repo, mirror, *src); err != nil {
-			return err
+		if configHash, err = w.writeConfig(project, repo, mirror, *src); err != nil {
+			return "", err
 		}
 	}
 	branches, err := in.Git.run(ctx, mirror, "", "for-each-ref", "--format=%(refname)", "refs/heads")
 	if err != nil {
-		return err
+		return "", err
 	}
 	// refs/ada/head carries a detached HEAD no branch reaches; ada and ada/*,
 	// in any case, are Ada's own names, which the fetch never takes and
@@ -297,12 +297,12 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) err
 		args = append(args, "+refs/ada/head:refs/ada/head")
 	}
 	if _, err := output(in.Git.commandWith(ctx, transport, repo, "", args...), "fetch"); err != nil {
-		return err
+		return "", err
 	}
 	if w.AfterSync != nil {
 		w.AfterSync(ctx, cloned)
 	}
-	return nil
+	return configHash, nil
 }
 
 // dropAdaBranches deletes the original's branches named ada or ada/* in any
@@ -369,49 +369,52 @@ func removeLocks(repo string) error {
 // writeConfig replaces the clone's config with Ada's, hooks pointed at Ada's
 // empty directory and fsmonitor off for any git that runs in a worktree, no
 // automatic gc or maintenance (either would detach from Ada's supervision),
-// and copies the mirror's excludes and attributes.
-func (w *Workspaces) writeConfig(repo, mirror string, src mirrorSource) error {
+// and copies the mirror's excludes and attributes. It keeps a copy of the
+// config outside the clone and returns its SHA-256, which the caller records
+// in SQLite.
+func (w *Workspaces) writeConfig(project, repo, mirror string, src mirrorSource) (string, error) {
 	hooks := "hooksPath = " + quoteConfig(filepath.ToSlash(w.Inspector.Git.hooks))
 	if err := writeAdaConfig(repo, src, true, "[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n", hooks, "fsmonitor = false"); err != nil {
-		return err
+		return "", err
 	}
 	cfgData, _, err := readUnder(repo, filepath.Join(repo, "config"), maxFileSize)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(repo, "ada-config"), cfgData, 0o600); err != nil {
-		return err
+	if err := writeNoFollow(w.configCopy(project), cfgData); err != nil {
+		return "", err
 	}
+	sum := sha256.Sum256(cfgData)
 	for _, name := range []string{"exclude", "attributes"} {
 		dst := filepath.Join(repo, "info", name)
 		data, err := os.ReadFile(filepath.Join(mirror, "info", name))
 		if errors.Is(err, fs.ErrNotExist) {
 			if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
+				return "", err
 			}
 			continue
 		}
 		if err != nil {
-			return err
+			return "", err
 		}
 		if _, err := writeCopy(dst, data, nil); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return nil
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // commitChanges applies the staged then the unstaged patch, writes the
 // untracked files, and commits it all as one commit with Ada as author and
 // committer; a snapshot that changes nothing makes no commit. git apply runs
 // without --unsafe-paths, so it writes nothing beyond a symlink.
-func (w *Workspaces) commitChanges(ctx context.Context, admin, worktree string, c Changes) error {
+func (w *Workspaces) commitChanges(ctx context.Context, repo, admin, worktree string, c Changes) error {
 	g := w.Inspector.Git
 	for _, patch := range [][]byte{c.Staged, c.Unstaged} {
 		if len(patch) == 0 {
 			continue
 		}
-		cmd := g.inWorktree(ctx, admin, worktree, "apply", "--index", "--whitespace=nowarn", "-")
+		cmd := g.inWorktree(ctx, repo, admin, worktree, "apply", "--index", "--whitespace=nowarn", "-")
 		cmd.Stdin = bytes.NewReader(patch)
 		if _, err := output(cmd, "apply"); err != nil {
 			return err
@@ -439,16 +442,16 @@ func (w *Workspaces) commitChanges(ctx context.Context, admin, worktree string, 
 		paths []string
 	}{{"--chmod=-x", plain}, {"--chmod=+x", executable}} {
 		// -f: a selected file the repository ignores was taken on purpose.
-		if err := g.batched(ctx, admin, worktree, set.paths, "add", "-f", set.chmod, "--"); err != nil {
+		if err := g.batched(ctx, repo, admin, worktree, set.paths, "add", "-f", set.chmod, "--"); err != nil {
 			return err
 		}
 	}
-	if _, err := output(g.inWorktree(ctx, admin, worktree, "diff", "--cached", "--quiet"), "diff"); err == nil {
+	if _, err := output(g.inWorktree(ctx, repo, admin, worktree, "diff", "--cached", "--quiet"), "diff"); err == nil {
 		return nil
 	} else if e, ok := errors.AsType[*exec.ExitError](err); !ok || e.ExitCode() != 1 {
 		return err
 	}
-	cmd := g.inWorktree(ctx, admin, worktree, "commit", "-q", "--no-verify", "--no-gpg-sign", "-m", importMessage)
+	cmd := g.inWorktree(ctx, repo, admin, worktree, "commit", "-q", "--no-verify", "--no-gpg-sign", "-m", importMessage)
 	cmd.Env = append(cmd.Env, "GIT_AUTHOR_NAME=Ada", "GIT_AUTHOR_EMAIL=ada@adanext.invalid", "GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=ada@adanext.invalid")
 	_, err := output(cmd, "commit")
 	return err
@@ -456,15 +459,64 @@ func (w *Workspaces) commitChanges(ctx context.Context, admin, worktree string, 
 
 // inWorktree is a git call in an attempt's worktree, run from its root: a
 // path git apply writes is relative to the current directory.
-func (g *Git) inWorktree(ctx context.Context, admin, worktree string, args ...string) *exec.Cmd {
-	cmd := g.command(ctx, admin, worktree, args...)
+func (g *Git) inWorktree(ctx context.Context, repo, admin, worktree string, args ...string) *exec.Cmd {
+	return g.worktreeCommand(ctx, nil, repo, admin, worktree, args...)
+}
+
+// worktreeCommand is a git call on a worktree's git directory with the clone
+// named as its common dir, so the commondir file there is never read.
+func (g *Git) worktreeCommand(ctx context.Context, config []string, repo, admin, worktree string, args ...string) *exec.Cmd {
+	cmd := g.commandWith(ctx, config, admin, worktree, args...)
+	cmd.Env = append(cmd.Env, "GIT_COMMON_DIR="+repo)
 	cmd.Dir = worktree
 	return cmd
 }
 
+// sharesCommonDir reports a worktree git directory whose commondir names repo.
+func sharesCommonDir(admin, repo string) bool {
+	data, _, err := readUnder(admin, filepath.Join(admin, "commondir"), maxFileSize)
+	if err != nil {
+		return false
+	}
+	dir := filepath.FromSlash(strings.TrimRight(string(data), "\r\n"))
+	if dir == "" {
+		return false
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(admin, dir)
+	}
+	a, err := os.Stat(dir)
+	if err != nil {
+		return false
+	}
+	b, err := os.Stat(repo)
+	return err == nil && os.SameFile(a, b)
+}
+
+// configCopy is the copy of the clone config Ada wrote, kept outside the clone.
+func (w *Workspaces) configCopy(project string) string {
+	return filepath.Join(w.Root, project, "ada-config")
+}
+
+// writeNoFollow replaces path with data, never writing through a link there.
+func writeNoFollow(path string, data []byte) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 // batched runs args in the worktree with the paths as literal pathspecs, a
 // bounded number of bytes per call.
-func (g *Git) batched(ctx context.Context, admin, worktree string, paths []string, args ...string) error {
+func (g *Git) batched(ctx context.Context, repo, admin, worktree string, paths []string, args ...string) error {
 	for len(paths) > 0 {
 		call := append([]string{}, args...)
 		size := 0
@@ -473,7 +525,7 @@ func (g *Git) batched(ctx context.Context, admin, worktree string, paths []strin
 			size += len(paths[0]) + 11
 			paths = paths[1:]
 		}
-		if _, err := output(g.inWorktree(ctx, admin, worktree, call...), args[0]); err != nil {
+		if _, err := output(g.inWorktree(ctx, repo, admin, worktree, call...), args[0]); err != nil {
 			return err
 		}
 	}

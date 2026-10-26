@@ -188,3 +188,5 @@ func TestWindowsCloseTerminatesAndWaitsForJobProcesses(t *testing.T) {
 		t.Fatalf("remove held directory after close: %v", err)
 	}
 }
+
+func setsidSelf() error { return errors.New("no sessions on Windows") }

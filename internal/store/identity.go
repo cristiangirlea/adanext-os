@@ -215,7 +215,7 @@ func (s *Store) populateAttemptChecks(ctx context.Context, task *Task) error {
 	if task.Attempt.ID == "" {
 		return nil
 	}
-	results, err := s.attemptCheckResults(ctx, task.Project, task.ID, task.Attempt.ID)
+	results, err := s.attemptCheckResults(ctx, task.Attempt.ID)
 	if err != nil {
 		return err
 	}

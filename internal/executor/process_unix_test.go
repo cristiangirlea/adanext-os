@@ -91,3 +91,9 @@ func TestAKillOfAPidNoLongerTheEngineSignalsNoGroup(t *testing.T) {
 		t.Fatal("the engine survived the fallback kill")
 	}
 }
+
+// setsidSelf starts a session of the calling process's own.
+func setsidSelf() error {
+	_, err := syscall.Setsid()
+	return err
+}

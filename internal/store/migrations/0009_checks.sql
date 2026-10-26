@@ -1,6 +1,13 @@
 ALTER TABLE tasks ADD COLUMN checks_json TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE workspaces ADD COLUMN tested_commit TEXT NOT NULL DEFAULT '';
 
+-- The SHA-256 of the clone config Ada last wrote for a project.
+CREATE TABLE clone_configs (
+    project TEXT PRIMARY KEY REFERENCES projects(id),
+    sha256 TEXT NOT NULL,
+    updated TEXT NOT NULL
+);
+
 CREATE TABLE check_worktrees (
     project TEXT NOT NULL,
     attempt TEXT NOT NULL,
@@ -23,6 +30,8 @@ CREATE TABLE check_baselines (
     output_artifact TEXT NOT NULL DEFAULT '',
     output_size INTEGER NOT NULL DEFAULT 0 CHECK (output_size >= 0),
     output_truncated INTEGER NOT NULL DEFAULT 0 CHECK (output_truncated IN (0, 1)),
+    env_keys TEXT NOT NULL DEFAULT '[]',
+    duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
     started_at TEXT NOT NULL,
     ended_at TEXT NOT NULL,
     UNIQUE (snapshot, definition_hash)
@@ -44,6 +53,8 @@ CREATE TABLE check_results (
     output_size INTEGER NOT NULL DEFAULT 0 CHECK (output_size >= 0),
     output_truncated INTEGER NOT NULL DEFAULT 0 CHECK (output_truncated IN (0, 1)),
     baseline_id TEXT NOT NULL DEFAULT '',
+    env_keys TEXT NOT NULL DEFAULT '[]',
+    duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
     started_at TEXT NOT NULL,
     ended_at TEXT NOT NULL DEFAULT '',
     UNIQUE (attempt, ord)

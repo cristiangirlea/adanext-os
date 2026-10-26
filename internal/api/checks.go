@@ -28,15 +28,6 @@ func scanTaskTx(ctx context.Context, tx *store.Tx, id string) (store.Task, error
 	return task, nil
 }
 
-func (h *handler) ready(w http.ResponseWriter, r *http.Request) {
-	h.taskMutation(w, r, func(ctx context.Context, tx *store.Tx, id string, current store.State, revision int64) error {
-		if current != store.Draft && current != store.Refinement {
-			return store.ErrInvalidTransition
-		}
-		return tx.Transition(ctx, id, current, store.Ready, revision)
-	})
-}
-
 func (h *handler) setChecks(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.actor(w, r)
 	if !ok {
@@ -88,7 +79,7 @@ func (h *handler) getChecks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	results, err := h.store.CheckResults(r.Context(), user, r.PathValue("id"))
+	results, err := h.store.CheckResults(r.Context(), user, r.PathValue("id"), h.tip)
 	if err != nil {
 		storeError(w, err)
 		return
@@ -101,7 +92,8 @@ func (h *handler) checkLog(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	hash, size, truncated, err := h.store.CheckLog(r.Context(), user, r.PathValue("id"))
+	// {task} is empty on /v1/checks/{id}/log.
+	hash, size, truncated, err := h.store.CheckLog(r.Context(), user, r.PathValue("task"), r.PathValue("id"))
 	if err != nil {
 		storeError(w, err)
 		return
