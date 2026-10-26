@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -73,5 +74,233 @@ func TestABackendGroupWhoseLeaderExitedIsStillKilled(t *testing.T) {
 	<-waited
 	if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
 		t.Fatalf("descendant in a leaderless group survived the kill: %v", err)
+	}
+}
+
+func TestASupervisorTakesNoProcessForSharingItsWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	hold := func(marker string) *exec.Cmd {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestHelperCheck$", "--", "hold_child", marker)
+		cmd.Dir = dir
+		return cmd
+	}
+	// Unrelated: in the test's session, a group of its own, working in dir.
+	unrelated := hold(filepath.Join(t.TempDir(), "unrelated"))
+	unrelated.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unrelated.Process.Kill(); _ = unrelated.Wait() })
+	root := hold(filepath.Join(t.TempDir(), "root"))
+	s, err := newProcessSupervisor(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Process.Kill(); _ = root.Wait() })
+	if err := s.started(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.signal = syscall.Kill; s.close() })
+	// Recorded, never sent.
+	var sent []int
+	s.signal = func(pid int, sig syscall.Signal) error { sent = append(sent, pid); return nil }
+	tree := s.stopAll()
+	for _, pid := range []int{unrelated.Process.Pid, os.Getpid()} {
+		if _, ok := tree[pid]; ok {
+			t.Errorf("the tree took %d, which only shares the working directory or its session", pid)
+		}
+	}
+	if _, ok := tree[root.Process.Pid]; !ok {
+		t.Errorf("the tree misses its root: %v", tree)
+	}
+	self, _ := readProcessRecord(os.Getpid())
+	for _, pid := range sent {
+		if pid == -unrelated.Process.Pid || pid == -self.group {
+			t.Errorf("signalled group %d", -pid)
+		}
+	}
+}
+
+func TestWaitTreeReapsExitedOrphansThoughAMemberOutlivesItsDeadline(t *testing.T) {
+	stuck := exec.Command(os.Args[0], "-test.run=^TestHelperCheck$", "--", "hold_child", filepath.Join(t.TempDir(), "stuck"))
+	if err := stuck.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stuck.Process.Kill(); _ = stuck.Wait() })
+	s := &processSupervisor{}
+	// Members are visited in map order: over three rounds the stuck one comes
+	// before some exited one, which only a pass after the deadline reaps.
+	for round := range 3 {
+		record, err := readProcessRecord(stuck.Process.Pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree := map[int]processRecord{record.pid: record}
+		var exitedPids []int
+		for range 8 {
+			child := exec.Command(os.Args[0], "-test.run=^$")
+			if err := child.Start(); err != nil {
+				t.Fatal(err)
+			}
+			pid := child.Process.Pid
+			for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+				r, err := readProcessRecord(pid)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if exited(r) {
+					tree[pid] = r
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("child %d never exited", pid)
+				}
+			}
+			exitedPids = append(exitedPids, pid)
+		}
+		s.waitTreeWithin(tree, 20*time.Millisecond)
+		for _, pid := range exitedPids {
+			if r, err := readProcessRecord(pid); err == nil {
+				t.Fatalf("round %d: exited member %d left unreaped (%s)", round, pid, r.state)
+			}
+		}
+	}
+}
+
+func TestASupervisorLeavesAnotherTreesOrphanInItsSessionToThatTree(t *testing.T) {
+	// The other tree's engine starts a descendant in its session and exits:
+	// the descendant is reparented to the test, as to adad, while the other
+	// supervisor is still open, waiting for its stderr.
+	_, other, otherMarker, otherWaited := startSupervised(t, "group_leader_exits")
+	cleanupGrandchild(t, otherMarker)
+	<-otherWaited
+	var pid int
+	var identity string
+	data, err := os.ReadFile(otherMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Sscanf(string(data), "child:%d:%s", &pid, &identity); err != nil {
+		t.Fatalf("descendant did not record itself: %q: %v", data, err)
+	}
+	for deadline := time.Now().Add(markerBound); ; time.Sleep(5 * time.Millisecond) {
+		if r, err := readProcessRecord(pid); err == nil && r.parent == os.Getpid() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("descendant %d was never reparented to the test", pid)
+		}
+	}
+	root, s, marker, _ := startSupervised(t, "grandchild_hold")
+	cleanupGrandchild(t, marker)
+	// Recorded, never sent.
+	s.signal = func(int, syscall.Signal) error { return nil }
+	tree := s.stopAll()
+	if _, ok := tree[root.Process.Pid]; !ok {
+		t.Fatalf("the tree misses its own root: %v", tree)
+	}
+	if _, ok := tree[pid]; ok {
+		t.Fatalf("the supervisor took %d, an orphan in another open supervisor's session", pid)
+	}
+	other.close()
+	if err := waitProcessGone(pid, identity, 10*time.Second); err != nil {
+		t.Fatalf("its own supervisor's close left the orphan: %v", err)
+	}
+}
+
+func TestASupervisorHoldsOnlyWhatItCanIdentify(t *testing.T) {
+	s := &processSupervisor{
+		pid: 100, created: "c100",
+		sessions: map[int]string{200: "c200"},
+		seen:     map[int]processRecord{300: {pid: 300, created: "c300"}},
+	}
+	records := map[int]processRecord{
+		200: {pid: 200, session: 200, created: "c200"},
+		400: {pid: 400, session: 400, created: "other"},
+	}
+	for _, c := range []struct {
+		name   string
+		record processRecord
+		want   bool
+	}{
+		{"its root", processRecord{pid: 100, session: 100, created: "c100"}, true},
+		{"a pid reused for its root", processRecord{pid: 100, session: 1, created: "reused"}, false},
+		{"its root's session, the root gone", processRecord{pid: 101, session: 100, created: "x"}, true},
+		{"a session it recorded", processRecord{pid: 201, session: 200, created: "x"}, true},
+		{"a process its scans saw", processRecord{pid: 300, session: 300, created: "c300"}, true},
+		{"a pid reused for one its scans saw", processRecord{pid: 300, session: 300, created: "reused"}, false},
+		{"a session it never recorded", processRecord{pid: 401, session: 400, created: "x"}, false},
+	} {
+		if got := s.holds(c.record, records); got != c.want {
+			t.Errorf("%s: holds = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// A session, its root's or one it recorded, whose leader is now another
+	// process is not its own.
+	records[100] = processRecord{pid: 100, session: 100, created: "reused"}
+	records[200] = processRecord{pid: 200, session: 200, created: "reused"}
+	for _, session := range []int{100, 200} {
+		if s.holds(processRecord{pid: session + 1, session: session, created: "x"}, records) {
+			t.Errorf("holds took a member of session %d, whose leader id was reused", session)
+		}
+	}
+}
+
+func TestAFailedSubreaperCallIsReported(t *testing.T) {
+	failing := func(int, uintptr, uintptr, uintptr, uintptr) error { return errors.New("refused") }
+	if err := subreaper(failing); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("subreaper = %v, want the prctl error", err)
+	}
+}
+
+func TestAnotherOpenSupervisorHoldsOnlyTheOrphansOfItsTree(t *testing.T) {
+	other := &processSupervisor{
+		pid: 100, created: "c100",
+		sessions: map[int]string{200: "c200"},
+		seen:     map[int]processRecord{300: {pid: 300, created: "c300"}},
+	}
+	supervisorsMu.Lock()
+	supervisors[other] = true
+	supervisorsMu.Unlock()
+	t.Cleanup(func() {
+		supervisorsMu.Lock()
+		delete(supervisors, other)
+		supervisorsMu.Unlock()
+	})
+	self := os.Getpid()
+	// The other's root has exited: only what it recorded identifies its tree.
+	records := map[int]processRecord{
+		101: {pid: 101, parent: self, session: 100, created: "x"},
+		102: {pid: 102, parent: 1, session: 100, created: "x"},
+		200: {pid: 200, parent: 1, session: 200, created: "c200"},
+		201: {pid: 201, parent: self, session: 200, created: "x"},
+		300: {pid: 300, parent: self, session: 300, created: "c300"},
+		401: {pid: 401, parent: self, session: 400, created: "x"},
+	}
+	s := &processSupervisor{pid: 900, created: "c900"}
+	roots, held, live := s.otherSupervisors(records)
+	if !roots[100] {
+		t.Errorf("roots = %v, want the other's root 100", roots)
+	}
+	for pid, want := range map[int]bool{
+		101: true,  // an orphan in its root's session
+		201: true,  // an orphan in a session it recorded
+		300: true,  // an orphan its scans saw
+		102: false, // in its root's session, but not reparented to this process
+		401: false, // an orphan in a session it never knew
+	} {
+		if held[pid] != want {
+			t.Errorf("held[%d] = %v, want %v", pid, held[pid], want)
+		}
+	}
+	if live {
+		t.Error("live with the other's root gone")
+	}
+	records[100] = processRecord{pid: 100, parent: self, session: 100, created: "c100", state: "S"}
+	if _, _, live := s.otherSupervisors(records); !live {
+		t.Error("not live with the other's root running")
 	}
 }

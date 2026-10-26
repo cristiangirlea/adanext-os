@@ -148,6 +148,16 @@ func TestPreparingDeadlineFlagReachesTheExecutor(t *testing.T) {
 	}
 }
 
+func TestConcurrencyAboveOneIsRefusedOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("orphans are attributed to attempts only on Linux")
+	}
+	var output bytes.Buffer
+	if code := run(context.Background(), []string{"-state-dir", ownerOnlyDir(t), "-concurrency", "2"}, &output, &output); code != 2 || !strings.Contains(output.String(), "-concurrency above 1 is refused on Linux") {
+		t.Fatalf("run = %d: %s", code, output.String())
+	}
+}
+
 func TestNonPositivePreparingDeadlineIsRefused(t *testing.T) {
 	for _, value := range []string{"0s", "-1m"} {
 		var output bytes.Buffer

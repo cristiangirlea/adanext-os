@@ -64,3 +64,23 @@ func linkError(dir int, name string, err error) error {
 	}
 	return err
 }
+
+func openDirNoFollow(root, rel string) error {
+	dir, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: root, Err: linkError(unix.AT_FDCWD, root, err)}
+	}
+	defer func() { unix.Close(dir) }()
+	if rel == "" || rel == "." {
+		return nil
+	}
+	for _, part := range strings.Split(rel, "/") {
+		next, err := unix.Openat(dir, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return &os.PathError{Op: "open", Path: rel, Err: linkError(dir, part, err)}
+		}
+		unix.Close(dir)
+		dir = next
+	}
+	return nil
+}

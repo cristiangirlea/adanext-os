@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,24 @@ func Resolve(ctx context.Context, scratch string) (*Git, error) {
 		return nil, err
 	}
 	return g, nil
+}
+
+// checkHooks refuses unless core.hooksPath is still a real, empty directory:
+// git runs a hook found there that --no-verify does not skip.
+func (g *Git) checkHooks() error {
+	info, err := os.Lstat(g.hooks)
+	if err != nil || !info.IsDir() || isLink(g.hooks, info) {
+		return mismatch("Ada's hooks directory is not a real directory")
+	}
+	f, err := os.Open(g.hooks)
+	if err != nil {
+		return mismatch("Ada's hooks directory cannot be read")
+	}
+	defer f.Close()
+	if _, err := f.Readdirnames(1); !errors.Is(err, io.EOF) {
+		return mismatch("Ada's hooks directory is not empty")
+	}
+	return nil
 }
 
 // fixed lists, per 2.x minor release, the first patch release carrying the

@@ -77,6 +77,22 @@ func TestHelperFakeEngine(t *testing.T) {
 		}
 		script = "grandchild_hold"
 	}
+	if script == "detached_child" {
+		child := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+		child.Env = append(os.Environ(), "ADA_FAKE_ENGINE=grandchild_hold")
+		detachProcess(child)
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		for deadline := time.Now().Add(markerBound); ; time.Sleep(time.Millisecond) {
+			if data, _ := os.ReadFile(os.Getenv("ADA_FAKE_MARKER")); strings.Contains(string(data), "child:") {
+				os.Exit(0)
+			}
+			if time.Now().After(deadline) {
+				os.Exit(3)
+			}
+		}
+	}
 	if script == "orphaned_group" || script == "group_leader_exits" {
 		// The engine starts a backend group whose leader leaves a descendant
 		// behind and exits: the descendant is reparented, its group leaderless.
@@ -482,6 +498,7 @@ func TestHelperFakeEngine(t *testing.T) {
 		_ = os.MkdirAll(filepath.Join(cwd, ".claude"), 0o700)
 		_ = os.WriteFile(filepath.Join(cwd, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0o600)
 	}
+	runFakeAgentScript(script)
 	final := "done"
 	if script == "big" || script == "big_block" {
 		final = strings.Repeat("x", 100*1024)

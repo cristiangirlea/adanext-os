@@ -676,3 +676,69 @@ func TestCheckFindsAMovedOrDetachedBranchAndAReplacedImport(t *testing.T) {
 		})
 	}
 }
+
+func TestCommitAgentChangesKeepsAgentCommitsAndRefusesTampering(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	write(t, filepath.Join(dir, "README.md"), "imported\n")
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+
+	// Agent makes its own commit and leaves a working change and an ignored file.
+	write(t, filepath.Join(m.Path, ".gitignore"), "ignored.txt\n")
+	git(t, m.Path, "add", ".gitignore")
+	git(t, m.Path, "commit", "-q", "-m", "agent commit")
+	agentCommit := git(t, m.Path, "rev-parse", "HEAD")
+	write(t, filepath.Join(m.Path, "README.md"), "agent final\n")
+	write(t, filepath.Join(m.Path, "ignored.txt"), "secret\n")
+
+	row := m
+	row.Head = ""
+	tested, _, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
+	if err != nil {
+		t.Fatalf("CommitAgentChanges: %v", err)
+	}
+	if tested == m.Head || tested == agentCommit {
+		t.Fatalf("tested %s, imported %s, agent %s", tested, m.Head, agentCommit)
+	}
+	if got := git(t, m.Path, "log", "-1", "--format=%s <%ae>"); got != "Agent changes <ada@adanext.invalid>" {
+		t.Fatalf("top commit = %q", got)
+	}
+	if parent := git(t, m.Path, "rev-parse", "HEAD~1"); parent != agentCommit {
+		t.Fatalf("parent of Ada commit = %s, want agent commit %s", parent, agentCommit)
+	}
+
+	// Check worktree at tested commit excludes the ignored file, verifies tracked files, and removes cleanly.
+	wt, adminName, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", tested, m.ConfigSHA256)
+	if err != nil {
+		t.Fatalf("PrepareCheckWorktree: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(wt, "ignored.txt")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ignored file reached check worktree: %v", err)
+	}
+	unchanged, err := w.CheckTreeUnchanged(context.Background(), m.Project, m.Attempt, "run1", adminName, tested, m.ConfigSHA256)
+	if err != nil || !unchanged {
+		t.Fatalf("clean check worktree unchanged = %v, %v", unchanged, err)
+	}
+	write(t, filepath.Join(wt, "README.md"), "mutated by check\n")
+	unchanged, err = w.CheckTreeUnchanged(context.Background(), m.Project, m.Attempt, "run1", adminName, tested, m.ConfigSHA256)
+	if err != nil || unchanged {
+		t.Fatalf("mutated check worktree unchanged = %v, %v", unchanged, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(m.Path, "README.md")); string(got) != "agent final\n" {
+		t.Fatalf("attempt worktree changed to %q", got)
+	}
+	adminPath := filepath.Join(w.Root, m.Project, "repo.git", "worktrees", adminName)
+	if err := w.RemoveCheckWorktree(m.Project, m.Attempt, "run1", adminName); err != nil {
+		t.Fatalf("RemoveCheckWorktree: %v", err)
+	}
+	for _, p := range []string{wt, adminPath} {
+		if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%s still exists: %v", p, err)
+		}
+	}
+	// A second removal is idempotent.
+	if err := w.RemoveCheckWorktree(m.Project, m.Attempt, "run1", adminName); err != nil {
+		t.Fatalf("second RemoveCheckWorktree: %v", err)
+	}
+}

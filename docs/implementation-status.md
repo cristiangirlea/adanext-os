@@ -10,7 +10,7 @@ are in `docs/backlog.md`.
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100 | M4 first local workflow |
-| M4 First local workflow | in progress | Slices in `docs/backlog.md`; M4.1 (#112) code on `m4/real-engine` | M4.1 live runs (owner's plans, `cmd/ada-live`), then M4.2 |
+| M4 First local workflow | in progress | Slices in `docs/backlog.md`; M4.1 (#112) code on `m4/real-engine`; M4.2 (#114, #108) on `m4/checks` | M4.1 live runs, then M4.3 |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
 | M6 Resume intelligence | not started | | |
@@ -430,6 +430,25 @@ exit 0`), the seven desktop end-to-end tests included; `-race` ran in the Linux 
 Not done here: the live claude and codex readonly runs (`ADANEXT_LIVE=1 go run ./cmd/ada-live
 -backend claude,codex -state-dir <dir> -engine .engine/hrn.exe -adad <adad.exe>`), whose results
 file becomes this section's evidence and the live check of the #58 environment list.
+
+### M4.2 checks and Windows job termination wait (2026-10-25, #114, #108)
+
+Migration 0009 (`tasks.checks_json`, `workspaces.tested_commit`, `clone_configs`,
+`check_worktrees`, `check_baselines`, `check_results`), `PUT /v1/tasks/{id}/checks`,
+`GET /v1/tasks/{id}/checks`, `GET /v1/checks/{id}/log` (and `GET /v1/tasks/{task}/checks/{id}/log`),
+`source.CommitAgentChanges`, detached check worktrees and no-follow workdir resolution, executor
+verification against the snapshot's baseline, and process-tree exit waiting on Windows (#108) and
+Linux. The decisions are in the 2026-10-25 M4.2 entry of the decisions log and its 2026-10-26
+review fixes.
+
+Evidence at the commit that adds this section: `.hrn/check.sh` passed (`== windows exit 0, linux
+exit 0`), that is `bash scripts/check.sh` on Windows (all steps including the seven Playwright
+tests and the Windows Job Object termination wait test; `-race` left to Linux) and `go vet`,
+`go test` and `go test -race` for every package in `golang:1.26` in Docker (including the Linux
+`setsid` and double-fork daemonizing check tests).
+
+Not verified: macOS process-tree tracking beyond process groups; hosted GitHub CI until the pull
+request runs.
 
 ## Decisions log
 
@@ -1515,6 +1534,140 @@ file becomes this section's evidence and the live check of the #58 environment l
   status`: "Logged in using ChatGPT") or settings with an `apiKeyHelper`, a key or provider
   switch in `env`, an API key in codex's config or `auth.json`, and writes its results with
   identifiers masked under the state directory. `-dry-run` does everything but the start.
+
+- **2026-10-25, M4.2 checks and Windows job wait (#114, #108).** Points the backlog entry left open.
+  1. Check definition JSON shape in the task API: each entry in `task.checks` (accepted on
+     `POST /v1/tasks` and `PUT /v1/tasks/{id}/checks` under `If-Match` in `draft` or `ready`, at
+     most 16 per task) is `{"name": string, "argv": [string, ...], "workdir":
+     string, "timeout": string, "max_output_bytes": int64, "env": [string, ...]}`. `workdir` is a
+     relative slash path inside the worktree (`.` or empty for the root; `..`, absolute, drive or
+     UNC paths refused), `timeout` is a Go duration in `(0, 30m]` defaulting to `"30m0s"`,
+     `max_output_bytes` is in `(0, 16 MiB]` defaulting to `16777216`, and `env` names additional
+     environment keys to forward from `adad`'s environment (refusing credential-profile keys
+     `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and every never-passed key of #58). Updating checks bumps
+     the task's `revision`.
+  2. Check result state names: `passed`, `failed`, `timed_out`, `killed`, `not_run`, `interrupted`
+     and `changed_tree` (plus `running` while a check is in flight). A check that modifies or
+     deletes tracked files in its detached worktree is recorded as `changed_tree` with an empty
+     `bound_commit`. Stop during `verifying` kills the active check's tree (`killed`) and records
+     remaining checks as `not_run`. A coordinator restart during `verifying` moves the task to
+     `awaiting_review`, marks any in-flight check `interrupted`, and records any remaining declared
+     checks as `not_run`.
+  3. Invalidation: a check result that leaves its worktree's tracked files unchanged binds the
+     tested commit in `bound_commit` (empty when `changed_tree`, `killed`, `not_run` or
+     `interrupted`). On task and check-result reads, `invalidated` is true whenever `bound_commit`
+     is empty, differs from the current tip of `refs/heads/ada/<task>` in Ada's clone, or that tip
+     is unknown. The API reads the tip through `source.Workspaces.BranchTip` and passes it to the
+     store, which reads no ref itself.
+  4. Baseline storage: baseline runs live in `check_baselines`, keyed by
+     `UNIQUE(snapshot, definition_hash)` where `definition_hash` is the SHA-256 of the normalised
+     `CheckDefinition` JSON, with their log artifacts referenced in `artifacts` as
+     `baseline:<id>`. Each `check_results` row links to its baseline via `baseline_id`, and API
+     reads embed the baseline summary on each `CheckResult` (`baseline`) alongside `new_failure`
+     (the check failed on the tested commit while the baseline passed) and `baseline_failure`
+     (both failed).
+  5. Process-tree termination wait (#108): on Windows, `terminateAndCloseJob` queries
+     `JobObjectBasicProcessIdList`, calls `TerminateJobObject`, opens `SYNCHRONIZE` handles on the
+     assigned PIDs, waits boundedly with `WaitForSingleObject`, and polls
+     `JobObjectBasicAccountingInformation` until `ActiveProcesses == 0` before closing the job
+     handle. On Linux, the supervisor tracks the root's session, the sessions its real
+     descendants lead, and their descendants (catching `setsid` and double-fork descendants), and
+     waits boundedly until `/proc/<pid>` is gone or zombie (`Z`/`X`); the 2026-10-26 entry adds the
+     subreaper.
+
+- **2026-10-26, M4.2 review fixes (PR #115).** The first review of `b5cba52` found that checks
+  trusted files the agent can write and that Linux tracking took unrelated processes.
+  1. Ada's clone config is checked against one copy Ada writes outside the clone,
+     `<state>/projects/<id>/ada-config`, and that copy against its SHA-256 in SQLite
+     (`clone_configs`, per project, written with the workspace row). An agent or a check can
+     rewrite any file under the state directory with the user's rights, the database included,
+     so this catches a config changed by mistake, not by a determined process (the 2026-10-26
+     second-review entry, point 8). No copy is kept in the clone or in a worktree's git
+     directory.
+  2. Every git call on a worktree's git directory sets `GIT_COMMON_DIR` to the clone, and a
+     worktree whose `commondir` file does not resolve to the clone (`os.SameFile`) is refused, so
+     a repointed common dir is refused before git reads its config (a `filter` that runs on
+     `git add`).
+  3. Ada's commit stages the agent's changes through a fresh temporary index read from the
+     branch head, and a check's tracked files are compared with the tested commit through one
+     read from that commit, so nothing the agent or the check left in its own index
+     (`assume-unchanged`, `skip-worktree`, stat data) can hide a change.
+  4. Linux process trees no longer take a process for its working directory, and follow a
+     session only when a real descendant leads it (its leader's creation time recorded, so a
+     reused id is not taken). `adad` makes itself a child subreaper
+     (`PR_SET_CHILD_SUBREAPER`), so a daemon that leaves its session after its parent exits is
+     reparented to `adad`, not to init. Such an orphan (a child of `adad` outside `adad`'s own
+     session, not a supervisor's root) is taken by a closing supervisor only while no other
+     supervisor is live (one not started yet, or whose root still runs): every process `adad`
+     starts in a session of its own is a supervisor's root, so the orphan came from a
+     supervised tree, and with the plan's concurrency of one there is no doubt whose. More than
+     one attempt at once is refused on Linux (the second-review entry, point 4). `adad` reaps only tree members that exited as its own children, by pid
+     with `wait4`, never another supervisor's root (its `cmd.Wait` reaps it) and never with
+     `wait(-1)`, so no exit status `os/exec` waits for is taken.
+  5. A check Ada could not run (its worktree could not be prepared or inspected, its working
+     directory was refused, the process did not start) is `not_run`, binds nothing, and a
+     baseline run refused that way is not kept, so the next attempt runs it again. Any storage
+     error while verifying is recorded as an `executor_error` event, the checks without a
+     result are recorded `not_run`, and the task still moves to `awaiting_review`.
+  6. Each check result and baseline records the environment's keys (never values) and the
+     duration in milliseconds. `GORACE` no longer reaches a check.
+  7. `POST /v1/tasks/{id}/cancel` during `verifying` asks the executor to kill the running check
+     and record the rest as not run. The refine route and `refinement -> ready` are not in this
+     slice: M4.3 builds refine. `GET /v1/tasks/{task}/checks/{id}/log` serves only that task's
+     runs and the baselines they were compared with.
+  8. Not fixed here: the UI's statement that checks run unsandboxed, where checks are declared
+     and where their results are shown, lands with M4.4, which builds the UI.
+
+- **2026-10-26, M4.2 second review (PR #115).** The re-review of `7b00cd5` confirmed the first
+  review's fixes and found these.
+  1. Ada's hooks directory (`core.hooksPath`, `<state>/git/hooks`) must be a real, empty
+     directory, not a link, at the start of each operation that runs git on the clone or a
+     worktree (a sync and the Prepare that follows it, Ada's commit, a check worktree's
+     preparation and inspection): git runs hooks from it that `--no-verify` does not skip
+     (`post-index-change`, `reference-transaction`, `post-commit`, `post-checkout`). Otherwise
+     the operation is refused as a workspace mismatch. The directory is shared by all projects:
+     at the default concurrency of one no engine or check runs in between; with more at once
+     (Windows, macOS) another project's process could plant a hook in between, which is within
+     point 8's limit.
+  2. `source.CommitAgentChanges` returns the imported-changes commit it verified with the
+     tested commit; the executor no longer reads it from the agent's worktree git directory.
+  3. Only `git diff`'s exit 1 makes a check `changed_tree`; a worktree, git directory or config
+     the check moved or changed still does. Any other failure of Ada's own git calls while
+     inspecting a check's worktree is an error: the run is `not_run` and never kept as a
+     baseline.
+  4. `adad` refuses `-concurrency` above 1 on Linux. An orphan that leaves its session (a
+     `setsid` daemon from one attempt's engine) can't yet be told to belong to one attempt
+     rather than another, and could outlive that attempt's supervisor and run during its commit
+     and checks. Raising the limit waits for that attribution.
+  5. After its deadline, waiting for a Linux tree makes one more non-blocking `wait4` pass over
+     every member, so one stuck process leaks no zombies. A failed `PR_SET_CHILD_SUBREAPER` is
+     reported, and the engine or check does not start.
+  6. Mutation responses mark any check result they carry against the branch tip, as GET does.
+  7. Tests added for the clone as `GIT_COMMON_DIR` in a worktree's git calls, and for the
+     `executor_error` event a storage error while verifying records.
+  8. The trust boundary, stated as it is. A check or an agent runs with the user's rights and
+     can still write the state directory: `adanext.db`, the clone's objects and refs, Ada's
+     hooks directory, and Ada's copies of the clone config. M4's checks of the clone config, the
+     hooks directory, the worktrees and the trees therefore catch tampering by mistake or by a
+     careless agent, not by a determined one. The real boundary is the M5 guest: as
+     `docs/plan.md` section 4 says, a worktree is a development boundary, not protection
+     against hostile code. The title of commit `7b00cd5` ("checks trust nothing the agent can
+     write") claims more than this and is read with this limit.
+
+- **2026-10-26, M4.2 CI failure (PR #115).** `TestExitedEngineWithDescendantStderrEndsOK` failed
+  on GitHub's runner: the info event for a descendant holding stderr after the engine exited was
+  missing. Another test's attempt, closing at the same moment, had killed that descendant. The
+  descendant was reparented to `adad` in its own engine's session, and the first review's
+  orphan rule (point 4) let any closing supervisor take it once the owning supervisor's root
+  had exited, though that supervisor was still open, waiting for the engine's stderr. The rule
+  now also leaves an orphan to any open supervisor that holds it: in its root's session, in a
+  session it recorded, or seen by its scans. A descendant that left its session before its
+  supervisor ever scanned stays the limit of the second review's point 4, which keeps Linux at
+  one attempt at a time. Under that limit no two supervisors are open at once in `adad`, so only
+  the tests, many executors in one process, met the fault. Reproduced in Docker with two CPUs,
+  `-race -cpu=1,2 -count=8` over the package's parallel tests: 6 failures in 16 runs before the
+  fix, none after; `TestASupervisorLeavesAnotherTreesOrphanInItsSessionToThatTree` fails before
+  it.
 
 ## Owner actions pending
 

@@ -165,7 +165,7 @@ func TestAVersionFourStoreMigratesForwardKeepingItsProjects(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	path := s.path
-	for _, query := range []string{"ALTER TABLE attempts DROP COLUMN max_turns", "ALTER TABLE attempts DROP COLUMN timeout", "ALTER TABLE attempts DROP COLUMN provider_changes", "DROP TABLE snapshot_paths", "DROP TABLE workspaces", "ALTER TABLE tasks DROP COLUMN snapshot", "DROP TABLE snapshot_untracked", "DROP TABLE source_snapshots", "DROP TABLE project_sources", "DELETE FROM schema_migrations WHERE version>=5", "PRAGMA user_version=4"} {
+	for _, query := range []string{"DROP TABLE check_results", "DROP TABLE check_baselines", "DROP TABLE check_worktrees", "DROP TABLE clone_configs", "ALTER TABLE workspaces DROP COLUMN tested_commit", "ALTER TABLE tasks DROP COLUMN checks_json", "ALTER TABLE attempts DROP COLUMN max_turns", "ALTER TABLE attempts DROP COLUMN timeout", "ALTER TABLE attempts DROP COLUMN provider_changes", "DROP TABLE snapshot_paths", "DROP TABLE workspaces", "ALTER TABLE tasks DROP COLUMN snapshot", "DROP TABLE snapshot_untracked", "DROP TABLE source_snapshots", "DROP TABLE project_sources", "DELETE FROM schema_migrations WHERE version>=5", "PRAGMA user_version=4"} {
 		execute(t, s, query)
 	}
 	if err := s.Close(); err != nil {
@@ -177,7 +177,7 @@ func TestAVersionFourStoreMigratesForwardKeepingItsProjects(t *testing.T) {
 	}
 	defer upgraded.Close()
 	var version int
-	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 8 {
+	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 9 {
 		t.Fatalf("version %d: %v", version, err)
 	}
 	if _, err := upgraded.ProjectSource(ctx, "u", "p"); !errors.Is(err, ErrNoSource) {
@@ -233,7 +233,7 @@ func TestAVersionSixStoreMigratesForwardWithItsSnapshotsAndWorkspacesUnbound(t *
 		t.Fatal(err)
 	}
 	path := s.path
-	for _, query := range []string{"ALTER TABLE attempts DROP COLUMN max_turns", "ALTER TABLE attempts DROP COLUMN timeout", "ALTER TABLE attempts DROP COLUMN provider_changes", "ALTER TABLE source_snapshots DROP COLUMN provider_configuration", "DROP TABLE snapshot_paths", "ALTER TABLE source_snapshots DROP COLUMN branch", "ALTER TABLE workspaces DROP COLUMN task_revision",
+	for _, query := range []string{"DROP TABLE check_results", "DROP TABLE check_baselines", "DROP TABLE check_worktrees", "DROP TABLE clone_configs", "ALTER TABLE workspaces DROP COLUMN tested_commit", "ALTER TABLE tasks DROP COLUMN checks_json", "ALTER TABLE attempts DROP COLUMN max_turns", "ALTER TABLE attempts DROP COLUMN timeout", "ALTER TABLE attempts DROP COLUMN provider_changes", "ALTER TABLE source_snapshots DROP COLUMN provider_configuration", "DROP TABLE snapshot_paths", "ALTER TABLE source_snapshots DROP COLUMN branch", "ALTER TABLE workspaces DROP COLUMN task_revision",
 		"ALTER TABLE workspaces DROP COLUMN ownership_generation", "DELETE FROM schema_migrations WHERE version>=7", "PRAGMA user_version=6"} {
 		execute(t, s, query)
 	}

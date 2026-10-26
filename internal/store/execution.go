@@ -171,6 +171,11 @@ func (s *Store) BumpAndRecover(ctx context.Context) (int64, []string, error) {
 		}
 		recovered = append(recovered, a.id)
 	}
+	verifyingRecovered, err := recoverVerifyingTasks(ctx, tx, generation)
+	if err != nil {
+		return 0, nil, err
+	}
+	recovered = append(recovered, verifyingRecovered...)
 	if err := tx.Commit(); err != nil {
 		return 0, nil, err
 	}

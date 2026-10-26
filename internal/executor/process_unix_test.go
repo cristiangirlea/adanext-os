@@ -18,6 +18,10 @@ func newBackendSupervisor(cmd *exec.Cmd) (*processSupervisor, error) {
 	return &processSupervisor{signal: syscall.Kill}, nil
 }
 
+func detachProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
+
 // startSupervised starts the fake engine under a supervisor, as run does.
 func startSupervised(t *testing.T, script string) (*exec.Cmd, *processSupervisor, string, <-chan struct{}) {
 	t.Helper()
@@ -39,6 +43,9 @@ func startSupervised(t *testing.T, script string) (*exec.Cmd, *processSupervisor
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		<-waited
+		// Closed, so no later test's scan meets what this tree held.
+		s.signal = syscall.Kill
+		s.close()
 	})
 	return cmd, s, marker, waited
 }
@@ -86,4 +93,10 @@ func TestAKillOfAPidNoLongerTheEngineSignalsNoGroup(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the engine survived the fallback kill")
 	}
+}
+
+// setsidSelf starts a session of the calling process's own.
+func setsidSelf() error {
+	_, err := syscall.Setsid()
+	return err
 }
