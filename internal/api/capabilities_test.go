@@ -48,7 +48,7 @@ func TestCapabilitiesAreServedToAccountsWithoutPathsOrSecrets(t *testing.T) {
 	if got := cell("claude", "readonly", engine.RowReadOnly); got.Status != engine.Requested {
 		t.Fatalf("claude's recorded version: %+v", got)
 	}
-	if got := cell("codex", "readonly", engine.RowReadOnly); got.Status != engine.Unverified || got.Recorded != engine.Requested {
+	if got := cell("codex", "readonly", engine.RowReadOnly); got.Status != engine.Unverified || got.Recorded != engine.Enforced {
 		t.Fatalf("codex not found: %+v", got)
 	}
 	for _, leak := range []string{`:\\`, "/home/", "/Users/", "probe-secret", "\"modes\":[\"readonly\",\"auto\",\"yolo\"],\"options\""} {
