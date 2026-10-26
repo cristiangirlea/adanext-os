@@ -1621,10 +1621,14 @@ request runs.
 - **2026-10-26, M4.2 second review (PR #115).** The re-review of `7b00cd5` confirmed the first
   review's fixes and found these.
   1. Ada's hooks directory (`core.hooksPath`, `<state>/git/hooks`) must be a real, empty
-     directory, not a link, before each of Ada's git calls on the clone and its worktrees and
-     before a sync: git runs hooks from it that `--no-verify` does not skip (`post-index-change`,
-     `reference-transaction`, `post-commit`, `post-checkout`). Otherwise the call is refused as a
-     workspace mismatch.
+     directory, not a link, at the start of each operation that runs git on the clone or a
+     worktree (a sync and the Prepare that follows it, Ada's commit, a check worktree's
+     preparation and inspection): git runs hooks from it that `--no-verify` does not skip
+     (`post-index-change`, `reference-transaction`, `post-commit`, `post-checkout`). Otherwise
+     the operation is refused as a workspace mismatch. The directory is shared by all projects:
+     at the default concurrency of one no engine or check runs in between; with more at once
+     (Windows, macOS) another project's process could plant a hook in between, which is within
+     point 8's limit.
   2. `source.CommitAgentChanges` returns the imported-changes commit it verified with the
      tested commit; the executor no longer reads it from the agent's worktree git directory.
   3. Only `git diff`'s exit 1 makes a check `changed_tree`; a worktree, git directory or config

@@ -157,17 +157,27 @@ func TestCommitAgentChangesTakesAChangeTheAgentsIndexHides(t *testing.T) {
 
 func TestAPlantedOrLinkedHooksDirectoryIsRefusedBeforeAnyGitRuns(t *testing.T) {
 	t.Parallel()
-	for _, plant := range []string{"hook", "link"} {
+	for _, plant := range []string{"hook", "link", "file"} {
 		t.Run(plant, func(t *testing.T) {
 			t.Parallel()
 			dir := newRepo(t, nil)
 			w := newWorkspaces(t)
 			m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+			_, admin, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run0", m.Head, m.ConfigSHA256)
+			if err != nil {
+				t.Fatal(err)
+			}
 			write(t, filepath.Join(m.Path, "README.md"), "agent change\n")
 			marker := filepath.Join(tempDir(t), "hook-ran")
 			hooks := w.Inspector.Git.hooks
 			target := hooks
-			if plant == "link" {
+			switch plant {
+			case "file":
+				if err := os.Remove(hooks); err != nil {
+					t.Fatal(err)
+				}
+				write(t, hooks, "not a directory\n")
+			case "link":
 				target = tempDir(t)
 				if err := os.Remove(hooks); err != nil {
 					t.Fatal(err)
@@ -181,7 +191,8 @@ func TestAPlantedOrLinkedHooksDirectoryIsRefusedBeforeAnyGitRuns(t *testing.T) {
 				}
 			}
 			// Hooks that --no-verify does not skip, on every git call Ada makes
-			// here; a link is refused even to an empty directory.
+			// here; a link is refused even to an empty directory, and a file
+			// is no directory at all.
 			for _, name := range []string{"post-index-change", "reference-transaction", "post-commit", "post-checkout"} {
 				if plant != "hook" {
 					break
@@ -200,6 +211,9 @@ func TestAPlantedOrLinkedHooksDirectoryIsRefusedBeforeAnyGitRuns(t *testing.T) {
 			}
 			if _, err := prepareCapture(w, dir, mustCapture(t, w.Inspector, dir), "2"); err == nil {
 				t.Error("Prepare synced with a planted hooks directory")
+			}
+			if unchanged, err := w.CheckTreeUnchanged(context.Background(), m.Project, m.Attempt, "run0", admin, m.Head, m.ConfigSHA256); err != nil || unchanged {
+				t.Errorf("CheckTreeUnchanged with a planted hooks directory = %v, %v, want false, nil", unchanged, err)
 			}
 			if data, err := os.ReadFile(marker); !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("a hook ran: %q, %v", data, err)
@@ -240,6 +254,25 @@ func TestCheckTreeUnchangedReturnsAdasOwnGitErrors(t *testing.T) {
 	unchanged, err := w.CheckTreeUnchanged(ctx, m.Project, m.Attempt, "run1", admin, m.Head, m.ConfigSHA256)
 	if err == nil {
 		t.Fatalf("a git call that never ran: unchanged = %v, no error", unchanged)
+	}
+}
+
+func TestCheckTreeUnchangedReadsARemovedWorktreeAsChanged(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	wt, admin, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", m.Head, m.ConfigSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The check removed its own worktree: a change, not Ada's own error.
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := w.CheckTreeUnchanged(context.Background(), m.Project, m.Attempt, "run1", admin, m.Head, m.ConfigSHA256)
+	if err != nil || unchanged {
+		t.Fatalf("a removed worktree: unchanged = %v, %v, want false, nil", unchanged, err)
 	}
 }
 
