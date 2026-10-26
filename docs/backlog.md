@@ -398,37 +398,54 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   directory; a crash between the removal steps finishes on the next try.
 - [ ] **M4.4a UI foundation.** The base the workspace UI is built on, in `ui/`, with no new
   dependency in `package.json`.
-  Tokens. CSS custom properties in tiers: five background levels (bg, sidebar, surface,
-  elevated, overlay); border and text in three strengths each; an accent with `-text`, `-dim`
-  and `-fg`; status colours (success, warning, danger, info), each with a `-dim`; `chart-1` to
-  `chart-8`; a 4-point space scale; a z-index scale; named durations of 90, 120, 140, 180, 280
-  and 350 ms with one easing, `cubic-bezier(.22,1,.36,1)`. The CSS is split by concern into
-  small files, never one large global file mixed with inline styles.
-  Themes. Ada's light slate default and a dark "workshop" preset as the second theme. They
-  switch through data attributes on `<html>`, set before first paint by a tiny inline script
-  that reads the saved choice, so the wrong palette never flashes. No theme switches itself on.
-  Contrast. A script, run by `scripts/check.sh` (so CI runs it), checks WCAG AA for every text
-  and background pair of every theme: 4.5:1 for text, 3:1 for large text and UI parts.
-  Motion. 150 to 350 ms, transform and opacity only, and nothing loops while the system is
+  Tokens. CSS custom properties in tiers: five background levels (bg, sidebar, surface, elevated,
+  overlay); border and text in three strengths each; an accent with `-text`, `-dim` and `-fg`;
+  status colours (success, warning, danger, info), each with a `-dim`; `chart-1` to `chart-8`; a
+  4-point space scale; a z-index scale; named durations of 90, 120, 140, 180, 280 and 350 ms with
+  one easing, `cubic-bezier(.22,1,.36,1)`. The CSS is split by concern into small files, never one
+  large global file mixed with inline styles.
+  Themes. Ada's light slate default and a dark "workshop" preset as the second theme. They switch
+  through data attributes on `<html>`, set before first paint by a small classic script file
+  (`ui/public/theme-boot.js`, loaded without `type="module"`, `defer` or `async` in `<head>`
+  before any stylesheet), so the CSP stays `script-src 'self'` with no inline script,
+  `'unsafe-inline'` or hash exception. It reads the saved choice from `localStorage` (the theme is
+  a per-device preference, not an `adad` setting) and falls back to the light default, so the
+  wrong palette never flashes. No theme switches itself on.
+  Contrast. A script, run by `scripts/check.sh` (so CI runs it), reads the theme token files and a
+  declared list of foreground/background token pairs kept beside them (text strengths, accent
+  `-text` and `-fg`, each status colour on its backgrounds, focus ring and borders as UI parts),
+  and checks WCAG AA for each pair in every theme, plain Node with no new dependency: 4.5:1 for
+  text, 3:1 for large text and UI parts.
+  Motion. Only the named durations (90 to 140 ms for hover and press feedback, 180 to 350 ms for
+  movement and entrances), transform and opacity only, and nothing loops while the system is
   healthy. A skeleton shaped like the content while it loads; a spinner only on a button just
   pressed (`aria-busy`). One kill switch, `body[data-motion="off"]`, beside
   `prefers-reduced-motion`.
-  Effects. One registry: every effect declares what it does under reduced motion (`static`,
-  `off` or `unchanged`), so later effects obey the same switch. No effect switches itself on.
-  Command palette. Ctrl+P opens it: scope chips (all, project, task, action), Recent, Quick
-  actions, and key hints in the footer. A combobox and listbox with `aria-activedescendant` and
-  a live status line. Data is loaded lazily per scope through `AdaClient`, not all at once when
-  it opens. A native `<dialog>`, written by hand.
-  Resize handle. One component, shared by the work-area panes and the drawers: 4 edges at 6 px
-  and 4 corners at 12 px, ARIA separator semantics, and resizable from the keyboard too (arrow
-  keys by a step, Home and End to the limits).
+  Effects. One registry: every effect declares what it does under reduced motion (`static`, `off`
+  or `unchanged`), so later effects obey the same switch. No effect switches itself on.
+  Command palette. Ctrl+P opens it (the browser's print default prevented): scope chips (all,
+  project, task, action), Recent, Quick actions, and key hints in the footer. A combobox and
+  listbox with `aria-activedescendant` and a live status line. Data is loaded lazily per scope
+  through the `AdaClient` methods that exist today, not all at once when it opens: tasks from
+  `listTasks` when the task scope (or "all") is first shown, projects as the distinct `project`
+  ids of those tasks, and actions defined locally. No `AdaClient`, bridge or `/v1` change in this
+  slice; a project list endpoint comes with M4.4b if it needs one. A native `<dialog>`, written by
+  hand.
+  Resize handle. One component, shared by the work-area panes and the drawers: 4 edges at 6 px and
+  4 corners at 12 px, ARIA separator semantics, and resizable from the keyboard too (arrow keys by
+  a step, Home and End to the limits).
   Avoid: very large components, parallel effect systems, a minimum boot-screen time.
-  Acceptance: Vitest for the theme switch (the attribute set before paint; the saved choice
-  honoured), the contrast script (fails on a pair below AA, passes the shipped themes, wired
-  into `check.sh`), the motion switch (`data-motion="off"` and reduced motion stop every
-  registered effect as it declares), the palette (keyboard navigation, `aria-activedescendant`,
-  scope chips, lazy loading, the live status), and the resize handle (mouse and keyboard,
-  limits); an accessibility pass; no new dependency in `package.json`.
+  Read the frontend-design skill first.
+  Acceptance: Vitest for the theme switch (`index.html` loads the boot script as a blocking
+  classic script in `<head>` before any stylesheet or module, and its CSP is unchanged; the script
+  sets the attributes from the saved choice, falls back to light when nothing or something invalid
+  is saved, and the in-app switch saves the choice), the contrast script (fails on a pair below
+  AA, passes the shipped themes, wired into `check.sh`), the motion switch (`data-motion="off"`
+  and reduced motion stop every registered effect as it declares), the palette (keyboard
+  navigation, `aria-activedescendant`, scope chips, Ctrl+P's default prevented, lazy loading (no
+  AdaClient call until a scope needs it; nothing outside the existing methods), the live status),
+  and the resize handle (mouse and keyboard, limits); an accessibility pass; no new dependency in
+  `package.json`.
 - [ ] **M4.4b The workspace UI.** Builds on M4.4a: its tokens, themes, motion rules, effect
   registry, palette and resize handle. The plan's practical layout (`docs/plan.md` section 3) in `ui/`,
   through `AdaClient` only. Left navigation: projects and active tasks. Main area: the task and

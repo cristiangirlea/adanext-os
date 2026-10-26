@@ -1718,6 +1718,7 @@ request runs.
   for a UI foundation in M4.4: "tokens, durations, motion switch, effect registry, contrast
   check, Ctrl+P palette, resize handle, light default plus dark workshop preset". M4.4 is split
   in two. M4.4a UI foundation lands the token tiers, the two themes switched before first paint,
+  by a blocking script file in `<head>`, so the CSP keeps `script-src 'self'`,
   a WCAG AA contrast script run by `scripts/check.sh`, the motion rules with one kill switch
   beside `prefers-reduced-motion`, one effect registry, the Ctrl+P command palette and one
   resize-handle component. M4.4b The workspace UI is the earlier M4.4 text, built on M4.4a.
