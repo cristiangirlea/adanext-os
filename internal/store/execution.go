@@ -39,7 +39,19 @@ func (s *Store) AttemptPrompt(ctx context.Context, attemptID string) (string, er
 	if err != nil {
 		return "", err
 	}
-	return objective + "\n\nAcceptance criteria:\n" + criteria, nil
+	prompt := objective + "\n\nAcceptance criteria:\n" + criteria
+	var refines sql.NullString
+	if err := s.db.QueryRowContext(ctx, "SELECT refines FROM attempts WHERE id=?", attemptID).Scan(&refines); err != nil {
+		return "", err
+	}
+	if !refines.Valid {
+		return prompt, nil
+	}
+	findings, err := refineFindings(ctx, s.db, attemptID)
+	if err != nil {
+		return "", err
+	}
+	return refinePrompt(prompt, findings), nil
 }
 
 func (s *Store) PendingAttempts(ctx context.Context, generation int64) ([]Attempt, error) {

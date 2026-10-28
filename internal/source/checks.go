@@ -334,7 +334,10 @@ func removeTreeNoFollow(path string) error {
 		return err
 	}
 	if isLink(path, info) || !info.IsDir() {
-		_ = os.Chmod(path, 0o600)
+		// Chmod follows a link, so only a real file loses a read-only bit first.
+		if !isLink(path, info) && info.Mode().IsRegular() {
+			_ = os.Chmod(path, 0o600)
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}

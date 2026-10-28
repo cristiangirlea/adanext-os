@@ -337,6 +337,10 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT project,sha256,updated FROM clone_configs LIMIT 0",
 		"SELECT project,attempt,run_id,admin_name,created FROM check_worktrees LIMIT 0",
 		"SELECT id,project,snapshot,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,env_keys,duration_ms,started_at,ended_at FROM check_baselines LIMIT 0",
+		"SELECT refines FROM attempts LIMIT 0",
+		"SELECT imported_commit,removed FROM workspaces LIMIT 0",
+		"SELECT id,task,attempt,author,body,created FROM findings LIMIT 0",
+		"SELECT id,task,attempt,reviewer,decision,reviewed_commit,ownership_generation,checks_json,created FROM reviews LIMIT 0",
 		"SELECT id,task,attempt,ord,name,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,baseline_id,env_keys,duration_ms,started_at,ended_at FROM check_results LIMIT 0",
 	} {
 		rows, err := s.db.QueryContext(ctx, query)

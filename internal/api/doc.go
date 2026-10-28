@@ -107,4 +107,31 @@
 // still write Ada's state directory, so a result catches a tree changed by
 // mistake or by a careless agent, not by a determined one; the M5 guest is
 // the boundary against hostile code.
+//
+// Changes and review (M4.3). GET /v1/tasks/{id}/changes is the diff from the
+// task's imported-changes commit ("base") to its newest agent-changes commit
+// ("commit"), read from Ada's clone with --no-ext-diff --no-textconv -z and
+// rename threshold 50%: per file its status, modes, binary mark, counts,
+// patch and provider mark, at most 1000 files, 512 KiB per patch and 8 MiB in
+// all, each cut marked (files_truncated, patch_truncated, bytes_truncated). A
+// path is the bytes git reported: the JSON string when they are UTF-8, else
+// also path_raw in base64 (patch_raw likewise). "tip" and "stale" compare it
+// with the branch, "generation" is the coordinator's, and both go back in an
+// accept. GET /v1/tasks/{id}/files?path= lists a directory (5000 entries) or
+// reads a file (1 MiB) of that commit through ls-tree and cat-file; a symlink
+// is shown with its stored target and never followed. Both answer 404 to a
+// non-member and 409 no_changes before any agent-changes commit.
+// POST /v1/tasks/{id}/findings ({"body"}) is any member's note on the attempt
+// the task shows; GET lists them. POST /v1/tasks/{id}/accept (If-Match,
+// {"commit","generation"}) is for the attempt's actor or a project owner
+// (403 otherwise), from awaiting_review, and records the commit, the check
+// results and the generation; one that is no longer current is 409
+// stale_review. POST /v1/tasks/{id}/refine (If-Match, a start's body plus
+// acknowledge_provider_changes) is for the same people, from awaiting_review,
+// failed or canceled: an attempt whose provider configuration changed answers
+// 409 provider_configuration_changed with the changes until acknowledged; an
+// attempt not ended is attempt_active, one recovery_required refuses it. Each
+// earlier attempt's remaining changes are committed and its worktree removed,
+// then the requester's attempt is queued on ada/<task> with the findings in
+// its prompt; a refused or interrupted refine can be sent again.
 package api

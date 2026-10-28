@@ -220,13 +220,9 @@ func TestCancelDuringVerifyingAsksTheExecutorToStopTheChecks(t *testing.T) {
 	}
 }
 
-func TestThisSliceOffersNoRefine(t *testing.T) {
+func TestATaskInTheUnusedRefinementStateCannotBeReadied(t *testing.T) {
 	f := newFixture(t)
 	id := create(t, f, "create-review", "review")["id"].(string)
-	setTaskState(t, f, id, store.AwaitingReview, 2)
-	if code, body := f.request(t, "POST", "/v1/tasks/"+id+"/refine", "refine", "2", nil); code == 200 {
-		t.Fatalf("refine = %d %s, want no such route", code, body)
-	}
 	setTaskState(t, f, id, store.Refinement, 2)
 	if code, body := f.request(t, "POST", "/v1/tasks/"+id+"/ready", "ready-from-refinement", "2", nil); code == 200 {
 		t.Fatalf("ready from refinement = %d %s, want refused", code, body)

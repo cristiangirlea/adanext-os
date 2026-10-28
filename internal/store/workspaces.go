@@ -76,15 +76,17 @@ type Workspace struct {
 	ManifestVersion                                            int
 	TaskRevision, Generation                                   int64
 	ManifestHash, Executor, Policy, Created                    string
+	// ImportedCommit is the task's imported-changes commit, carried from attempt to attempt.
+	ImportedCommit string
 }
 
-const workspaceColumns = "attempt,project,task,snapshot,base_commit,branch,path,manifest_version,task_revision,ownership_generation,manifest_hash,executor,policy,created"
+const workspaceColumns = "attempt,project,task,snapshot,base_commit,branch,path,manifest_version,task_revision,ownership_generation,manifest_hash,executor,policy,created,imported_commit"
 
 // RecordWorkspace records an attempt's prepared worktree; an attempt has one.
 func (tx *Tx) RecordWorkspace(ctx context.Context, w Workspace) (Workspace, error) {
 	w.Created = now()
-	_, err := tx.tx.ExecContext(ctx, "INSERT INTO workspaces("+workspaceColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-		w.Attempt, w.Project, w.Task, w.Snapshot, w.BaseCommit, w.Branch, w.Path, w.ManifestVersion, w.TaskRevision, w.Generation, w.ManifestHash, w.Executor, w.Policy, w.Created)
+	_, err := tx.tx.ExecContext(ctx, "INSERT INTO workspaces("+workspaceColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		w.Attempt, w.Project, w.Task, w.Snapshot, w.BaseCommit, w.Branch, w.Path, w.ManifestVersion, w.TaskRevision, w.Generation, w.ManifestHash, w.Executor, w.Policy, w.Created, w.ImportedCommit)
 	return w, err
 }
 
@@ -93,7 +95,7 @@ func (s *Store) Workspace(ctx context.Context, attemptID string) (Workspace, err
 	var w Workspace
 	var revision, generation sql.NullInt64
 	err := s.db.QueryRowContext(ctx, "SELECT "+workspaceColumns+" FROM workspaces WHERE attempt=?", attemptID).Scan(
-		&w.Attempt, &w.Project, &w.Task, &w.Snapshot, &w.BaseCommit, &w.Branch, &w.Path, &w.ManifestVersion, &revision, &generation, &w.ManifestHash, &w.Executor, &w.Policy, &w.Created)
+		&w.Attempt, &w.Project, &w.Task, &w.Snapshot, &w.BaseCommit, &w.Branch, &w.Path, &w.ManifestVersion, &revision, &generation, &w.ManifestHash, &w.Executor, &w.Policy, &w.Created, &w.ImportedCommit)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Workspace{}, ErrNotFound
 	}

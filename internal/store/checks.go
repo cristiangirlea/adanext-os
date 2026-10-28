@@ -463,7 +463,11 @@ func (a *TaskAttempt) AtTip(tip string) {
 // attemptCheckResults reads an attempt's results; with no tip known yet, each
 // reads invalidated until AtTip or CheckResults marks it.
 func (s *Store) attemptCheckResults(ctx context.Context, attemptID string) ([]CheckResult, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT
+	return attemptCheckResultsQ(ctx, s.db, attemptID)
+}
+
+func attemptCheckResultsQ(ctx context.Context, q querier, attemptID string) ([]CheckResult, error) {
+	rows, err := q.QueryContext(ctx, `SELECT
 		r.id,r.task,r.attempt,r.ord,r.name,r.definition_hash,r.definition_json,r.tested_commit,r.bound_commit,r.state,r.exit_code,r.output_artifact,r.output_size,r.output_truncated,r.baseline_id,r.env_keys,r.duration_ms,r.started_at,r.ended_at,
 		COALESCE(b.id,''),COALESCE(b.snapshot,''),COALESCE(b.state,''),b.exit_code,COALESCE(b.tested_commit,''),COALESCE(b.bound_commit,''),COALESCE(b.output_size,0),COALESCE(b.output_truncated,0)
 		FROM check_results r

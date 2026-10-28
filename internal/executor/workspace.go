@@ -47,17 +47,35 @@ func (e *Executor) prepare(a store.Attempt, active *active, scratch string) (str
 	if e.cfg.Workspaces == nil {
 		return "", false, errors.New("git is unavailable, so no workspace can be prepared")
 	}
-	changes, err := e.snapshotChanges(*src.Snapshot)
+	var m source.Manifest
+	var imported string
+	cont, continued, err := e.cfg.Store.Continuation(ctx, a.ID)
 	if err != nil {
 		return "", false, err
 	}
-	m, err := e.cfg.Workspaces.Prepare(ctx, src.SourcePath, e.expectedManifest(a, src), changes)
-	if err != nil {
-		return "", false, err
+	if continued {
+		// A refine continues on the task's branch from the earlier attempt's commit.
+		m = e.expectedManifest(a, src)
+		if m.ConfigSHA256, err = e.cfg.Store.CloneConfig(ctx, src.Project); err != nil {
+			return "", false, err
+		}
+		if m, err = e.cfg.Workspaces.Continue(ctx, m, cont.Tip); err != nil {
+			return "", false, err
+		}
+		imported = cont.ImportedCommit
+	} else {
+		changes, err := e.snapshotChanges(*src.Snapshot)
+		if err != nil {
+			return "", false, err
+		}
+		if m, err = e.cfg.Workspaces.Prepare(ctx, src.SourcePath, e.expectedManifest(a, src), changes); err != nil {
+			return "", false, err
+		}
+		imported = m.Head
 	}
 	err = e.owned(a.ID, func(tx *store.Tx) error {
 		if _, err := tx.RecordWorkspace(ctx, store.Workspace{Attempt: m.Attempt, Project: m.Project, Task: m.Task, Snapshot: m.Snapshot, BaseCommit: m.BaseCommit,
-			Branch: m.Branch, Path: m.Path, ManifestVersion: m.Version, TaskRevision: m.TaskRevision, Generation: m.Generation, ManifestHash: m.Hash(), Executor: m.Executor, Policy: m.Policy}); err != nil {
+			Branch: m.Branch, Path: m.Path, ManifestVersion: m.Version, TaskRevision: m.TaskRevision, Generation: m.Generation, ManifestHash: m.Hash(), Executor: m.Executor, Policy: m.Policy, ImportedCommit: imported}); err != nil {
 			return err
 		}
 		return tx.RecordCloneConfig(ctx, m.Project, m.ConfigSHA256)

@@ -85,6 +85,8 @@ type Workspaces struct {
 	// AfterSync is a test seam run after each sync under the project's lock,
 	// telling a clone from a fetch.
 	AfterSync func(ctx context.Context, cloned bool)
+	// afterWorktreeRemoved is a test seam between RemoveWorktree's two steps, a crash there.
+	afterWorktreeRemoved func() error
 }
 
 func (w *Workspaces) repo(project string) string {

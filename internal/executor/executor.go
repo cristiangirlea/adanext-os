@@ -167,6 +167,19 @@ func (e *Executor) CancelTask(taskID string) {
 	}
 }
 
+// TaskActive reports whether an attempt of the task is still in a run: launching, running,
+// verifying, or tearing down its engine's tree after its end was recorded.
+func (e *Executor) TaskActive(taskID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, a := range e.active {
+		if a.task == taskID {
+			return true
+		}
+	}
+	return false
+}
+
 // StopWork launches nothing more and asks every active attempt to cancel;
 // Stop also waits for them. The owner's stop records its reason on every
 // running and queued attempt first (store.Tx.StopWork), then calls this.
