@@ -1,69 +1,67 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
-import { AdaError, type AdaClient, type AttemptEvent, type ExecutionPolicy, type Task, type TaskState, type StopResult } from "./client/api";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { AdaError, type AdaClient, type AttemptEvent, type Capabilities, type Changes, type ExecutionPolicy, type NewTask, type Task, type TaskState, type StopResult } from "./client/api";
 import { setMotion, useMotionOn } from "./motion/effects";
-import { BusyButton, Skeleton } from "./motion/parts";
+import { BusyButton } from "./motion/parts";
 import { CommandPalette, type QuickAction } from "./palette/CommandPalette";
 import { ResizeHandle } from "./resize/ResizeHandle";
 import { currentTheme, setTheme, themeNames, themes, type Theme } from "./theme/theme";
+import { Activity } from "./workspace/Activity";
+import { ErrorLine, shown, type Shown } from "./workspace/errors";
+import { ImportFlow } from "./workspace/ImportFlow";
+import { Nav } from "./workspace/Nav";
+import { defaultPolicy } from "./workspace/policy";
+import { PolicyPicker } from "./workspace/PolicyPicker";
+import { Review } from "./workspace/Review";
+import { TaskForm } from "./workspace/TaskForm";
+import { WorkArea } from "./workspace/WorkArea";
 
-// The one view of M2.4: the task list with each task's state, and the selected task's attempt
-// events streaming in. The layout of docs/plan.md section 3 comes with M4.
+// The workspace (plan section 3, "Workspace UI"): projects and tasks on the left, the selected
+// task with its review and activity in the middle, its changes, checks and files in a resizable
+// work area on the right, and the status bar along the bottom.
 //
 // The coordinator owns a task's state and revision: once started, the executor moves it on its
 // own, and an engine event says nothing authoritative about the task. So the view reads the task
 // back (getTask) whenever its stream delivers or reconnects, after a stale-revision refusal, and
 // on a poll while any task is in a state the executor advances by itself.
 
-interface Shown {
-  code: string;
-  message: string;
-  requestId?: string;
-}
-
-const described: Record<string, string> = {
-  coordinator_unreachable: "coordinator unreachable: adad is not running, or the shell was not told its pipe or socket",
-  bridge_unavailable: "this page is not running in the Ada desktop shell",
-  bad_response: "the coordinator answered with something the shell could not read",
-};
-
 // The states the coordinator leaves on its own; the others change only on a request from here.
 const activeStates = new Set<TaskState>(["preparing", "running", "verifying", "cancel_requested", "interrupted"]);
+const reviewStates = new Set<TaskState>(["awaiting_review", "accepted", "failed", "canceled"]);
 const pollMs = 2000;
 const refreshLimit = 4;
-// The task list's width limits in pixels; the handle's step is the resize component's default.
-const listWidth = { start: 380, min: 260, max: 720 };
-
-function shown(error: unknown): Shown {
-  if (error instanceof AdaError) return { code: error.code, message: described[error.code] ?? error.message, requestId: error.requestId };
-  return { code: "internal", message: error instanceof Error ? error.message : String(error) };
-}
-
-function payloadText(payload: unknown): string {
-  const text = JSON.stringify(payload) ?? "";
-  return text.length > 240 ? `${text.slice(0, 240)}…` : text;
-}
+// Pane widths in pixels; the handle's step is the resize component's default.
+const navWidth = { start: 300, min: 220, max: 520 };
+const workWidth = { start: 520, min: 320, max: 1100 };
 
 export function App({ client }: { client: AdaClient }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [attempts, setAttempts] = useState<Record<string, string>>({});
+  // The policy each attempt was started with from this window; adad's task answer does not say.
+  const [ranWith, setRanWith] = useState<Record<string, ExecutionPolicy>>({});
+  // The policy chosen for a task's next start, from its creation form or the picker.
+  const [nextPolicy, setNextPolicy] = useState<Record<string, ExecutionPolicy>>({});
   const [events, setEvents] = useState<AttemptEvent[]>([]);
   const [stream, setStream] = useState<string>("");
   const [error, setError] = useState<Shown | null>(null);
   const [stopResult, setStopResult] = useState<StopResult | null>(null);
   const quitting = useRef(false);
-  const [project, setProject] = useState("");
-  const [objective, setObjective] = useState("");
-  const [policy, setPolicy] = useState<ExecutionPolicy>({ backend: "claude", model: "", effort: "", mode: "readonly" });
+  const [matrix, setMatrix] = useState<Capabilities | null>(null);
+  const [names, setNames] = useState<Record<string, string>>({});
+  const [importing, setImporting] = useState(false);
+  const [formProject, setFormProject] = useState("");
+  const [reviewed, setReviewed] = useState<Changes | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [pressed, setPressed] = useState<string | null>(null);
   const [theme, setThemeShown] = useState<Theme>(currentTheme);
   const motionOn = useMotionOn();
-  const [width, setWidth] = useState(listWidth.start);
+  const [width, setWidth] = useState(navWidth.start);
+  const [work, setWork] = useState(workWidth.start);
   const objectiveInput = useRef<HTMLInputElement>(null);
 
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
   const attemptId = selected?.attempt?.id ?? (selected ? attempts[selected.id] : undefined);
+  const policy = (selected && nextPolicy[selected.id]) || defaultPolicy(matrix);
 
   // A reply never moves a task backwards: a refresh sent before a request may answer after it.
   const replace = useCallback((task: Task) => {
@@ -131,12 +129,29 @@ export function App({ client }: { client: AdaClient }) {
     });
   }, [client, run]);
 
+  // The capability matrix feeds every policy picker; without it the pickers offer the modes
+  // with no cells and readonly still preselected.
+  useEffect(() => {
+    let live = true;
+    client.capabilities().then(
+      (m) => live && setMatrix(m),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [client]);
+
   const quit = useCallback(() => {
     if (quitting.current) return;
     quitting.current = true;
     void run(async () => {
-      try { setStopResult(await client.stopCoordinator()); }
-      catch (e) { quitting.current = false; throw e; }
+      try {
+        setStopResult(await client.stopCoordinator());
+      } catch (e) {
+        quitting.current = false;
+        throw e;
+      }
     });
   }, [client, run]);
   useEffect(() => client.onQuitRequested(quit), [client, quit]);
@@ -187,17 +202,40 @@ export function App({ client }: { client: AdaClient }) {
     return () => clearInterval(timer);
   }, [activeIds, refresh, stopResult]);
 
-  const create = (e: FormEvent) => {
-    e.preventDefault();
-    void run(async () => {
-      const task = await client.createTask({ project, objective });
+  const created = useCallback(
+    async (input: NewTask, chosen: ExecutionPolicy) => {
+      const task = await client.createTask(input);
       setTasks((current) => [...current, task]);
-      setObjective("");
+      setNextPolicy((current) => ({ ...current, [task.id]: chosen }));
       setSelectedId(task.id);
-    }, undefined, "create");
-  };
+    },
+    [client],
+  );
 
   const select = (id: string) => setSelectedId(id);
+  const newTask = (project?: string) => {
+    setSelectedId(null);
+    setFormProject(project ?? "");
+    setTimeout(() => objectiveInput.current?.focus(), 0);
+  };
+  const started = useCallback(
+    (task: Task, attempt: string, used: ExecutionPolicy) => {
+      replace(task);
+      setAttempts((current) => ({ ...current, [task.id]: attempt }));
+      setRanWith((current) => ({ ...current, [attempt]: used }));
+    },
+    [replace],
+  );
+  const cancel = (task: Task) =>
+    void run(
+      async () => {
+        replace(await client.cancel(task.id, task.revision));
+        await refresh(task.id);
+      },
+      task.id,
+      "cancel",
+    );
+  const cancellable = selected !== null && (selected.state === "running" || selected.state === "verifying" || selected.attempt?.state === "pending");
 
   const chooseTheme = (next: Theme) => {
     setTheme(next);
@@ -205,94 +243,33 @@ export function App({ client }: { client: AdaClient }) {
   };
   const otherTheme = themes.find((t) => t !== theme) ?? "light";
   const actions: QuickAction[] = [
-    { id: "new-task", label: "Create a task", run: () => objectiveInput.current?.focus() },
+    { id: "import", label: "Import a repository", run: () => setImporting(true) },
+    { id: "new-task", label: "Create a task", run: () => newTask() },
     { id: "theme", label: `Switch to the ${themeNames[otherTheme].toLowerCase()} theme`, run: () => chooseTheme(otherTheme) },
     { id: "motion", label: motionOn ? "Turn motion off" : "Turn motion on", run: () => setMotion(!motionOn) },
   ];
+  const used = attemptId ? ranWith[attemptId] : undefined;
 
   return (
-    <main className="ada" style={{ "--tasks-width": `${width}px` } as CSSProperties}>
+    <div className="ada" style={{ "--tasks-width": `${width}px`, "--work-width": `${work}px` } as CSSProperties}>
       <div className="tasks-pane">
-        <section className="tasks" id="task-list" aria-label="Tasks">
-          <form className="create" onSubmit={create}>
-            <label>
-              Project
-              <input value={project} onChange={(e) => setProject(e.target.value)} required />
-            </label>
-            <label>
-              Objective
-              <input ref={objectiveInput} value={objective} onChange={(e) => setObjective(e.target.value)} required />
-            </label>
-            <BusyButton type="submit" busy={pressed === "create"}>
-              Create
-            </BusyButton>
-          </form>
-          {!loaded ? (
-            <Skeleton rows={4} label="Loading tasks" />
-          ) : tasks.length === 0 ? (
-            <p className="empty">No tasks yet.</p>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Objective</th>
-                  <th>Project</th>
-                  <th>State</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tasks.map((task) => (
-                  <tr
-                    key={task.id}
-                    data-task={task.id}
-                    className={task.id === selectedId ? "selected" : ""}
-                    tabIndex={0}
-                    aria-selected={task.id === selectedId}
-                    onClick={() => select(task.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        select(task.id);
-                      }
-                    }}
-                  >
-                    <td>{task.objective}</td>
-                    <td>{task.project}</td>
-                    <td>
-                      <span className={`state state-${task.state}`}>{task.state}</span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </section>
+        <Nav tasks={tasks} loaded={loaded} names={names} selectedId={selectedId} onSelect={select} onImport={() => setImporting(true)} onNewTask={newTask} />
         <ResizeHandle
           side="e"
           size={{ width, height: 0 }}
-          min={{ width: listWidth.min, height: 0 }}
-          max={{ width: listWidth.max, height: 0 }}
+          min={{ width: navWidth.min, height: 0 }}
+          max={{ width: navWidth.max, height: 0 }}
           onResize={(size) => setWidth(size.width)}
           label="Resize the task list"
           controls="task-list"
         />
       </div>
 
-      <section className="detail" aria-label="Selected task">
-        {error && (
-          <p role="alert" className="error">
-            <code>{error.code}</code> {error.message}
-            {error.requestId && (
-              <>
-                {" "}
-                (request <code>{error.requestId}</code>)
-              </>
-            )}
-          </p>
-        )}
+      <main className="detail" aria-label="Selected task">
+        {error && <ErrorLine error={error} />}
         {selected ? (
           <>
-            <header>
+            <header className="task-head">
               <h2>{selected.objective}</h2>
               <p>
                 <span className={`state state-${selected.state}`}>{selected.state}</span> revision {selected.revision}
@@ -304,76 +281,88 @@ export function App({ client }: { client: AdaClient }) {
                 )}
               </p>
               {selected.attempt?.queue_position !== undefined && <p>Queue position {selected.attempt.queue_position}</p>}
+              {selected.criteria && <p className="criteria">{selected.criteria}</p>}
+              {selected.provider_configuration && selected.provider_configuration.count > 0 && (
+                <p className="note note-warn">
+                  The worktree holds provider configuration or hooks the CLI loads: {selected.provider_configuration.paths.join(", ")}
+                  {selected.provider_configuration.count > selected.provider_configuration.paths.length ? " and more" : ""}.
+                </p>
+              )}
             </header>
             <div className="actions">
               <BusyButton busy={pressed === "ready"} disabled={selected.state !== "draft"} onClick={() => void run(async () => replace(await client.ready(selected.id, selected.revision)), selected.id, "ready")}>
                 Ready
               </BusyButton>
-              <label>
-                Backend
-                <input value={policy.backend} onChange={(e) => setPolicy({ ...policy, backend: e.target.value })} />
-              </label>
-              <label>
-                Model
-                <input value={policy.model} onChange={(e) => setPolicy({ ...policy, model: e.target.value })} />
-              </label>
-              <label>
-                Mode
-                <select value={policy.mode} onChange={(e) => setPolicy({ ...policy, mode: e.target.value as ExecutionPolicy["mode"] })}>
-                  <option value="readonly">readonly</option>
-                  <option value="auto">auto</option>
-                  <option value="yolo">yolo</option>
-                </select>
-              </label>
               <BusyButton
                 busy={pressed === "start"}
                 disabled={selected.state !== "ready"}
                 onClick={() =>
-                  void run(async () => {
-                    const started = await client.start(selected.id, selected.revision, policy);
-                    const { attempt_id, ...task } = started;
-                    replace(task);
-                    setAttempts((current) => ({ ...current, [task.id]: attempt_id }));
-                  }, selected.id, "start")
+                  void run(
+                    async () => {
+                      const result = await client.start(selected.id, selected.revision, policy);
+                      const { attempt_id, ...task } = result;
+                      started(task, attempt_id, policy);
+                    },
+                    selected.id,
+                    "start",
+                  )
                 }
               >
                 Start
               </BusyButton>
-              <BusyButton busy={pressed === "cancel"} disabled={selected.state !== "running" && selected.attempt?.state !== "pending"} onClick={() => void run(async () => {
-                replace(await client.cancel(selected.id, selected.revision));
-                await refresh(selected.id);
-              }, selected.id, "cancel")}>
+              <BusyButton busy={pressed === "cancel"} className="quiet" disabled={!cancellable} onClick={() => cancel(selected)}>
                 Cancel
               </BusyButton>
             </div>
-            <h3>
-              Events {stream && <span className="stream">{stream}</span>}
-            </h3>
-            {attemptId ? (
-              events.length === 0 ? (
-                <p className="empty">No events yet.</p>
-              ) : (
-                <ol className="events">
-                  {events.map((event) => (
-                    <li key={event.seq} data-seq={event.seq}>
-                      <span className="seq">{event.seq}</span>
-                      <span className="kind">{event.kind}</span>
-                      <code className="payload">{payloadText(event.payload)}</code>
-                    </li>
-                  ))}
-                </ol>
-              )
-            ) : (
-              <p className="empty">This task has no attempt yet.</p>
+            {(selected.state === "draft" || selected.state === "ready") && (
+              <PolicyPicker matrix={matrix} value={policy} onChange={(next) => setNextPolicy((current) => ({ ...current, [selected.id]: next }))} legend="Start with" />
             )}
+            {reviewStates.has(selected.state) && selected.attempt && (
+              <Review client={client} task={selected} matrix={matrix} reviewed={reviewed} onTask={replace} onStarted={started} />
+            )}
+            <Activity events={events} stream={stream} hasAttempt={Boolean(attemptId)} />
           </>
+        ) : importing ? (
+          <p className="empty">Importing a repository.</p>
         ) : (
-          <p className="empty">Select a task.</p>
+          <div className="start">
+            <h2>New task</h2>
+            <p className="empty">Import a repository to give a task its own workspace, or add a task to a project here.</p>
+            <TaskForm key={formProject} matrix={matrix} defaultProject={formProject} busy={pressed === "create"} objectiveRef={objectiveInput} onCreate={(input, chosen) => void run(() => created(input, chosen), undefined, "create")} />
+          </div>
         )}
-      </section>
+      </main>
+
+      <div className="work-pane">
+        <ResizeHandle
+          side="w"
+          size={{ width: work, height: 0 }}
+          min={{ width: workWidth.min, height: 0 }}
+          max={{ width: workWidth.max, height: 0 }}
+          onResize={(size) => setWork(size.width)}
+          label="Resize the work area"
+          controls="work-area"
+        />
+        <WorkArea client={client} task={selected} matrix={matrix} onChanges={setReviewed} />
+      </div>
 
       <footer className="status">
-        <span>{tasks.length} tasks</span>
+        <span className="status-item">
+          <span className="status-key">Branch</span> <code>{selected?.snapshot ? `ada/${selected.id}` : "none"}</code>
+        </span>
+        <span className="status-item">
+          <span className="status-key">Executor</span> local
+        </span>
+        <span className="status-item">
+          <span className="status-key">Agent</span> {used ? `${used.backend}, ${used.model || "default model"}, ${used.mode}` : selected?.attempt ? "not known in this window" : "none"}
+        </span>
+        <span className="status-item">
+          <span className="status-key">Task</span> {selected ? selected.state : "none selected"}
+        </span>
+        <button type="button" className="stop" disabled={!cancellable} onClick={() => selected && cancel(selected)}>
+          Stop
+        </button>
+        <span className="status-fill">{tasks.length} tasks</span>
         <span className="hint">
           <kbd>Ctrl</kbd> <kbd>P</kbd> commands
         </span>
@@ -387,12 +376,28 @@ export function App({ client }: { client: AdaClient }) {
             ))}
           </select>
         </label>
-        {stopResult && <p role="status">{stopResult.reason}: {stopResult.running} running cancellation requested, {stopResult.queued} queued canceled. Waiting for the coordinator to exit.</p>}
+        {stopResult && (
+          <p role="status">
+            {stopResult.reason}: {stopResult.running} running cancellation requested, {stopResult.queued} queued canceled. Waiting for the coordinator to exit.
+          </p>
+        )}
         <button type="button" className="quit" disabled={stopResult !== null} onClick={quit}>
           Quit Ada and stop work
         </button>
       </footer>
+      {importing && (
+        <ImportFlow
+          client={client}
+          matrix={matrix}
+          onClose={() => setImporting(false)}
+          onProject={(id, name) => setNames((current) => ({ ...current, [id]: name }))}
+          onCreated={async (input, chosen) => {
+            await created(input, chosen);
+            setImporting(false);
+          }}
+        />
+      )}
       <CommandPalette client={client} actions={actions} onSelectTask={select} />
-    </main>
+    </div>
   );
 }

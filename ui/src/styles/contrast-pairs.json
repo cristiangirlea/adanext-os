@@ -3,7 +3,7 @@
   "pairs": [
     { "fg": "text-1", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim", "success-dim", "warning-dim", "danger-dim", "info-dim"], "kind": "text" },
     { "fg": "text-2", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim"], "kind": "text" },
-    { "fg": "text-3", "bg": ["bg", "sidebar", "surface", "elevated", "overlay"], "kind": "text" },
+    { "fg": "text-3", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim"], "kind": "text" },
     { "fg": "accent-text", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim"], "kind": "text" },
     { "fg": "accent-fg", "bg": ["accent"], "kind": "text" },
     { "fg": "accent", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim"], "kind": "ui" },

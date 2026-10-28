@@ -52,6 +52,43 @@ describe("preload api", () => {
     expect(received).toHaveLength(1);
   });
 
+  it("forwards each workspace method under its own name with its typed arguments, and none takes a host path", async () => {
+    const fake = ipc();
+    const api = createApi(fake, "doc");
+    const policy = { backend: "claude", model: "", effort: "", mode: "readonly" as const, acknowledge_provider_changes: false };
+    await api.capabilities();
+    await api.chooseFolder();
+    await api.inspectFolder("h1");
+    await api.importFolder("h1", "repo");
+    await api.snapshot("h1", { untracked: ["a"], include_sensitive: [] });
+    await api.changes("t1");
+    await api.files("t1", "src");
+    await api.checks("t1");
+    await api.checkLog("t1", "c1");
+    await api.findings("t1");
+    await api.addFinding("t1", "note");
+    await api.accept("t1", 3, "a".repeat(40), 1);
+    await api.refine("t1", 3, policy);
+    expect(fake.calls).toEqual([
+      ["capabilities", []],
+      ["chooseFolder", []],
+      ["inspectFolder", ["h1"]],
+      ["importFolder", ["h1", "repo"]],
+      ["snapshot", ["h1", { untracked: ["a"], include_sensitive: [] }]],
+      ["changes", ["t1"]],
+      ["files", ["t1", "src"]],
+      ["checks", ["t1"]],
+      ["checkLog", ["t1", "c1"]],
+      ["findings", ["t1"]],
+      ["addFinding", ["t1", "note"]],
+      ["accept", ["t1", 3, "a".repeat(40), 1]],
+      ["refine", ["t1", 3, policy]],
+    ]);
+    // The dialog's method takes nothing: whatever the page passes, no argument reaches main.
+    await (api.chooseFolder as (...args: unknown[]) => Promise<unknown>)("C:\\elsewhere");
+    expect(fake.calls.at(-1)).toEqual(["chooseFolder", []]);
+  });
+
   it("leaves no listener behind a refused subscription", async () => {
     const fake = ipc({ subscribe: { ok: false, error: { code: "coordinator_unreachable", status: 0, message: "no socket" } } });
     const received: StreamMessage[] = [];

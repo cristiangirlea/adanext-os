@@ -5,6 +5,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [react()],
   base: "./",
-  build: { outDir: "dist", emptyOutDir: true },
+  // assetsInlineLimit 0: the fonts stay files, since font-src 'self' refuses data: URLs.
+  build: { outDir: "dist", emptyOutDir: true, assetsInlineLimit: 0 },
   test: { environment: "jsdom", include: ["src/**/*.test.{ts,tsx}"] },
 });

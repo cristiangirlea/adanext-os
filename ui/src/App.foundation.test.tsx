@@ -94,8 +94,8 @@ describe("App foundation", () => {
   it("marks the button just pressed busy until its request answers", async () => {
     const client = new FakeClient();
     let release = () => {};
-    const createTask = client.createTask.bind(client);
-    client.createTask = (input) => new Promise((resolve) => { release = () => resolve(createTask(input)); });
+    // The request is refused when released, so the form (and its button) stays on the page.
+    client.createTask = () => new Promise((_resolve, reject) => { release = () => reject(new Error("refused")); });
     render(<App client={client} />);
     await flush();
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "repo" } });
@@ -112,9 +112,10 @@ describe("App foundation", () => {
 });
 
 describe("package.json", () => {
-  it("adds no dependency", () => {
+  it("adds no dependency but the two bundled fonts, pinned exactly", () => {
     const pkg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")) as Record<string, Record<string, string>>;
-    expect(Object.keys(pkg.dependencies ?? {}).sort()).toEqual(["react", "react-dom"]);
+    expect(Object.keys(pkg.dependencies ?? {}).sort()).toEqual(["@fontsource/jetbrains-mono", "@fontsource/source-sans-3", "react", "react-dom"]);
+    for (const version of Object.values(pkg.dependencies ?? {})) expect(version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(Object.keys(pkg.devDependencies ?? {}).sort()).toEqual([
       "@testing-library/dom",
       "@testing-library/react",

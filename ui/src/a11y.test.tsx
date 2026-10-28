@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App";
 import { FakeClient, makeTask } from "./test/fakeClient";
+import { AdaError } from "./client/api";
 
 // The accessibility pass of M4.4a: every control has a name and a role, the keyboard reaches
 // every control, focus is always visible, and the palette keeps focus in its input. Contrast is
@@ -23,7 +24,7 @@ function nameOf(el: Element): string {
   if (labelledBy) return labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" ").trim();
   const label = el.getAttribute("aria-label");
   if (label) return label;
-  if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement) return el.labels?.[0]?.textContent?.trim() ?? "";
+  if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) return el.labels?.[0]?.textContent?.trim() ?? "";
   return el.textContent?.trim() ?? "";
 }
 
@@ -64,7 +65,49 @@ describe("accessibility", () => {
   it("shows focus on everything with the focus token, outside the control", () => {
     const base = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles", "base.css"), "utf8");
     expect(base).toMatch(/:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--focus\)[^}]*outline-offset:\s*2px/);
-    const all = ["base", "controls", "app", "palette", "resize", "motion"].map((n) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles", `${n}.css`), "utf8")).join("\n");
+    const all = ["base", "controls", "app", "palette", "resize", "motion", "workspace", "review", "fonts"].map((n) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles", `${n}.css`), "utf8")).join("\n");
     expect(all).not.toMatch(/outline:\s*(none|0)\b/);
+  });
+
+  it("names every control of the workspace: navigation, policy picker, review, work area tabs and the import dialog", async () => {
+    const commit = "c".repeat(40);
+    const client = new FakeClient([
+      makeTask({ id: "t1", objective: "ready one", state: "ready", revision: 1 }),
+      makeTask({ id: "t2", objective: "review me", state: "awaiting_review", revision: 3, snapshot: "s1", attempt: { id: "a2", state: "ended_ok", tested_commit: commit } }),
+    ]);
+    client.refuse.changes = new AdaError("no_changes", 409, "none yet");
+    render(<App client={client} />);
+    await flush();
+    const check = () => {
+      const unnamed = Array.from(document.querySelectorAll(controls + ', textarea, [role="tab"], [role="tabpanel"], [role="radio"], input[type="radio"], input[type="checkbox"]')).filter((el) => nameOf(el) === "");
+      expect(unnamed.map((el) => el.outerHTML.slice(0, 100))).toEqual([]);
+    };
+    check();
+    fireEvent.click(screen.getByText("ready one"));
+    await flush();
+    check();
+    fireEvent.click(screen.getByText("review me"));
+    await flush();
+    check();
+    // The tabs follow the tabs pattern: one tab in the tab order, the panel labelled by it.
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.filter((t) => t.tabIndex === 0)).toHaveLength(1);
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(tabs.find((t) => t.getAttribute("aria-selected") === "true")!.id);
+    fireEvent.click(screen.getByRole("button", { name: "Import a repository" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose a folder" }));
+    await flush();
+    await flush();
+    check();
+    expect(screen.getByRole("dialog", { name: "Import a repository" })).toBeTruthy();
+  });
+
+  it("lets the keyboard select a task in the navigation", async () => {
+    const client = new FakeClient([makeTask({ id: "t1", objective: "by keyboard" })]);
+    render(<App client={client} />);
+    await flush();
+    const row = screen.getAllByRole("row").find((r) => r.getAttribute("data-task") === "t1")!;
+    expect(row.tabIndex).toBe(0);
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(screen.getByRole("heading", { level: 2, name: "by keyboard" })).toBeTruthy();
   });
 });

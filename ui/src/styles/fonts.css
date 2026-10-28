@@ -1,0 +1,11 @@
+/* The two bundled typefaces (SIL Open Font License 1.1, from the exact-pinned @fontsource
+   packages): Source Sans 3 for the interface, JetBrains Mono for code, paths and patches. Vite
+   copies the font files into the build, so they load from the page's own origin under
+   font-src 'self'; nothing is fetched from a remote host. Latin and Latin Extended only; other
+   scripts fall back to the system faces named in tokens.css. */
+@import "@fontsource/source-sans-3/latin-400.css";
+@import "@fontsource/source-sans-3/latin-ext-400.css";
+@import "@fontsource/source-sans-3/latin-600.css";
+@import "@fontsource/source-sans-3/latin-ext-600.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
+@import "@fontsource/jetbrains-mono/latin-ext-400.css";

@@ -16,6 +16,19 @@ function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
     stopCoordinator: async () => ({ ok: true, value: { running: 0, queued: 0, reason: "coordinator stopped by the owner" } }),
     finishQuit: async () => ({ ok: true, value: null }),
     onQuitRequested: () => () => {},
+    capabilities: async () => ({ ok: true, value: { engine: "e", recorded: "", checks: { status: "unsandboxed", detail: "" }, backends: [] } }),
+    chooseFolder: async () => ({ ok: true, value: null }),
+    inspectFolder: async () => ({ ok: false, error: { code: "folder_expired", status: 0, message: "expired" } }),
+    importFolder: async () => ({ ok: false, error: { code: "already_imported", status: 409, message: "already", details: { project: "p9" } } }),
+    snapshot: async () => ({ ok: false, error: { code: "malformed_call", status: 0, message: "" } }),
+    changes: async () => ({ ok: false, error: { code: "no_changes", status: 409, message: "" } }),
+    files: async () => ({ ok: false, error: { code: "no_changes", status: 409, message: "" } }),
+    checks: async () => ({ ok: true, value: [] }),
+    checkLog: async () => ({ ok: true, value: { text: "", truncated: false, partial: false } }),
+    findings: async () => ({ ok: true, value: [] }),
+    addFinding: async () => ({ ok: false, error: { code: "bad_request", status: 400, message: "" } }),
+    accept: async () => ({ ok: false, error: { code: "stale_review", status: 409, message: "" } }),
+    refine: async () => ({ ok: false, error: { code: "provider_configuration_changed", status: 409, message: "", details: { provider_changes: { changes: [], truncated: false } } } }),
     ...overrides,
   };
 }
@@ -69,6 +82,14 @@ describe("bridge adapter", () => {
     expect(received).toEqual([{ type: "event", event: { seq: 1, kind: "accepted", payload: {} } }]);
     unsubscribe();
     expect(unsubscribed).toBe(true);
+  });
+
+  it("keeps the details a refusal carries, such as the project already holding a repository", async () => {
+    install(fakeBridge());
+    const error = await createBridgeClient().importFolder("h1", "repo").catch((e: unknown) => e);
+    expect((error as AdaError).code).toBe("already_imported");
+    expect((error as AdaError).details).toEqual({ project: "p9" });
+    expect(await createBridgeClient().chooseFolder()).toBeNull();
   });
 
   it("reports a missing bridge as bridge_unavailable", async () => {

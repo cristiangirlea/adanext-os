@@ -497,6 +497,25 @@ tests, the built page check and the seven Playwright tests against the rebuilt U
 Not verified: hosted GitHub CI until the pull request runs; the Electron window was not looked at
 by hand (the built page was, in a browser with a fake bridge, in both themes).
 
+### M4.4b The workspace UI (2026-10-28, #120)
+
+In `ui/`: the layout of plan section 3 in `src/App.tsx` and `src/workspace/` (navigation of
+projects and tasks, the selected task with its review and its activity rendered by event kind,
+the work area with Changes, Checks marked unsandboxed and Files, the status bar with branch,
+executor, agent, task state and Stop), the import flow (`ImportFlow.tsx`), the task form with its
+declared checks, and the policy picker fed by the capability matrix. Repository and agent text is
+rendered as text with control, bidirectional and invisible characters marked (`src/text/`).
+Source Sans 3 and JetBrains Mono are bundled from exact-pinned `@fontsource` packages
+(`src/styles/fonts.css`); `ui/scripts/check-dist.mjs` now also checks that the built fonts load
+from the build. In `desktop/`: the bridge's workspace methods (`src/bridge.ts`), the folder
+dialog in main, a text read for check logs (`src/adad.ts`), the typed preload methods, and the
+end-to-end flow (`e2e/workspace.spec.ts`, with `e2e/editengine`, a test-only shim in front of the
+fake engine that writes the agent's changes). Status: implemented. The decisions are in the
+2026-10-28 M4.4b entry of the decisions log.
+
+Not verified: hosted GitHub CI until the pull request runs; the Electron window was looked at only
+through the end-to-end test and a browser with a fake bridge.
+
 ## Decisions log
 
 - **2026-10-16, #76 review fixes: endpoint proof and shutdown order.** A predictable per-user
@@ -1840,6 +1859,45 @@ by hand (the built page was, in a browser with a fake bridge, in both themes).
      `aria-valuetext`.
   6. Choosing a project in the palette filters its tasks by that exact project id, shown with a
      "Show all" button, rather than by a text search for it.
+
+- **2026-10-28, M4.4b the workspace UI (#120).** Points the backlog entry left open.
+  1. Fonts: Source Sans 3 (`@fontsource/source-sans-3` 5.3.1) and JetBrains Mono
+     (`@fontsource/jetbrains-mono` 5.3.0), both SIL OFL 1.1, exact pins in `ui/package.json`, the
+     only dependencies the slice adds. Only the Latin and Latin Extended subsets, Source Sans 3 at
+     400 and 600 and JetBrains Mono at 400, are imported; other scripts fall back to the system
+     faces. Vite copies the files into `ui/dist/assets` (`assetsInlineLimit: 0`, since the CSP's
+     `font-src 'self'` refuses `data:` URLs), so they load from the page's own origin under the
+     unchanged CSP and nothing is fetched from a remote host; `check-dist.mjs` fails a built
+     stylesheet whose font is remote, inlined or missing. JetBrains Mono's ligatures are turned
+     off wherever code, paths and patches show, so `!=` reads as two characters.
+  2. The import flow's path: main opens the native dialog (`chooseFolder`, no arguments) and keeps
+     the chosen path behind a random handle, bound to the window that chose it, for 15 minutes and
+     until a task is created from its snapshot. Inspect, import and snapshot take the handle; the
+     bridge refuses any argument object carrying a `path` field (`path_refused`) and a handle that
+     is unknown, expired or another window's (`folder_expired`). An `already_imported` refusal
+     keeps that project on the handle, so the owner continues with a new snapshot of it.
+  3. Refusals now carry the fields some answers hold beside the code (blockers, project, tasks,
+     path, provider changes) through the bridge as `details`.
+  4. "Include these changes in the new feature branch": the snapshot route always captures the
+     staged and unstaged changes, so the flow lists them as carried and lets the owner choose the
+     untracked files one by one. A file that looks like a credential (the rule of
+     `internal/source`'s `sensitive`, mirrored in `ui/src/workspace/sensitive.ts`) is marked and
+     unselected; choosing it sends it in `include_sensitive` too.
+  5. The policy: readonly is preselected and a backend change goes back to readonly, so yolo is
+     never preselected; each mode shows the matrix's cells for the chosen backend (enforced by
+     whom, asked and not verified, not offered), and yolo lists what it turns off. Mode `ask` is
+     shown as refused, with the matrix's reason. A task's policy chosen at creation is the one its
+     Start uses; Start and refine offer the picker again.
+  6. Accept binds the changes last read in the work area: their commit and generation, and it is
+     disabled until they are read, and while they are stale.
+  7. The status bar's agent (backend, model, mode) is what this window started the attempt with:
+     the task answer of `/v1` does not carry the attempt's policy, so a task started elsewhere
+     reads "not known in this window". Executor is always local until M5.
+  8. Check logs reach the renderer as text, at most 1 MiB of each (the rest stays an artifact);
+     adad's truncation mark and the bridge's own cut are both shown.
+  9. Projects in the navigation are the distinct projects of the listed tasks plus those imported
+     in this window; a project's name is known only for the latter (no project list route yet).
+     The palette's project scope is unchanged.
 
 ## Owner actions pending
 

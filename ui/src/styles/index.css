@@ -1,5 +1,6 @@
-/* The stylesheet, split by concern: tokens, then each theme's colours, then the base, motion,
-   controls and parts. Order matters only where a later file builds on an earlier one. */
+/* The stylesheet, split by concern: the bundled fonts, tokens, then each theme's colours, then the
+   base, motion, controls and parts. Order matters only where a later file builds on an earlier one. */
+@import "./fonts.css";
 @import "./tokens.css";
 @import "./theme-light.css";
 @import "./theme-workshop.css";
@@ -9,3 +10,5 @@
 @import "./resize.css";
 @import "./palette.css";
 @import "./app.css";
+@import "./workspace.css";
+@import "./review.css";

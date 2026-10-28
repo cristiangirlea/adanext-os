@@ -22,7 +22,7 @@ taking a slice, and don't reopen a recorded decision.
 | `internal/source/` | Reading a user's repository: the git runner, the layout, config and index read in Go, the mirror git directory, inspection with its blockers and findings (provider configuration among them), the capture a snapshot takes, and Ada's clone of each project with the attempts' worktrees and their manifests, a task's changes and files read through git, and a worktree's removal. |
 | `engine/engine.json` | The Harness revision Ada runs and its build's SHA-256 per platform, embedded into `adad` by `engine/pin.go`. Change it only in a slice that says why. |
 | `ui/` | The React and TypeScript app both shells load. It reaches `adad` only through `AdaClient` (`ui/src/client/api.ts`); the adapters under `ui/src/client/adapters/` are the only modules that may touch the bridge or the network. |
-| `desktop/` | The Electron shell: main (the bridge to `adad` over its pipe or socket, the Node SSE client) and preload. Versions are pinned; the full layout arrives in M4. |
+| `desktop/` | The Electron shell: main (the bridge to `adad` over its pipe or socket, the Node SSE client, the import folder dialog) and preload. Versions are pinned. End-to-end tests in `desktop/e2e/` run the real window against a real `adad` and the fake engine. |
 | `scripts/check.sh` | Everything CI runs, in order. |
 | `scripts/test-hooks.sh` | Tests for the two Claude hooks, run by `check.sh`. |
 | `scripts/gen-settings.py` | Writes `.claude/settings.json`, giving every Bash rule its PowerShell twin. Edit the lists there, not the JSON. |

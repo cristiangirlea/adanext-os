@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, webContents } from "electron";
 import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
@@ -48,7 +48,14 @@ void app.whenReady().then(async () => {
   const config = coordinatorConfig(process.env, path.dirname(app.getPath("exe")), os.homedir());
   const suppliedSocket = socketFromArgs(process.argv, process.env);
   const socketPath = suppliedSocket ? bindEndpoint(suppliedSocket, config.stateDir) : endpoint(config, process.platform, process.platform === "win32" ? await currentSID() : undefined);
-  bridge = createBridge({ socketPath, pageUrl, finishQuit: async () => {
+  bridge = createBridge({ socketPath, pageUrl, chooseFolder: async (event) => {
+    // The only way a path enters: the owner picks it in the native dialog, which main opens.
+    const contents = webContents.fromId(event.sender.id);
+    const owner = contents ? BrowserWindow.fromWebContents(contents) : null;
+    const options = { title: "Import a repository", properties: ["openDirectory" as const, "dontAddToRecent" as const] };
+    const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  }, finishQuit: async () => {
     const windows = BrowserWindow.getAllWindows();
     for (const window of windows) {
       window.setTitle("Ada - waiting for work to stop");
