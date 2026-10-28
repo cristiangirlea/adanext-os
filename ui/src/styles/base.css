@@ -1,0 +1,42 @@
+/* The page itself: box model, type, focus. */
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font: var(--text-md) / var(--leading) var(--font);
+  color: var(--text-1);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+code,
+kbd {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-2);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--elevated);
+  color: var(--text-2);
+  text-align: center;
+  line-height: 1.5;
+}
+/* The ring sits outside the control, on the background, where its contrast is checked. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+::selection {
+  background: var(--accent-dim);
+  color: var(--text-1);
+}

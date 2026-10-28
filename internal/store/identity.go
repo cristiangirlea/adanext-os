@@ -96,6 +96,8 @@ func (t Task) CheckDefinitions() []CheckDefinition {
 type TaskAttempt struct {
 	ID, State     string
 	QueuePosition int
+	// The execution policy the attempt was started with.
+	Backend, Model, Effort, Mode string
 	// ProviderChanges is nil until assessed, and for an attempt with no workspace.
 	ProviderChanges *ProviderChanges
 	Workspace       bool // whether the attempt has a worktree
@@ -125,16 +127,17 @@ const taskReadColumns = `t.id,t.project,t.created_by,t.objective,t.acceptance_cr
 	(SELECT provider_configuration FROM source_snapshots WHERE id=t.snapshot),
 	a.id,a.state,CASE WHEN a.state='pending' THEN (SELECT count(*)+1 FROM attempts p WHERE p.state='pending' AND p.rowid<a.rowid) ELSE 0 END,a.provider_changes,
 	EXISTS(SELECT 1 FROM workspaces w WHERE w.attempt=a.id),
-	COALESCE((SELECT w.tested_commit FROM workspaces w WHERE w.attempt=a.id),'')`
+	COALESCE((SELECT w.tested_commit FROM workspaces w WHERE w.attempt=a.id),''),
+	COALESCE(a.backend,''),COALESCE(a.model,''),COALESCE(a.effort,''),COALESCE(a.mode,'')`
 const taskReadFrom = ` FROM tasks t LEFT JOIN attempts a ON a.rowid=(SELECT max(latest.rowid) FROM attempts latest WHERE latest.task=t.id)`
 
 func scanTaskRead(row interface{ Scan(...any) error }, extra ...any) (Task, error) {
 	var task Task
-	var checksJSON, testedCommit string
+	var checksJSON, testedCommit, backend, model, effort, mode string
 	var id, state, provider, changes sql.NullString
 	var position int
 	var workspace bool
-	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot, &checksJSON, &provider, &id, &state, &position, &changes, &workspace, &testedCommit}
+	args := []any{&task.ID, &task.Project, &task.CreatedBy, &task.Objective, &task.AcceptanceCriteria, &task.State, &task.Revision, &task.Created, &task.Updated, &task.Snapshot, &checksJSON, &provider, &id, &state, &position, &changes, &workspace, &testedCommit, &backend, &model, &effort, &mode}
 	if err := row.Scan(append(args, extra...)...); err != nil {
 		return task, err
 	}
@@ -150,7 +153,7 @@ func scanTaskRead(row interface{ Scan(...any) error }, extra ...any) (Task, erro
 		return task, err
 	}
 	if id.Valid {
-		task.Attempt = TaskAttempt{ID: id.String, State: state.String, QueuePosition: position, Workspace: workspace, TestedCommit: testedCommit}
+		task.Attempt = TaskAttempt{ID: id.String, State: state.String, QueuePosition: position, Workspace: workspace, TestedCommit: testedCommit, Backend: backend, Model: model, Effort: effort, Mode: mode}
 		if task.Attempt.ProviderChanges, err = decodeJSON[ProviderChanges](changes); err != nil {
 			return task, err
 		}
@@ -267,6 +270,8 @@ type Attempt struct {
 	OwnershipGeneration                                     int64
 	EngineSHA256, RunID, NativeSession, State               string
 	Started, Ended                                          string
+	MaxTurns                                                int    // Recorded by a refine; a start writes its own.
+	Timeout                                                 string // Recorded by a refine; a start writes its own.
 }
 
 // CreateAttempt records intent with the authenticated actor. Continuations must

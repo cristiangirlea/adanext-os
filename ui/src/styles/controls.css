@@ -1,0 +1,61 @@
+/* Form controls and buttons. */
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+input,
+select {
+  font: inherit;
+  color: var(--text-1);
+  background: var(--elevated);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  padding: 3px var(--space-2);
+  min-width: 0;
+}
+input:hover,
+select:hover {
+  border-color: var(--border-3);
+}
+button {
+  font: inherit;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-fg);
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button[aria-busy="true"] {
+  cursor: progress;
+}
+button.quit {
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+button.chip {
+  padding: 1px var(--space-3);
+  border-color: var(--border-2);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+button.chip:hover {
+  border-color: var(--border-3);
+  color: var(--text-1);
+}
+button.chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent-text);
+  font-weight: 600;
+}

@@ -1,0 +1,297 @@
+/* The workspace layout (plan section 3): navigation, the selected task, the work area, and the
+   status bar along the bottom. Pane widths come from the resize handles as custom properties. */
+.ada {
+  display: grid;
+  grid-template-columns: var(--tasks-width, 300px) minmax(0, 1fr) var(--work-width, 520px);
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+}
+.tasks-pane,
+.work-pane {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+.tasks-pane {
+  border-right: 1px solid var(--border-1);
+  background: var(--sidebar);
+}
+.work-pane {
+  border-left: 1px solid var(--border-1);
+  background: var(--surface);
+}
+.detail {
+  overflow: auto;
+  padding: var(--space-4) var(--space-5);
+  background: var(--bg);
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Navigation: the word mark, the two ways to start, then a table per project. */
+.nav {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--space-3) 0;
+}
+.nav-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 0 var(--space-3) var(--space-3);
+  border-bottom: 1px solid var(--border-1);
+}
+.wordmark {
+  flex-basis: 100%;
+  font-weight: 600;
+  font-size: var(--text-xl);
+  letter-spacing: -0.01em;
+  color: var(--accent-text);
+}
+.nav .empty,
+.nav .skeleton {
+  padding: 0 var(--space-3);
+}
+table.project {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: var(--space-3);
+}
+table.project caption {
+  padding: var(--space-1) var(--space-3);
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-2);
+}
+table.project caption .add {
+  float: right;
+  font-weight: normal;
+}
+.project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+table.project td {
+  padding: 5px var(--space-2) 5px var(--space-3);
+  vertical-align: baseline;
+}
+table.project td:last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+table.project tbody tr {
+  cursor: pointer;
+}
+table.project tbody tr:hover {
+  background: var(--surface);
+}
+table.project tbody tr.selected {
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+table.project tr[data-finished] td:first-child {
+  color: var(--text-3);
+}
+
+/* State chips, shared by the navigation, the task head and the status bar. */
+.state {
+  display: inline-block;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  background: var(--elevated);
+  color: var(--text-2);
+  border: 1px solid var(--border-1);
+}
+.state-running,
+.state-preparing,
+.state-verifying {
+  background: var(--info-dim);
+  color: var(--info);
+  border-color: transparent;
+}
+.state-awaiting_review {
+  background: var(--warning-dim);
+  color: var(--warning);
+  border-color: transparent;
+}
+.state-accepted {
+  background: var(--success-dim);
+  color: var(--success);
+  border-color: transparent;
+}
+.state-failed,
+.state-interrupted,
+.state-recovery_required {
+  background: var(--danger-dim);
+  color: var(--danger);
+  border-color: transparent;
+}
+
+/* The selected task. */
+.task-head h2,
+.start h2 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  line-height: 1.25;
+  max-width: 70ch;
+}
+.task-head p {
+  margin: 0 0 var(--space-1);
+  color: var(--text-2);
+}
+.criteria {
+  max-width: 70ch;
+  white-space: pre-wrap;
+}
+.detail h3 {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-1);
+  margin: var(--space-5) 0 var(--space-2);
+}
+.actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin: var(--space-3) 0;
+}
+.stream {
+  font-weight: normal;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  margin-left: var(--space-2);
+}
+.error {
+  margin: 0 0 10px;
+  padding: 6px var(--space-2);
+  border-left: 3px solid var(--danger);
+  background: var(--danger-dim);
+  color: var(--text-1);
+}
+.empty {
+  color: var(--text-3);
+}
+
+/* Activity: one row per event, the sequence and kind in a narrow gutter. */
+.events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.events li {
+  display: grid;
+  grid-template-columns: 3.5em 7.5em minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-1);
+}
+.seq {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  text-align: right;
+}
+.kind {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.event-label {
+  font-weight: 600;
+  margin-right: var(--space-2);
+}
+.event-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.events li[data-tone="agent"] .event-label {
+  color: var(--accent-text);
+}
+.events li[data-tone="good"] .event-label {
+  color: var(--success);
+}
+.events li[data-tone="bad"] .event-label {
+  color: var(--danger);
+}
+.events li[data-tone="warn"] .event-label {
+  color: var(--warning);
+}
+.events li[data-tone="quiet"] .event-text {
+  color: var(--text-2);
+}
+.event-raw summary {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  cursor: pointer;
+}
+.event-raw code {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The status bar: labelled facts, then Stop, then the window's own controls. */
+.status {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  align-items: center;
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border-1);
+  background: var(--sidebar);
+  color: var(--text-2);
+}
+.status-key {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  margin-right: 2px;
+}
+.status-fill {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.status .hint {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.status p[role="status"] {
+  margin: 0;
+}
+.theme-switch {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+@media (max-width: 900px) {
+  .ada {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto;
+    height: auto;
+  }
+  .tasks-pane,
+  .work-pane {
+    border: 0;
+    border-bottom: 1px solid var(--border-1);
+  }
+  .resize-handle {
+    display: none;
+  }
+}

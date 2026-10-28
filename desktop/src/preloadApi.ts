@@ -48,5 +48,19 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
     stopCoordinator: () => invoke("stopCoordinator", []),
     finishQuit: () => invoke("finishQuit", []),
     onQuitRequested: (listener) => ipc.onQuitRequested?.(listener) ?? (() => {}),
+    capabilities: () => invoke("capabilities", []),
+    // Main opens the dialog; nothing the page passes here reaches it.
+    chooseFolder: () => invoke("chooseFolder", []),
+    inspectFolder: (handle) => invoke("inspectFolder", [handle]),
+    importFolder: (handle, name) => invoke("importFolder", [handle, name]),
+    snapshot: (handle, selection) => invoke("snapshot", [handle, selection]),
+    changes: (taskId) => invoke("changes", [taskId]),
+    files: (taskId, path) => invoke("files", [taskId, path]),
+    checks: (taskId) => invoke("checks", [taskId]),
+    checkLog: (taskId, checkId) => invoke("checkLog", [taskId, checkId]),
+    findings: (taskId) => invoke("findings", [taskId]),
+    addFinding: (taskId, body) => invoke("addFinding", [taskId, body]),
+    accept: (taskId, revision, commit, generation) => invoke("accept", [taskId, revision, commit, generation]),
+    refine: (taskId, revision, request) => invoke("refine", [taskId, revision, request]),
   };
 }

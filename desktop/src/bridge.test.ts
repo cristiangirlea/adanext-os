@@ -156,6 +156,10 @@ describe("bridge", () => {
     expect(await bridge.handle(s.event(), "stopCoordinator", [])).toEqual({ ok: true, value: {} });
     expect(bodies[0]).toBe(JSON.stringify({ project: "repo", objective: "add a test" }));
     expect(bodies[2]).toBe(JSON.stringify(policy));
+    // The caps pass through as the owner chose them.
+    const capped = { ...policy, mode: "auto", timeout: "5m", max_turns: 3 };
+    expect((await bridge.handle(s.event(), "start", ["t1", 1, capped])).ok).toBe(true);
+    expect(bodies.at(-1)).toBe(JSON.stringify(capped));
     const start = fake.requests[2]!;
     expect(start.headers["if-match"]).toBe('"1"');
     expect(start.headers["content-type"]).toBe("application/json");
@@ -192,6 +196,13 @@ describe("bridge", () => {
       ["createTask", [{ project: "p" }]],
       ["start", ["t1", 1, { backend: "claude", model: "", effort: "", mode: "sudo" }]],
       ["start", ["t1", 1, { backend: "claude", model: "", mode: "auto" }]],
+      ["start", ["t1", 1, { backend: "claude", model: "", effort: "", mode: "auto", max_turns: 2.5 }]],
+      ["start", ["t1", 1, { backend: "claude", model: "", effort: "", mode: "auto", max_turns: "3" }]],
+      ["start", ["t1", 1, { backend: "claude", model: "", effort: "", mode: "auto", timeout: "5 m; rm" }]],
+      ["start", ["t1", 1, { backend: "claude", model: "", effort: "", mode: "auto", turns: 3 }]],
+      ["start", ["t1", 1, { backend: "claude", model: "", effort: "", mode: "auto", max_turns: 0 }]],
+      ["start", ["t1", 1, { backend: "claude", model: "", effort: "", mode: "auto", max_turns: -3 }]],
+      ["start", ["t1", 1, { backend: "claude", model: "", effort: "", mode: "auto", timeout: "1".repeat(32) + "m" }]],
       ["subscribe", ["s1", "a/1"]],
       ["unsubscribe", [1]],
       ["listTasks", ["unexpected"]],

@@ -85,6 +85,8 @@ type Workspaces struct {
 	// AfterSync is a test seam run after each sync under the project's lock,
 	// telling a clone from a fetch.
 	AfterSync func(ctx context.Context, cloned bool)
+	// afterWorktreeRemoved is a test seam between RemoveWorktree's two steps, a crash there.
+	afterWorktreeRemoved func() error
 }
 
 func (w *Workspaces) repo(project string) string {
@@ -377,7 +379,8 @@ func removeLocks(repo string) error {
 // in SQLite.
 func (w *Workspaces) writeConfig(project, repo, mirror string, src mirrorSource) (string, error) {
 	hooks := "hooksPath = " + quoteConfig(filepath.ToSlash(w.Inspector.Git.hooks))
-	if err := writeAdaConfig(repo, src, true, "[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n", hooks, "fsmonitor = false"); err != nil {
+	userAttributes, err := writeAdaConfig(repo, src, true, "[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n", hooks, "fsmonitor = false")
+	if err != nil {
 		return "", err
 	}
 	cfgData, _, err := readUnder(repo, filepath.Join(repo, "config"), maxFileSize)
@@ -388,6 +391,11 @@ func (w *Workspaces) writeConfig(project, repo, mirror string, src mirrorSource)
 		return "", err
 	}
 	sum := sha256.Sum256(cfgData)
+	// What Ada wrote of each attributes file, for the copies below.
+	written := map[string][]byte{}
+	if userAttributes != nil {
+		written["ada-attributes"] = userAttributes
+	}
 	for _, name := range []string{"exclude", "attributes"} {
 		dst := filepath.Join(repo, "info", name)
 		data, err := os.ReadFile(filepath.Join(mirror, "info", name))
@@ -403,6 +411,25 @@ func (w *Workspaces) writeConfig(project, repo, mirror string, src mirrorSource)
 		if _, err := writeCopy(dst, data, nil); err != nil {
 			return "", err
 		}
+		if name == "attributes" {
+			written[filepath.Join("info", "attributes")] = data
+		}
+	}
+	// Attributes change what a diff shows: a copy of what Ada wrote, kept outside the clone.
+	for _, a := range w.attributeFiles(project) {
+		data, ok := written[a.inClone]
+		if !ok {
+			if err := os.Remove(a.copy); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return "", err
+			}
+			continue
+		}
+		if err := writeNoFollow(a.copy, data); err != nil {
+			return "", err
+		}
+	}
+	if err := writeNoFollow(w.attributeCopiesMark(project), nil); err != nil {
+		return "", err
 	}
 	return hex.EncodeToString(sum[:]), nil
 }

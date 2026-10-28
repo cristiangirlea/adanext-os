@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -230,7 +231,10 @@ func TestHelperFakeEngine(t *testing.T) {
 	if wantDir == "" {
 		wantDir = filepath.Join(filepath.Dir(os.Getenv("HRN_HOME")), "work")
 	}
-	if input.Type != "start" || input.Task.Prompt != "objective\n\nAcceptance criteria:\ncriteria" || input.Task.Backend != "codex" || input.Task.Mode != "auto" || input.Task.Dir != wantDir || strings.Contains(input.Task.Dir, "never-use") {
+	// A refined attempt's prompt carries findings after the task's, in a worktree of its own beside the first.
+	refined := strings.HasPrefix(input.Task.Prompt, "objective\n\nAcceptance criteria:\ncriteria\n\n")
+	inDir := input.Task.Dir == wantDir || (refined && os.Getenv("ADA_FAKE_DIR") != "" && filepath.Dir(input.Task.Dir) == filepath.Dir(wantDir))
+	if input.Type != "start" || (input.Task.Prompt != "objective\n\nAcceptance criteria:\ncriteria" && !refined) || input.Task.Backend != "codex" || input.Task.Mode != "auto" || !inDir || strings.Contains(input.Task.Dir, "never-use") {
 		fmt.Fprintln(os.Stderr, "invalid scratch task")
 		os.Exit(2)
 	}
@@ -491,6 +495,29 @@ func TestHelperFakeEngine(t *testing.T) {
 				os.Exit(3)
 			}
 		}
+	}
+	if strings.HasPrefix(script, "refine_") {
+		// The first attempt leaves first.txt (and a project hook for refine_hook), uncommitted;
+		// a refined one records what it found of it and its prompt, and adds second.txt.
+		cwd, _ := os.Getwd()
+		status := "ok"
+		if refined {
+			data, _ := os.ReadFile(filepath.Join(cwd, "first.txt"))
+			mark("saw:" + strings.TrimSpace(string(data)))
+			mark("prompt:" + strconv.Quote(input.Task.Prompt))
+			_ = os.WriteFile(filepath.Join(cwd, "second.txt"), []byte("from the second attempt\n"), 0o644)
+		} else {
+			_ = os.WriteFile(filepath.Join(cwd, "first.txt"), []byte("from the first attempt\n"), 0o644)
+			if script == "refine_hook" {
+				_ = os.MkdirAll(filepath.Join(cwd, ".claude"), 0o700)
+				_ = os.WriteFile(filepath.Join(cwd, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0o600)
+			}
+			if script == "refine_fail" {
+				status = "failed"
+			}
+		}
+		line(6, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": status}})
+		os.Exit(0)
 	}
 	if script == "write_provider" {
 		// The agent adds a project hook to its worktree.

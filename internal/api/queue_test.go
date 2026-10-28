@@ -22,6 +22,22 @@ type recordingRunner struct {
 	mu       sync.Mutex
 	launched []string
 	canceled []string
+	active   map[string]bool
+}
+
+func (r *recordingRunner) TaskActive(task string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.active[task]
+}
+
+func (r *recordingRunner) setActive(task string, active bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.active == nil {
+		r.active = map[string]bool{}
+	}
+	r.active[task] = active
 }
 
 func (r *recordingRunner) LaunchAttempt(attempt string) {

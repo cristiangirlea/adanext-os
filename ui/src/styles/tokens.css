@@ -1,0 +1,43 @@
+/* The tiers every theme shares: type, the 4-point space scale, layers, and motion. Colours live
+   in theme-*.css, one file per theme, each defining the same colour tokens. */
+:root {
+  /* Source Sans 3 and JetBrains Mono are bundled (fonts.css); the system faces cover other scripts. */
+  --font: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+  --text-sm: 12px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --leading: 1.4;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-pill: 999px;
+
+  --z-base: 0;
+  --z-raised: 10;
+  --z-sticky: 100;
+  --z-drawer: 200;
+  --z-overlay: 300;
+  --z-palette: 400;
+  --z-toast: 500;
+
+  /* 90 to 140 ms: hover and press feedback. 180 to 350 ms: movement and entrances. */
+  --dur-90: 90ms;
+  --dur-120: 120ms;
+  --dur-140: 140ms;
+  --dur-180: 180ms;
+  --dur-280: 280ms;
+  --dur-350: 350ms;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+}

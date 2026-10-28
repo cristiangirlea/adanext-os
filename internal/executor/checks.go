@@ -117,6 +117,10 @@ func (e *Executor) commitAndVerify(a store.Attempt, active *active) {
 		e.recoverWorkspaceVerify(a, "workspace verification failed", err.Error())
 		return
 	}
+	// A refined attempt starts from the earlier one's commit; its baseline is still the task's.
+	if row.ImportedCommit != "" {
+		importedCommit = row.ImportedCommit
+	}
 
 	var verifying bool
 	err = e.owned(a.ID, func(tx *store.Tx) error {

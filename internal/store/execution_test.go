@@ -28,7 +28,7 @@ func TestVersionThreeAttemptMigratesForwardWithEmptyMode(t *testing.T) {
 	for _, column := range []string{"max_turns", "timeout", "provider_changes"} {
 		execute(t, s, "ALTER TABLE attempts DROP COLUMN "+column)
 	}
-	for _, query := range []string{"DROP TABLE check_results", "DROP TABLE check_baselines", "DROP TABLE check_worktrees", "DROP TABLE clone_configs", "ALTER TABLE workspaces DROP COLUMN tested_commit", "ALTER TABLE tasks DROP COLUMN checks_json"} {
+	for _, query := range []string{"DROP TABLE reviews", "DROP TABLE findings", "ALTER TABLE attempts DROP COLUMN refines", "ALTER TABLE workspaces DROP COLUMN imported_commit", "ALTER TABLE workspaces DROP COLUMN removed", "DROP TABLE check_results", "DROP TABLE check_baselines", "DROP TABLE check_worktrees", "DROP TABLE clone_configs", "ALTER TABLE workspaces DROP COLUMN tested_commit", "ALTER TABLE tasks DROP COLUMN checks_json"} {
 		execute(t, s, query)
 	}
 	execute(t, s, "ALTER TABLE attempts DROP COLUMN mode")
@@ -170,7 +170,7 @@ func TestVersionFourAddsModeAndCoordinatorWithoutChangingOldAttempt(t *testing.T
 	s := openTestStore(t)
 	seed(t, s)
 	var version int
-	if err := s.db.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil || version != 9 {
+	if err := s.db.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil || version != 10 {
 		t.Fatalf("version = %d: %v", version, err)
 	}
 	var mode string

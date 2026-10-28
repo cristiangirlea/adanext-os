@@ -476,6 +476,97 @@ tests and the Windows Job Object termination wait test; `-race` left to Linux) a
 Not verified: macOS process-tree tracking beyond process groups; hosted GitHub CI until the pull
 request runs.
 
+### M4.4a UI foundation (2026-10-28, #119)
+
+In `ui/` only: colour tokens per theme in `src/styles/theme-light.css` and
+`theme-workshop.css`, the shared tiers (type, space, layers, durations and the easing) in
+`tokens.css`, and the rest split by concern (`base`, `motion`, `controls`, `resize`, `palette`,
+`app`). `public/theme-boot.js` sets the saved theme on `<html>` before first paint under the
+unchanged CSP. `ui/scripts/contrast.mjs` checks the declared pairs in
+`src/styles/contrast-pairs.json` for WCAG AA in every theme and runs in `scripts/check.sh`. The
+effect registry and the motion switch are in `src/motion/`, the palette in `src/palette/`, the
+resize handle in `src/resize/`; the App reaches all three (Ctrl+P, the status bar's theme
+switch, the task list's edge). After the build, `ui/scripts/check-dist.mjs` checks that the
+built page still loads the boot script first, by a relative path. Status: implemented. The
+decisions are in the 2026-10-28 M4.4a entry of the decisions log.
+
+Evidence at the review fix commit of PR #121: `.hrn/check.sh` passed (`== windows exit 0, linux
+exit 0`), including the contrast step (73 pairs pass AA in each theme), the UI's 112 Vitest
+tests, the built page check and the seven Playwright tests against the rebuilt UI.
+
+Not verified: hosted GitHub CI until the pull request runs; the Electron window was not looked at
+by hand (the built page was, in a browser with a fake bridge, in both themes).
+
+### M4.4b The workspace UI (2026-10-28, #120)
+
+In `ui/`: the layout of plan section 3 in `src/App.tsx` and `src/workspace/` (navigation of
+projects and tasks, the selected task with its review and its activity rendered by event kind,
+the work area with Changes, Checks marked unsandboxed and Files, the status bar with branch,
+executor, agent, task state and Stop), the import flow (`ImportFlow.tsx`), the task form with its
+declared checks, and the policy picker fed by the capability matrix. Repository and agent text is
+rendered as text with control, bidirectional and invisible characters marked (`src/text/`).
+Source Sans 3 and JetBrains Mono are bundled from exact-pinned `@fontsource` packages
+(`src/styles/fonts.css`); `ui/scripts/check-dist.mjs` now also checks that the built fonts load
+from the build. In `desktop/`: the bridge's workspace methods (`src/bridge.ts`), the folder
+dialog in main, a text read for check logs (`src/adad.ts`), the typed preload methods, and the
+end-to-end flow (`e2e/workspace.spec.ts`, with `e2e/editengine`, a test-only shim in front of the
+fake engine that writes the agent's changes). Status: implemented. The decisions are in the
+2026-10-28 M4.4b entry of the decisions log.
+
+Not verified: hosted GitHub CI until the pull request runs; the Electron window was looked at only
+through the end-to-end test and a browser with a fake bridge.
+
+### M4.5 Demonstrations (2026-10-29, #124)
+
+The code part: an opt-in live demonstration of the whole workflow through the real app.
+`desktop/e2e/live/demo.spec.ts` runs the Electron window against an `adad` release build from
+this branch (it trusts only its embedded engine hash) and the pinned engine from `ADANEXT_ENGINE`.
+It proves the sign-in first with `cmd/ada-live -preflight-only` (the CLI's own status shows a plan
+sign-in; no `apiKeyHelper` and no key in `env`, managed settings included; the record masked),
+then builds a fixture repository in a scratch directory (`sum.js` with a failing
+`node --test sum.test.js`), imports it through the folder dialog (answered in the test only),
+creates the task with a fixed objective, the backend from `ADANEXT_LIVE_BACKEND` (codex by
+default), mode auto, a 5 minute time limit and, for claude, a 5 turn limit, and the test as the
+task's check; then Ready, Start, the review, the check, the changes and Accept. Each of the eight
+screenshots is kept only when the page held no e-mail-shaped text, home directory or user name
+both before and after it was taken, read from its text, its form values and its title,
+placeholder and aria-label attributes; Playwright's own screenshots, traces and videos are off.
+The fixture's git runs without the global and system git configuration. The results folder holds
+the screenshots and `results.json`: backend, CLI version, the preflight's outcome, masked status,
+settings line and a count of the user configuration it found (no plugin or server names), run id,
+duration, the check's result and baseline, the changed files and the accepted commit.
+
+The policy picker now offers a time limit and, where the backend takes one, a turn limit, and the
+bridge passes them to `adad`, which already enforced them on a start (M4.1); decisions log,
+2026-10-29.
+
+The opt-in: Playwright's default config ignores `e2e/live/`, the live config's spec skips itself
+unless `ADANEXT_LIVE=1`, and `scripts/live-demo.sh` refuses without it; `check.sh`, `test-e2e.sh`
+and the workflows never set it (`desktop/src/live.test.ts`, `TestCINeverSetsTheLiveOptIn`).
+
+To run it (Windows from Git Bash, or Ubuntu; the engine built first by
+`scripts/build-engine.sh`, `npm ci` done in `ui/` and `desktop/`):
+
+```bash
+ADANEXT_LIVE=1 ADANEXT_LIVE_BACKEND=codex ADANEXT_ENGINE=.engine/hrn.exe \
+  ADANEXT_LIVE_SCRATCH=E:/ada-live bash scripts/live-demo.sh
+```
+
+On Ubuntu `ADANEXT_ENGINE=.engine/hrn` and a scratch such as `/tmp/ada-live`. The scratch path
+appears on screen in the import dialog, so `ADANEXT_LIVE_SCRATCH` is required and must be an
+absolute directory outside the home folder (`HOME` and `USERPROFILE`, either slash form, any
+case); the script and the spec refuse it otherwise, before anything is built or started. Results go to `.hrn/live-demo/<backend>-<time>/` unless
+`ADANEXT_LIVE_RESULTS` names a folder; the scratch is removed after a passing run.
+
+Evidence, left for the supervisor:
+
+- Windows: revision, command, preflight (masked), CLI version, run id, duration, check, changed
+  files, accepted commit, screenshots: not yet run.
+- Ubuntu (owner action 13): not yet run.
+- Playwright flow on the pull request's ubuntu-latest job and the windows-latest job of the push
+  to `main`: not yet run.
+
+
 ## Decisions log
 
 - **2026-10-16, #76 review fixes: endpoint proof and shutdown order.** A predictable per-user
@@ -1729,6 +1820,170 @@ request runs.
   script. Reason: one set of tokens, motion rules and shared parts first keeps the workspace UI
   from growing a parallel style or effect system per component.
 
+- **2026-10-28, M4.3 changes and review (#118, settles #98).** Points the backlog entry left open.
+  1. Migration 0010 adds `attempts.refines` (the attempt a refine continues), `workspaces.imported_commit`
+     (the task's imported-changes commit, recorded by the first attempt's preparation and carried by
+     each refined one) and `workspaces.removed`, and the `findings` and `reviews` tables. A task
+     prepared before 0010 has no recorded imported-changes commit: its changes and files answer 409
+     `no_changes`.
+  2. Changes shows the newest attempt with an agent-changes commit, from the imported-changes commit
+     to it. Caps: 1000 files, 512 KiB per patch, 8 MiB of patches in all; rename threshold 50%, no
+     copy detection, `--full-index`. A path, and a patch, is the JSON string when its bytes are
+     UTF-8 and also base64 in `*_raw` when they are not. A file under `.claude/` or `.codex/`, or
+     named `.mcp.json`, is marked `provider`, beside the attempt's recorded provider changes. Files
+     lists at most 5000 entries and reads at most 1 MiB, walking the commit's trees by object id;
+     a symlink shows its stored target (4 KiB at most) and is never descended into. Both check the
+     clone config against Ada's copy first; a difference is 409 `workspace_mismatch`.
+     Review round 1 (PR #122): a type change, which git's patch writes as a deletion and an
+     addition under two headers, keeps both with its one file, and more patches than listed
+     files is an error unless the list was cut. Submodule pointers are shown: the diffs add
+     `--ignore-submodules=dirty` after the runner's `all`, and Files gives a submodule's recorded
+     commit. Git's listings (`--raw`, `--numstat`, `ls-tree`) are read as a stream: the first
+     records kept, the rest counted, and reading stops at 1,048,576 records or 64 MiB, where
+     `total_capped` says the total is a lower bound. The clone's `info/attributes` and Ada's copy
+     of the user's attributes file are compared with copies Ada keeps outside the clone, written
+     with the config, so an agent's `* -diff` is a workspace mismatch, not hidden patches; a
+     clone synced before this has no copies and refuses until its next preparation syncs it.
+     Review round 2: each copy holds the bytes Ada wrote, not the clone's file read back. The
+     copies have no hash in SQLite, unlike the config, so they fall inside the boundary of item 8
+     of the M4.2 second review: they catch a careless agent, not a determined one. A clone without the copies (no
+     `ada-attribute-copies` mark) that holds an attributes file is refused with a plain error,
+     409 `workspace_mismatch` over HTTP, and an ended attempt in it is not moved to recovery. A
+     read error from git is an error, not `total_capped`. Final review: a refine checks the clone
+     before it commits or removes anything, whatever the task's state, so an older clone or a
+     changed clone config refuses it with 409 `workspace_mismatch` and the worktrees stay; only a
+     worktree's own mismatch moves its attempt to `recovery_required`.
+  3. Findings attach to the attempt the task shows, at most 200 per task and 16 KiB each, any
+     current member. A refine's prompt carries the findings of the attempts since the newest
+     earlier one with a worktree (that one included), so a refine withdrawn while queued loses
+     none; with none recorded the prompt says so. Findings from any member are carried into the
+     requester's refined attempt, which runs on the requester's profile, by design; the refine
+     response lists the ids of the findings it carried. A 201st finding is 409
+     `too_many_findings`.
+  4. Accept takes `{"commit","generation"}` under If-Match from `awaiting_review`. The commit must
+     be the newest attempt's agent-changes commit and the branch's current tip, the generation the
+     coordinator's current ownership generation (Changes returns both); otherwise 409
+     `stale_review`. The review row records the commit, the generation and that attempt's check
+     results marked against the tip. A refused accept or refine by a member who is neither the
+     newest attempt's actor nor an owner is 403 `forbidden`; a non-member gets 404.
+  5. States: `awaiting_review -> accepted` and `awaiting_review | failed | canceled -> preparing`
+     (refine). The 2026-10-11 edges `awaiting_review -> refinement -> ready` are removed; the
+     `refinement` state stays in the schema, unreachable.
+  6. Refine runs its git work in the request, before the transaction that records the attempt:
+     for each earlier attempt with a worktree not yet removed, Ada's commit of its remaining
+     changes (as in M4.2, skipped when it already has one), then the removal, each recorded
+     (`tested_commit`, `removed`). So a refused, failed or interrupted refine is sent again and
+     each step finds its work done. A commit that finds the worktree no longer matching moves that
+     ended attempt to `recovery_required` with a recovery event, and the refine is refused, as it
+     is for any `recovery_required` attempt; the task keeps its state. The executor's own
+     knowledge also refuses it (409 `attempt_active`) while an attempt's run has not returned,
+     whose engine tree may still be torn down after its end is recorded.
+  7. The provider changes of the newest attempt with a worktree are "shown before a refine" as a
+     409 `provider_configuration_changed` carrying them, until the request sets
+     `acknowledge_provider_changes`; nothing is committed or removed before that.
+  8. Removal never follows a link: the attempt's directory, built from ids, is removed entry by
+     entry with each entry Lstat-checked, a link or junction removed as itself; the project
+     directory, its `worktrees/`, the clone and the clone's `worktrees/` must be real directories,
+     else the removal is a workspace mismatch. The admin directory is `repo.git/worktrees/<attempt>`,
+     the one Prepare verified the worktree uses. A real directory is made 0700 before it is read,
+     so a read-only directory an agent left does not block removal on Unix. The shared removal no
+     longer changes a link's
+     target mode: it chmodded the path before removing it, which on Unix followed a symlink and
+     made its target directory unreadable to others (seen in the Linux leg, fixed for check
+     worktrees too).
+  9. The refined attempt is prepared by `Workspaces.Continue`, not by a sync: no fetch, the clone
+     config checked against Ada's recorded hash, the branch required at the earlier attempt's
+     agent-changes commit and descending from the base commit, and nothing of the snapshot
+     applied again. Its baseline checks run on the task's imported-changes commit, not on the
+     commit the attempt started from.
+  10. The requester's profile: until per-user credential profiles land (M4b), a profile is the
+     attempt's actor, so a refine's attempt records the requester as its actor and the
+     continuation rule of 2026-10-13 does not carry the earlier actor over.
+
+- **2026-10-28, M4.4a UI foundation (#119).** Points the backlog entry left open.
+  1. The two loops (the busy spinner and the loading shimmer) run for a multiple of
+     `--dur-350`, with the one easing; nothing else loops, and neither runs once loading ends.
+  2. Ctrl+P opens the palette on all scopes, Ctrl+Shift+P on quick actions alone, which reads
+     nothing from `adad`. Tasks are read with `listTasks` when a scope that shows them is first
+     shown, and read again on the next open rather than cached, so the palette never lists a
+     stale state. Recent holds the last five choices for the page's life.
+  3. The motion switch, like the theme, is a per-device choice in `localStorage`
+     (`ada.motion`); nothing turns it off by itself.
+  4. Contrast pairs: every pair the stylesheets draw. The text strengths, accent text and
+     accent foreground; each status colour on all five backgrounds and on its own `-dim`;
+     `text-1` (and code, which inherits it) on each `-dim`; and as UI parts the accent on the
+     backgrounds and on `accent-dim`, the focus ring and the control borders (`border-2`,
+     `border-3`). `border-1` is a decorative divider and is not checked; the focus ring is drawn
+     outside the control, so it is checked on the backgrounds.
+  5. A corner of the resize handle reports its width as the separator's value and both sides in
+     `aria-valuetext`.
+  6. Choosing a project in the palette filters its tasks by that exact project id, shown with a
+     "Show all" button, rather than by a text search for it.
+
+- **2026-10-28, M4.4b the workspace UI (#120).** Points the backlog entry left open.
+  1. Fonts: Source Sans 3 (`@fontsource/source-sans-3` 5.3.1) and JetBrains Mono
+     (`@fontsource/jetbrains-mono` 5.3.0), both SIL OFL 1.1, exact pins in `ui/package.json`, the
+     only dependencies the slice adds. Only the Latin and Latin Extended subsets, Source Sans 3 at
+     400 and 600 and JetBrains Mono at 400, are imported; other scripts fall back to the system
+     faces. Vite copies the files into `ui/dist/assets` (`assetsInlineLimit: 0`, since the CSP's
+     `font-src 'self'` refuses `data:` URLs), so they load from the page's own origin under the
+     unchanged CSP and nothing is fetched from a remote host; `check-dist.mjs` fails a built
+     stylesheet whose font is remote, inlined or missing. JetBrains Mono's ligatures are turned
+     off wherever code, paths and patches show, so `!=` reads as two characters.
+  2. The import flow's path: main opens the native dialog (`chooseFolder`, no arguments) and keeps
+     the chosen path behind a random handle, bound to the window that chose it, for 15 minutes and
+     until a task is created from its snapshot. Inspect, import and snapshot take the handle; the
+     bridge refuses any argument object carrying a `path` field (`path_refused`) and a handle that
+     is unknown, expired or another window's (`folder_expired`). An `already_imported` refusal
+     keeps that project on the handle, so the owner continues with a new snapshot of it.
+  3. Refusals now carry the fields some answers hold beside the code (blockers, project, tasks,
+     path, provider changes) through the bridge as `details`.
+  4. "Include these changes in the new feature branch" is the default offer and can be declined:
+     the snapshot body takes `include_changes` (true when absent); false stores no staged or
+     unstaged patch, so the snapshot is the base commit plus the chosen untracked files. The flow
+     shows the offer as a checkbox, checked, with the staged and unstaged paths listed, and lets
+     the owner choose the untracked files one by one. A file that looks like a credential (the
+     rule of `internal/source`'s `sensitive`, mirrored in `ui/src/workspace/sensitive.ts`) is
+     marked and unselected; choosing it sends it in `include_sensitive` too. With more untracked
+     files than a snapshot takes (1000), none is preselected and the flow says so.
+  5. The policy: readonly is preselected and a backend change goes back to readonly, so yolo is
+     never preselected; each mode shows the matrix's cells for the chosen backend (enforced by
+     whom, asked and not verified, not offered), and yolo lists what it turns off. Mode `ask` is
+     shown as refused, with the matrix's reason. A task's policy chosen at creation is the one its
+     Start uses; Start and refine offer the picker again.
+  6. Accept binds the changes last read in the work area: their commit and generation, and it is
+     disabled until they are read, and while they are stale.
+  7. The status bar's agent is the attempt's own: a task's attempt in `/v1` now carries the
+     backend, model, effort and mode it was started with (read from the `attempts` row, no
+     migration). Executor is always local until M5.
+  8. Check logs reach the renderer as text, at most 1 MiB of each (the rest stays an artifact);
+     adad's truncation mark and the bridge's own cut are both shown.
+  9. Projects in the navigation are the distinct projects of the listed tasks plus those imported
+     in this window; a project's name is known only for the latter (no project list route yet).
+     The palette's project scope is unchanged.
+  10. Review round 1 (PR #123): the review panel is keyed by task and attempt, so an
+     acknowledgement of provider changes never carries to another task; a refusal's blockers and
+     refused path are shown; provider paths, a check's directory and environment keys and a
+     tool's name are marked like every other repository text; the marked characters are the
+     classes Cc, Cf, Zl and Zp (tab and, in multi-line text, newline excepted) plus the Hangul
+     fillers; a file's patch is in the page only while its row is open; a check log's refusal
+     keeps its request id and details.
+
+- **2026-10-29, M4.5 time and turn limits in the policy picker (#124).** The demonstration has to
+  run mode auto under a time and a turn cap through the app, and the UI had no way to set them,
+  though `adad` has taken `timeout` and `max_turns` on a start since M4.1. So the picker offers
+  them, and the bridge passes them on.
+  1. Fixed choices, not free text: a time limit of none, 2m, 5m, 10m or 30m, and a turn limit of
+     none, 3, 5, 10 or 25. None is the default, and an unset cap is not sent.
+  2. Each is offered only where the backend's `options` in the capability matrix list it: the time
+     limit for claude and codex, the turn limit only for claude (codex has no turn limit, M4.1).
+  3. `adad` owns the ranges (a turn limit of 1 to 1000, a time limit up to 24 hours) and the
+     matrix check; the bridge checks only the shape (a positive whole number of turns, a duration
+     string of at most 32 lower-case characters) and refuses unknown keys.
+  4. A backend change clears both caps, as it already returns the mode to readonly; a mode change
+     keeps them.
+  5. A refine takes the same caps as a start, through the same policy shape.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
@@ -1767,7 +2022,10 @@ request runs.
     answer by exiting) goes to `recovery_required` with the result kept, until a reconcile flow
     exists; a cancel or a Stop the engine answers by exiting naturally ends the task `canceled`
     with the result kept.
-13. For M4.5 (decisions log, 2026-10-20): an Ubuntu machine with a desktop session Ada's
-    desktop app can open in, and a claude or codex CLI signed in there on the owner's plan, so
-    the Ubuntu demonstration can run. Say which machine. The CLI's own status command must show
-    a plan sign-in, not an API key, and its settings no `apiKeyHelper` or key in `env`.
+13. For M4.5 (decisions log, 2026-10-20), the Ubuntu demonstration: an Ubuntu machine with a
+    desktop session (or xvfb) where Ada's desktop app can open, with Go and Node as pinned, git,
+    a Harness checkout for `scripts/build-engine.sh`, and a claude or codex CLI signed in there on
+    the owner's plan. Say which machine. Before the run, the CLI's own status command (`claude
+    auth status` or `codex login status`) must show a plan sign-in, not an API key, and its
+    settings no `apiKeyHelper` or key in `env`; `scripts/live-demo.sh` checks both through
+    `cmd/ada-live -preflight-only` and refuses otherwise. The command is in the M4.5 section above.

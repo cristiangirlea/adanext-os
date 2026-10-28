@@ -51,13 +51,13 @@ func TestTaskReadsIncludeTheCurrentAttemptAndQueuePosition(t *testing.T) {
 			}
 		}
 	}
-	check(map[string]any{"id": attempt, "state": "pending", "queue_position": 1, "provider_changes": nil, "provider_flagged": false})
+	check(map[string]any{"id": attempt, "state": "pending", "queue_position": 1, "backend": "codex", "model": "", "effort": "", "mode": "auto", "provider_changes": nil, "provider_flagged": false})
 	// Latest means insertion order, including a terminal attempt, not lexicographic id or timestamp.
 	ctx := context.Background()
 	if err := f.s.CreateAttempt(ctx, store.Attempt{ID: "latest", Task: id, Actor: "alice", Backend: "codex", Mode: "auto", Executor: "local", State: "canceled"}); err != nil {
 		t.Fatal(err)
 	}
-	check(map[string]any{"id": "latest", "state": "canceled", "provider_changes": nil, "provider_flagged": false})
+	check(map[string]any{"id": "latest", "state": "canceled", "backend": "codex", "model": "", "effort": "", "mode": "auto", "provider_changes": nil, "provider_flagged": false})
 	if code, _ := do(t, asUser(f, "bob"), "GET", "/v1/tasks/"+id, "", "", nil); code != 404 {
 		t.Fatal(code)
 	}
@@ -130,5 +130,25 @@ func TestTaskAttemptsStayScopedToTheTaskAndCurrentMembership(t *testing.T) {
 	code, body = do(t, bob, "GET", "/v1/tasks", "", "", nil)
 	if code != 200 || bytes.Contains(body, []byte(id)) || bytes.Contains(body, []byte(attempt)) {
 		t.Fatalf("removed listing: %d %s", code, body)
+	}
+}
+
+func TestTaskReadsCarryTheAttemptsBackendModelEffortAndMode(t *testing.T) {
+	f := newFixture(t, Execution{EngineSHA256: strings.Repeat("a", 64), Runner: noopRunner{}})
+	id := create(t, f, "agent-create", "work")["id"].(string)
+	if code, _ := f.request(t, "POST", "/v1/tasks/"+id+"/ready", "agent-ready", "0", nil); code != 200 {
+		t.Fatal(code)
+	}
+	if code, body := f.request(t, "POST", "/v1/tasks/"+id+"/start", "agent-start", "1", []byte(`{"backend":"claude","model":"claude-opus-5-5","effort":"high","mode":"readonly"}`)); code != 200 {
+		t.Fatalf("start: %d %s", code, body)
+	}
+	for _, path := range []string{"/v1/tasks/" + id, "/v1/tasks"} {
+		code, body := f.request(t, "GET", path, "", "", nil)
+		if code != 200 {
+			t.Fatalf("%s: %d %s", path, code, body)
+		}
+		if !bytes.Contains(body, []byte(`"backend":"claude","model":"claude-opus-5-5","effort":"high","mode":"readonly"`)) {
+			t.Fatalf("%s carries no agent: %s", path, body)
+		}
 	}
 }

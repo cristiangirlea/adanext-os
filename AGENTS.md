@@ -19,11 +19,12 @@ taking a slice, and don't reopen a recorded decision.
 | `internal/api/` | Versioned HTTP API and event subscriptions. |
 | `internal/store/` | SQLite state, schema migrations, and task records. |
 | `internal/ipc/` | Private local listener and singleton lock. |
-| `internal/source/` | Reading a user's repository: the git runner, the layout, config and index read in Go, the mirror git directory, inspection with its blockers and findings (provider configuration among them), the capture a snapshot takes, and Ada's clone of each project with the attempts' worktrees and their manifests. |
+| `internal/source/` | Reading a user's repository: the git runner, the layout, config and index read in Go, the mirror git directory, inspection with its blockers and findings (provider configuration among them), the capture a snapshot takes, and Ada's clone of each project with the attempts' worktrees and their manifests, a task's changes and files read through git, and a worktree's removal. |
 | `engine/engine.json` | The Harness revision Ada runs and its build's SHA-256 per platform, embedded into `adad` by `engine/pin.go`. Change it only in a slice that says why. |
 | `ui/` | The React and TypeScript app both shells load. It reaches `adad` only through `AdaClient` (`ui/src/client/api.ts`); the adapters under `ui/src/client/adapters/` are the only modules that may touch the bridge or the network. |
-| `desktop/` | The Electron shell: main (the bridge to `adad` over its pipe or socket, the Node SSE client) and preload. Versions are pinned; the full layout arrives in M4. |
+| `desktop/` | The Electron shell: main (the bridge to `adad` over its pipe or socket, the Node SSE client, the import folder dialog) and preload. Versions are pinned. End-to-end tests in `desktop/e2e/` run the real window against a real `adad` and the fake engine. |
 | `scripts/check.sh` | Everything CI runs, in order. |
+| `scripts/live-demo.sh` | The opt-in live demonstration through the app (`ADANEXT_LIVE=1`, never in CI): `desktop/e2e/live/`. |
 | `scripts/test-hooks.sh` | Tests for the two Claude hooks, run by `check.sh`. |
 | `scripts/gen-settings.py` | Writes `.claude/settings.json`, giving every Bash rule its PowerShell twin. Edit the lists there, not the JSON. |
 | `scripts/build-engine.sh` | Builds `hrn` from a clean Harness checkout at the pinned revision into `.engine/`. |
@@ -43,8 +44,9 @@ bash scripts/check.sh
 It runs `go vet`, `go build`, `go test -count=1`, `go test -race` where cgo and a C compiler exist,
 the repository rules (`.claude/hooks/repo-rules.sh`: gofmt, the Harness-internal import ban,
 Electron isolation), a syntax check of every script, the hook tests, `npm ci --ignore-scripts` in
-`desktop/` and `ui/`, and in each a typecheck, Vitest (`--maxWorkers=2`) and a build. The owner's
-Windows PC has no cgo: there, `-race` is left to CI.
+`desktop/` and `ui/`, the UI themes' contrast check (`ui/scripts/contrast.mjs`), and in each a
+typecheck, Vitest (`--maxWorkers=2`) and a build (in `ui/`, then a check of the built page,
+`ui/scripts/check-dist.mjs`). The owner's Windows PC has no cgo: there, `-race` is left to CI.
 
 The repository is public (since 2026-10-13, MIT), so CI runs on GitHub's runners, free for public
 repositories: pull requests on `ubuntu-latest`, pushes to `main` on `ubuntu-latest` and
