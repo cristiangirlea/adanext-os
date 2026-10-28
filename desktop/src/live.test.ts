@@ -94,10 +94,17 @@ const bash = process.platform === "win32" ? path.join(process.env.ProgramFiles ?
 
 describe.skipIf(!existsSync(bash) && process.platform === "win32")("live-demo.sh's scratch check", () => {
   const home = os.homedir();
+  const withoutLive = () => {
+    const env = { ...process.env };
+    delete env.ADANEXT_LIVE;
+    return env;
+  };
   const run = (scratch: string) =>
     spawnSync(bash, [path.join(root, "scripts", "live-demo.sh"), "--check-inputs"], {
-      env: { ...process.env, ADANEXT_LIVE: "1", ADANEXT_ENGINE: path.join(root, "AGENTS.md"), ADANEXT_LIVE_SCRATCH: scratch },
+      // No ADANEXT_LIVE: the check needs none, and tests never set the opt-in.
+      env: { ...withoutLive(), ADANEXT_ENGINE: path.join(root, "AGENTS.md"), ADANEXT_LIVE_SCRATCH: scratch },
       encoding: "utf8",
+      timeout: 20_000,
     });
 
   it("accepts an absolute directory outside the home folder", () => {
@@ -110,5 +117,11 @@ describe.skipIf(!existsSync(bash) && process.platform === "win32")("live-demo.sh
   it("refuses a relative directory and one in the home folder, in either slash form or case", () => {
     const refused = ["ada-live", path.join(home, "ada-live"), path.join(home, "ada-live").split(path.sep).join("/").toUpperCase()];
     for (const scratch of refused) expect(run(scratch).status, scratch).toBe(2);
+  });
+
+  it("still refuses the real run without the opt-in", () => {
+    const r = spawnSync(bash, [path.join(root, "scripts", "live-demo.sh")], { env: withoutLive(), encoding: "utf8", timeout: 20_000 });
+    expect(r.status).toBe(2);
+    expect(r.stdout).toContain("set ADANEXT_LIVE=1");
   });
 });

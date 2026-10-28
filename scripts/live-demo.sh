@@ -3,10 +3,14 @@
 # plan. Never run by check.sh or CI. Needs ADANEXT_LIVE=1, ADANEXT_ENGINE (the hrn built by
 # scripts/build-engine.sh) and ADANEXT_LIVE_SCRATCH, an absolute directory outside the home folder
 # (its path shows on screen); ADANEXT_LIVE_BACKEND picks claude or codex (codex by default).
-# `--check-inputs` validates these and exits before building (desktop/src/live.test.ts).
+# `--check-inputs` validates the others without the opt-in and exits before building
+# (desktop/src/live.test.ts).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [ "${ADANEXT_LIVE:-}" != "1" ]; then
+# --check-inputs runs nothing, so it alone needs no opt-in: tests and CI never set ADANEXT_LIVE.
+check_only=""
+[ "${1:-}" = "--check-inputs" ] && check_only=1
+if [ -z "$check_only" ] && [ "${ADANEXT_LIVE:-}" != "1" ]; then
   echo "live-demo: refused: it runs on the owner's plan; set ADANEXT_LIVE=1"
   exit 2
 fi
@@ -37,7 +41,7 @@ for home in "${HOME:-}" "${USERPROFILE:-}"; do
   fi
 done
 # --check-inputs stops here, so the refusals above can be tested without building anything.
-if [ "${1:-}" = "--check-inputs" ]; then
+if [ -n "$check_only" ]; then
   echo "live-demo: inputs accepted"
   exit 0
 fi
