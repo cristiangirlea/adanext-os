@@ -1,0 +1,104 @@
+/* The resize handle: a 6 px strip on an edge, a 12 px square on a corner, placed on its pane's
+   side (the pane is position: relative). The line shows on hover, focus and drag. */
+:root {
+  --resize-edge: 6px;
+  --resize-corner: 12px;
+}
+.resize-handle {
+  position: absolute;
+  z-index: var(--z-raised);
+  touch-action: none;
+}
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity var(--dur-120) var(--ease);
+}
+.resize-handle:hover::after,
+.resize-handle:focus-visible::after,
+.resize-handle:active::after {
+  opacity: 1;
+}
+.resize-handle:focus-visible {
+  outline-offset: 0;
+}
+
+.resize-handle[data-side="e"],
+.resize-handle[data-side="w"] {
+  top: 0;
+  bottom: 0;
+  width: var(--resize-edge);
+  cursor: col-resize;
+}
+.resize-handle[data-side="e"] {
+  right: calc(var(--resize-edge) / -2);
+}
+.resize-handle[data-side="w"] {
+  left: calc(var(--resize-edge) / -2);
+}
+.resize-handle[data-side="e"]::after,
+.resize-handle[data-side="w"]::after {
+  top: 0;
+  bottom: 0;
+  left: calc(50% - 1px);
+  width: 2px;
+}
+
+.resize-handle[data-side="n"],
+.resize-handle[data-side="s"] {
+  left: 0;
+  right: 0;
+  height: var(--resize-edge);
+  cursor: row-resize;
+}
+.resize-handle[data-side="n"] {
+  top: calc(var(--resize-edge) / -2);
+}
+.resize-handle[data-side="s"] {
+  bottom: calc(var(--resize-edge) / -2);
+}
+.resize-handle[data-side="n"]::after,
+.resize-handle[data-side="s"]::after {
+  left: 0;
+  right: 0;
+  top: calc(50% - 1px);
+  height: 2px;
+}
+
+.resize-handle[data-side="ne"],
+.resize-handle[data-side="nw"],
+.resize-handle[data-side="se"],
+.resize-handle[data-side="sw"] {
+  width: var(--resize-corner);
+  height: var(--resize-corner);
+  z-index: calc(var(--z-raised) + 1);
+}
+.resize-handle[data-side="ne"] {
+  top: calc(var(--resize-corner) / -2);
+  right: calc(var(--resize-corner) / -2);
+  cursor: nesw-resize;
+}
+.resize-handle[data-side="sw"] {
+  bottom: calc(var(--resize-corner) / -2);
+  left: calc(var(--resize-corner) / -2);
+  cursor: nesw-resize;
+}
+.resize-handle[data-side="nw"] {
+  top: calc(var(--resize-corner) / -2);
+  left: calc(var(--resize-corner) / -2);
+  cursor: nwse-resize;
+}
+.resize-handle[data-side="se"] {
+  bottom: calc(var(--resize-corner) / -2);
+  right: calc(var(--resize-corner) / -2);
+  cursor: nwse-resize;
+}
+.resize-handle[data-side="ne"]::after,
+.resize-handle[data-side="nw"]::after,
+.resize-handle[data-side="se"]::after,
+.resize-handle[data-side="sw"]::after {
+  inset: 3px;
+  border-radius: 50%;
+}

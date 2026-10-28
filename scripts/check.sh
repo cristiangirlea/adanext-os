@@ -68,6 +68,9 @@ step "ui lockfile installs"
 
 # Vitest workers are capped in each package's test script (--maxWorkers=2) so a run fits a
 # hosted runner's memory. The ui is built before the desktop, which loads ui/dist at run time.
+step "ui contrast (WCAG AA for every theme's declared token pairs)"
+node ui/scripts/contrast.mjs
+
 step "ui typecheck, tests and build"
 (cd ui && npm run typecheck && npm test && npm run build)
 

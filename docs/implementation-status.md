@@ -476,6 +476,26 @@ tests and the Windows Job Object termination wait test; `-race` left to Linux) a
 Not verified: macOS process-tree tracking beyond process groups; hosted GitHub CI until the pull
 request runs.
 
+### M4.4a UI foundation (2026-10-28, #119)
+
+In `ui/` only: colour tokens per theme in `src/styles/theme-light.css` and
+`theme-workshop.css`, the shared tiers (type, space, layers, durations and the easing) in
+`tokens.css`, and the rest split by concern (`base`, `motion`, `controls`, `resize`, `palette`,
+`app`). `public/theme-boot.js` sets the saved theme on `<html>` before first paint under the
+unchanged CSP. `ui/scripts/contrast.mjs` checks the declared pairs in
+`src/styles/contrast-pairs.json` for WCAG AA in every theme and runs in `scripts/check.sh`. The
+effect registry and the motion switch are in `src/motion/`, the palette in `src/palette/`, the
+resize handle in `src/resize/`; the App reaches all three (Ctrl+P, the status bar's theme
+switch, the task list's edge). Status: implemented. The decisions are in the 2026-10-28 M4.4a
+entry of the decisions log.
+
+Evidence at the commit that adds this section: `.hrn/check.sh` passed (`== windows exit 0, linux
+exit 0`), including the contrast step (58 pairs pass AA in each theme), the UI's 104 Vitest
+tests and the seven Playwright tests against the rebuilt UI.
+
+Not verified: hosted GitHub CI until the pull request runs; the Electron window was not looked at
+by hand (the built page was, in a browser with a fake bridge, in both themes).
+
 ## Decisions log
 
 - **2026-10-16, #76 review fixes: endpoint proof and shutdown order.** A predictable per-user
@@ -1728,6 +1748,22 @@ request runs.
   dependency: the palette is a native `<dialog>` written by hand, and the contrast check is a
   script. Reason: one set of tokens, motion rules and shared parts first keeps the workspace UI
   from growing a parallel style or effect system per component.
+
+- **2026-10-28, M4.4a UI foundation (#119).** Points the backlog entry left open.
+  1. The two loops (the busy spinner and the loading shimmer) run for a multiple of
+     `--dur-350`, with the one easing; nothing else loops, and neither runs once loading ends.
+  2. Ctrl+P opens the palette on all scopes, Ctrl+Shift+P on quick actions alone, which reads
+     nothing from `adad`. Tasks are read with `listTasks` when a scope that shows them is first
+     shown, and read again on the next open rather than cached, so the palette never lists a
+     stale state. Recent holds the last five choices for the page's life.
+  3. The motion switch, like the theme, is a per-device choice in `localStorage`
+     (`ada.motion`); nothing turns it off by itself.
+  4. Contrast pairs: text strengths, accent text and accent foreground, each status colour on
+     the backgrounds and on its own `-dim`, and the focus ring and the control borders
+     (`border-2`, `border-3`) as UI parts. `border-1` is a decorative divider and is not
+     checked; the focus ring is drawn outside the control, so it is checked on the backgrounds.
+  5. A corner of the resize handle reports its width as the separator's value and both sides in
+     `aria-valuetext`.
 
 ## Owner actions pending
 

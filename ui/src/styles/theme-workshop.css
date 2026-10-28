@@ -1,0 +1,45 @@
+/* Workshop, the dark preset: oiled steel greys under a verdigris accent, warm status colours
+   like enamel paint on tools. Same tokens as the light theme, six-digit hex only. */
+:root[data-theme="workshop"] {
+  color-scheme: dark;
+
+  --bg: #1b2125;
+  --sidebar: #161b1e;
+  --surface: #20272c;
+  --elevated: #273036;
+  --overlay: #2c363d;
+  --scrim: #0a0e10;
+
+  --border-1: #333e46;
+  --border-2: #75848d;
+  --border-3: #8a98a1;
+
+  --text-1: #edf1f2;
+  --text-2: #c4cdd2;
+  --text-3: #a0adb4;
+
+  --accent: #5cc0ad;
+  --accent-text: #7dd3c2;
+  --accent-dim: #1e3a36;
+  --accent-fg: #0b1f1b;
+
+  --success: #74d08f;
+  --success-dim: #1b3424;
+  --warning: #e8b660;
+  --warning-dim: #382d17;
+  --danger: #f28b80;
+  --danger-dim: #3c2220;
+  --info: #8cb8f3;
+  --info-dim: #1c2a3f;
+
+  --focus: #a2c9ff;
+
+  --chart-1: #5cc0ad;
+  --chart-2: #8cb8f3;
+  --chart-3: #e8b660;
+  --chart-4: #c3a0e6;
+  --chart-5: #74d08f;
+  --chart-6: #f28b80;
+  --chart-7: #a0adb4;
+  --chart-8: #ea8fc0;
+}

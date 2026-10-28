@@ -43,8 +43,9 @@ bash scripts/check.sh
 It runs `go vet`, `go build`, `go test -count=1`, `go test -race` where cgo and a C compiler exist,
 the repository rules (`.claude/hooks/repo-rules.sh`: gofmt, the Harness-internal import ban,
 Electron isolation), a syntax check of every script, the hook tests, `npm ci --ignore-scripts` in
-`desktop/` and `ui/`, and in each a typecheck, Vitest (`--maxWorkers=2`) and a build. The owner's
-Windows PC has no cgo: there, `-race` is left to CI.
+`desktop/` and `ui/`, the UI themes' contrast check (`ui/scripts/contrast.mjs`), and in each a
+typecheck, Vitest (`--maxWorkers=2`) and a build. The owner's Windows PC has no cgo: there,
+`-race` is left to CI.
 
 The repository is public (since 2026-10-13, MIT), so CI runs on GitHub's runners, free for public
 repositories: pull requests on `ubuntu-latest`, pushes to `main` on `ubuntu-latest` and
