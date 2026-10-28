@@ -21,6 +21,7 @@ type Reviewer interface {
 	Files(ctx context.Context, project, commit, path, configSHA256 string, maxEntries int, maxBytes int64) (source.FileView, error)
 	CommitAgentChanges(ctx context.Context, m source.Manifest, hash string) (tested, imported string, err error)
 	RemoveWorktree(project, attempt string) error
+	VerifyClone(project, configSHA256 string) error
 }
 
 // TaskActivity reports a task whose attempt the executor still runs or tears down;
@@ -485,8 +486,9 @@ func (h *handler) refine(w http.ResponseWriter, r *http.Request) {
 }
 
 // releaseEarlierWork commits each ended attempt's remaining changes on ada/<task> and removes its
-// worktree, once the refine would be allowed. An attempt whose worktree no longer matches its
-// record moves to recovery_required, which refuses the refine.
+// worktree, once the refine would be allowed. The clone is checked first, and a clone that fails
+// refuses the refine with nothing changed. An attempt whose worktree no longer matches its record
+// moves to recovery_required, which refuses the refine.
 func (h *handler) releaseEarlierWork(ctx context.Context, user, task string, revision int64, acknowledged bool) error {
 	rs, err := h.store.ReviewState(ctx, user, task)
 	if err != nil {
@@ -497,6 +499,16 @@ func (h *handler) releaseEarlierWork(ctx context.Context, user, task string, rev
 	}
 	if active, ok := h.exec.Runner.(TaskActivity); ok && active.TaskActive(task) {
 		return store.ErrAttemptActive
+	}
+	// The clone is checked before anything is committed or removed, whatever the task's state.
+	if h.exec.Review != nil {
+		cfg, err := h.store.CloneConfig(ctx, rs.Project)
+		if err != nil {
+			return err
+		}
+		if err := h.exec.Review.VerifyClone(rs.Project, cfg); err != nil {
+			return err
+		}
 	}
 	for _, a := range rs.Attempts {
 		if !a.Workspace || a.Removed {

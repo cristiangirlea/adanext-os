@@ -25,6 +25,7 @@ type fakeReviewer struct {
 	mu       sync.Mutex
 	calls    []string
 	commitFn func() (string, error)
+	verifyFn func() error
 }
 
 func (f *fakeReviewer) record(call string) {
@@ -65,6 +66,13 @@ func (f *fakeReviewer) CommitAgentChanges(_ context.Context, m source.Manifest, 
 		return tested, "", err
 	}
 	return reviewedCommit, "", nil
+}
+
+func (f *fakeReviewer) VerifyClone(_, _ string) error {
+	if f.verifyFn != nil {
+		return f.verifyFn()
+	}
+	return nil
 }
 
 func (f *fakeReviewer) RemoveWorktree(_, attempt string) error {
@@ -436,5 +444,19 @@ func TestARefineInAnOlderCloneIsRefusedAndTheAttemptIsNotRecovered(t *testing.T)
 	a, _ := f.s.AttemptByID(context.Background(), "ra")
 	if a.State != "ended_failed" || len(f.runner.launches()) != 0 {
 		t.Fatalf("attempt %+v, launches %v", a, f.runner.launches())
+	}
+}
+
+func TestARefineOfAnAwaitingReviewTaskInAnOlderCloneIsRefusedBeforeAnythingIsRemoved(t *testing.T) {
+	f := newReviewFixture(t, store.AwaitingReview, "ended_ok", reviewedCommit)
+	f.reviewer.verifyFn = func() error { return fmt.Errorf("info/attributes: %w", source.ErrNoAttributeCopies) }
+	if status, data := f.do(t, "erin", "POST", "/v1/tasks/rt/refine", "r", "4", refineBody); status != 409 || !bytes.Contains(data, []byte(`"workspace_mismatch"`)) {
+		t.Fatalf("refine = %d %s", status, data)
+	}
+	if calls := f.reviewer.recorded(); len(calls) != 0 || len(f.runner.launches()) != 0 {
+		t.Fatalf("calls %v, launches %v", calls, f.runner.launches())
+	}
+	if a, _ := f.s.AttemptByID(context.Background(), "ra"); a.State != "ended_ok" {
+		t.Fatalf("attempt %+v", a)
 	}
 }

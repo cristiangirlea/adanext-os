@@ -35,6 +35,13 @@ func (w *Workspaces) safeConfigFlags() []string {
 // ended attempt in it is not moved to recovery.
 var ErrNoAttributeCopies = errors.New("the clone predates Ada's copies of its attributes files")
 
+// VerifyClone checks the project's clone as every review call does: Ada's hooks directory, the
+// clone config against Ada's copy and configSHA256, and the attributes files against their copies.
+func (w *Workspaces) VerifyClone(project, configSHA256 string) error {
+	defer w.lock(project)()
+	return w.verifyCloneConfig(project, configSHA256, "")
+}
+
 // attributeFile is an attributes file git reads in the clone, and Ada's copy of it outside.
 type attributeFile struct{ inClone, copy string }
 

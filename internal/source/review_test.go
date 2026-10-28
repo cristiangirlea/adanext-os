@@ -631,3 +631,23 @@ func TestAReadErrorIsAnErrorNotACap(t *testing.T) {
 		t.Fatalf("a stop by the callback: complete %v, err %v", complete, err)
 	}
 }
+
+func TestVerifyCloneRefusesAnOlderCloneWithAttributes(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"a.txt": "a\n"})
+	write(t, filepath.Join(dir, ".git", "info", "attributes"), "*.bin binary\n")
+	w := newWorkspaces(t)
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	if err := w.VerifyClone("p", configHash(t, w)); err != nil {
+		t.Fatalf("a synced clone: %v", err)
+	}
+	if err := os.Remove(w.attributeCopiesMark("p")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(w.attributeFiles("p")[0].copy); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.VerifyClone("p", configHash(t, w)); !errors.Is(err, ErrNoAttributeCopies) {
+		t.Fatalf("an older clone: %v", err)
+	}
+}
