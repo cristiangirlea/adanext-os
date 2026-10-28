@@ -53,6 +53,7 @@ type handler struct {
 	admission         *Admission
 	beforeStopHandoff func()      // Test seam between the stop's commit and the executor handoff.
 	capturing         atomic.Bool // Held by the one snapshot capturing and storing at a time.
+	refineMu          sync.Mutex  // One refine releases earlier work at a time.
 }
 
 // AttemptRunner is the narrow API-to-executor notification boundary.
@@ -149,6 +150,9 @@ type Execution struct {
 	// Branches reads the tip of a task's branch in Ada's clone; *source.Workspaces satisfies it.
 	// nil leaves every tip unknown, so every check result reads invalidated.
 	Branches BranchReader
+	// Review reads changes and files and releases an ended attempt's worktree for a refine;
+	// *source.Workspaces satisfies it. nil answers those routes engine_unavailable.
+	Review Reviewer
 }
 
 // BranchReader reads the current commit of ada/<task> in a project's clone; "" when unknown.
@@ -192,6 +196,12 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/tasks/{id}/ready", h.transition(store.Draft, store.Ready))
 	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
+	mux.HandleFunc("GET /v1/tasks/{id}/changes", h.changes)
+	mux.HandleFunc("GET /v1/tasks/{id}/files", h.files)
+	mux.HandleFunc("GET /v1/tasks/{id}/findings", h.listFindings)
+	mux.HandleFunc("POST /v1/tasks/{id}/findings", h.addFinding)
+	mux.HandleFunc("POST /v1/tasks/{id}/accept", h.accept)
+	mux.HandleFunc("POST /v1/tasks/{id}/refine", h.refine)
 	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
 	mux.HandleFunc("GET /v1/capabilities", h.capabilities)
 	mux.HandleFunc("POST /v1/projects/inspect", h.inspect)
@@ -476,8 +486,13 @@ var errNotReplayed = errors.New("not a replay")
 // outside the transaction; it reports whether it answered. mutate still
 // decides: a request that raced this one to the key gets its response there.
 func (h *handler) replayed(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope) bool {
+	return h.replayedAt(w, r, user, k, scope, "")
+}
+
+// replayedAt is replayed for a request whose hash carries its If-Match revision.
+func (h *handler) replayedAt(w http.ResponseWriter, r *http.Request, user, k string, scope *store.Scope, revision string) bool {
 	body := r.Context().Value(bodyKey{}).([]byte)
-	cached, err := h.store.Do(r.Context(), user, k, hash(r, body, ""), scope, func(*store.Tx) ([]byte, error) { return nil, errNotReplayed })
+	cached, err := h.store.Do(r.Context(), user, k, hash(r, body, revision), scope, func(*store.Tx) ([]byte, error) { return nil, errNotReplayed })
 	if errors.Is(err, errNotReplayed) {
 		return false
 	}

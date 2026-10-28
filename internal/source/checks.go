@@ -30,6 +30,36 @@ func (w *Workspaces) safeConfigFlags() []string {
 	}
 }
 
+// ErrNoAttributeCopies is a clone holding an attributes file Ada kept no copy of: one synced before
+// Ada kept them. It is refused until the clone's next preparation, and is not a mismatch, so an
+// ended attempt in it is not moved to recovery.
+var ErrNoAttributeCopies = errors.New("the clone predates Ada's copies of its attributes files")
+
+// VerifyClone checks the project's clone as every review call does: Ada's hooks directory, the
+// clone config against Ada's copy and configSHA256, and the attributes files against their copies.
+func (w *Workspaces) VerifyClone(project, configSHA256 string) error {
+	defer w.lock(project)()
+	return w.verifyCloneConfig(project, configSHA256, "")
+}
+
+// attributeFile is an attributes file git reads in the clone, and Ada's copy of it outside.
+type attributeFile struct{ inClone, copy string }
+
+// attributeCopiesMark marks a project whose attribute copies Ada keeps: a clone synced before it
+// has none, and its attributes files are refused but not taken as a mismatch.
+func (w *Workspaces) attributeCopiesMark(project string) string {
+	return filepath.Join(w.Root, project, "ada-attribute-copies")
+}
+
+// attributeFiles are the clone's info/attributes and the copy of the user's attributes file.
+func (w *Workspaces) attributeFiles(project string) []attributeFile {
+	dir := filepath.Join(w.Root, project)
+	return []attributeFile{
+		{filepath.Join("info", "attributes"), filepath.Join(dir, "ada-info-attributes")},
+		{"ada-attributes", filepath.Join(dir, "ada-attributes")},
+	}
+}
+
 func allowedCloneConfigKey(key string) bool {
 	switch key {
 	case "core.repositoryformatversion", "core.bare", "core.hookspath", "core.fsmonitor",
@@ -71,6 +101,18 @@ func (w *Workspaces) verifyCloneConfig(project, want, admin string) error {
 			if _, err := os.Lstat(filepath.Join(admin, name)); !errors.Is(err, fs.ErrNotExist) {
 				return mismatch("the worktree git directory holds %s", name)
 			}
+		}
+	}
+	_, markErr := os.Lstat(w.attributeCopiesMark(project))
+	for _, a := range w.attributeFiles(project) {
+		got, _, gotErr := readUnder(repo, filepath.Join(repo, a.inClone), maxFileSize)
+		kept, _, keptErr := readUnder(w.Root, a.copy, maxFileSize)
+		switch {
+		case errors.Is(gotErr, fs.ErrNotExist) && errors.Is(keptErr, fs.ErrNotExist):
+		case errors.Is(markErr, fs.ErrNotExist) && gotErr == nil && errors.Is(keptErr, fs.ErrNotExist):
+			return fmt.Errorf("%s: %w", filepath.ToSlash(a.inClone), ErrNoAttributeCopies)
+		case gotErr != nil || keptErr != nil || !bytes.Equal(got, kept):
+			return mismatch("the clone's %s differs from what Ada wrote", filepath.ToSlash(a.inClone))
 		}
 	}
 	parsed, err := parseConfig(cfgData)
@@ -334,12 +376,17 @@ func removeTreeNoFollow(path string) error {
 		return err
 	}
 	if isLink(path, info) || !info.IsDir() {
-		_ = os.Chmod(path, 0o600)
+		// Chmod follows a link, so only a real file loses a read-only bit first.
+		if !isLink(path, info) && info.Mode().IsRegular() {
+			_ = os.Chmod(path, 0o600)
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		return nil
 	}
+	// A real directory, so chmod changes it alone: a read-only one must open and lose entries.
+	_ = os.Chmod(path, 0o700)
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -357,7 +404,6 @@ func removeTreeNoFollow(path string) error {
 	if firstErr != nil {
 		return firstErr
 	}
-	_ = os.Chmod(path, 0o700)
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}

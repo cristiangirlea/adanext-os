@@ -267,6 +267,8 @@ type Attempt struct {
 	OwnershipGeneration                                     int64
 	EngineSHA256, RunID, NativeSession, State               string
 	Started, Ended                                          string
+	MaxTurns                                                int    // Recorded by a refine; a start writes its own.
+	Timeout                                                 string // Recorded by a refine; a start writes its own.
 }
 
 // CreateAttempt records intent with the authenticated actor. Continuations must

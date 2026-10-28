@@ -1750,6 +1750,86 @@ by hand (the built page was, in a browser with a fake bridge, in both themes).
   script. Reason: one set of tokens, motion rules and shared parts first keeps the workspace UI
   from growing a parallel style or effect system per component.
 
+- **2026-10-28, M4.3 changes and review (#118, settles #98).** Points the backlog entry left open.
+  1. Migration 0010 adds `attempts.refines` (the attempt a refine continues), `workspaces.imported_commit`
+     (the task's imported-changes commit, recorded by the first attempt's preparation and carried by
+     each refined one) and `workspaces.removed`, and the `findings` and `reviews` tables. A task
+     prepared before 0010 has no recorded imported-changes commit: its changes and files answer 409
+     `no_changes`.
+  2. Changes shows the newest attempt with an agent-changes commit, from the imported-changes commit
+     to it. Caps: 1000 files, 512 KiB per patch, 8 MiB of patches in all; rename threshold 50%, no
+     copy detection, `--full-index`. A path, and a patch, is the JSON string when its bytes are
+     UTF-8 and also base64 in `*_raw` when they are not. A file under `.claude/` or `.codex/`, or
+     named `.mcp.json`, is marked `provider`, beside the attempt's recorded provider changes. Files
+     lists at most 5000 entries and reads at most 1 MiB, walking the commit's trees by object id;
+     a symlink shows its stored target (4 KiB at most) and is never descended into. Both check the
+     clone config against Ada's copy first; a difference is 409 `workspace_mismatch`.
+     Review round 1 (PR #122): a type change, which git's patch writes as a deletion and an
+     addition under two headers, keeps both with its one file, and more patches than listed
+     files is an error unless the list was cut. Submodule pointers are shown: the diffs add
+     `--ignore-submodules=dirty` after the runner's `all`, and Files gives a submodule's recorded
+     commit. Git's listings (`--raw`, `--numstat`, `ls-tree`) are read as a stream: the first
+     records kept, the rest counted, and reading stops at 1,048,576 records or 64 MiB, where
+     `total_capped` says the total is a lower bound. The clone's `info/attributes` and Ada's copy
+     of the user's attributes file are compared with copies Ada keeps outside the clone, written
+     with the config, so an agent's `* -diff` is a workspace mismatch, not hidden patches; a
+     clone synced before this has no copies and refuses until its next preparation syncs it.
+     Review round 2: each copy holds the bytes Ada wrote, not the clone's file read back. The
+     copies have no hash in SQLite, unlike the config, so they fall inside the boundary of item 8
+     of the M4.2 second review: they catch a careless agent, not a determined one. A clone without the copies (no
+     `ada-attribute-copies` mark) that holds an attributes file is refused with a plain error,
+     409 `workspace_mismatch` over HTTP, and an ended attempt in it is not moved to recovery. A
+     read error from git is an error, not `total_capped`. Final review: a refine checks the clone
+     before it commits or removes anything, whatever the task's state, so an older clone or a
+     changed clone config refuses it with 409 `workspace_mismatch` and the worktrees stay; only a
+     worktree's own mismatch moves its attempt to `recovery_required`.
+  3. Findings attach to the attempt the task shows, at most 200 per task and 16 KiB each, any
+     current member. A refine's prompt carries the findings of the attempts since the newest
+     earlier one with a worktree (that one included), so a refine withdrawn while queued loses
+     none; with none recorded the prompt says so. Findings from any member are carried into the
+     requester's refined attempt, which runs on the requester's profile, by design; the refine
+     response lists the ids of the findings it carried. A 201st finding is 409
+     `too_many_findings`.
+  4. Accept takes `{"commit","generation"}` under If-Match from `awaiting_review`. The commit must
+     be the newest attempt's agent-changes commit and the branch's current tip, the generation the
+     coordinator's current ownership generation (Changes returns both); otherwise 409
+     `stale_review`. The review row records the commit, the generation and that attempt's check
+     results marked against the tip. A refused accept or refine by a member who is neither the
+     newest attempt's actor nor an owner is 403 `forbidden`; a non-member gets 404.
+  5. States: `awaiting_review -> accepted` and `awaiting_review | failed | canceled -> preparing`
+     (refine). The 2026-10-11 edges `awaiting_review -> refinement -> ready` are removed; the
+     `refinement` state stays in the schema, unreachable.
+  6. Refine runs its git work in the request, before the transaction that records the attempt:
+     for each earlier attempt with a worktree not yet removed, Ada's commit of its remaining
+     changes (as in M4.2, skipped when it already has one), then the removal, each recorded
+     (`tested_commit`, `removed`). So a refused, failed or interrupted refine is sent again and
+     each step finds its work done. A commit that finds the worktree no longer matching moves that
+     ended attempt to `recovery_required` with a recovery event, and the refine is refused, as it
+     is for any `recovery_required` attempt; the task keeps its state. The executor's own
+     knowledge also refuses it (409 `attempt_active`) while an attempt's run has not returned,
+     whose engine tree may still be torn down after its end is recorded.
+  7. The provider changes of the newest attempt with a worktree are "shown before a refine" as a
+     409 `provider_configuration_changed` carrying them, until the request sets
+     `acknowledge_provider_changes`; nothing is committed or removed before that.
+  8. Removal never follows a link: the attempt's directory, built from ids, is removed entry by
+     entry with each entry Lstat-checked, a link or junction removed as itself; the project
+     directory, its `worktrees/`, the clone and the clone's `worktrees/` must be real directories,
+     else the removal is a workspace mismatch. The admin directory is `repo.git/worktrees/<attempt>`,
+     the one Prepare verified the worktree uses. A real directory is made 0700 before it is read,
+     so a read-only directory an agent left does not block removal on Unix. The shared removal no
+     longer changes a link's
+     target mode: it chmodded the path before removing it, which on Unix followed a symlink and
+     made its target directory unreadable to others (seen in the Linux leg, fixed for check
+     worktrees too).
+  9. The refined attempt is prepared by `Workspaces.Continue`, not by a sync: no fetch, the clone
+     config checked against Ada's recorded hash, the branch required at the earlier attempt's
+     agent-changes commit and descending from the base commit, and nothing of the snapshot
+     applied again. Its baseline checks run on the task's imported-changes commit, not on the
+     commit the attempt started from.
+  10. The requester's profile: until per-user credential profiles land (M4b), a profile is the
+     attempt's actor, so a refine's attempt records the requester as its actor and the
+     continuation rule of 2026-10-13 does not carry the earlier actor over.
+
 - **2026-10-28, M4.4a UI foundation (#119).** Points the backlog entry left open.
   1. The two loops (the busy spinner and the loading shimmer) run for a multiple of
      `--dur-350`, with the one easing; nothing else loops, and neither runs once loading ends.

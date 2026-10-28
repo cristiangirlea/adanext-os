@@ -40,9 +40,10 @@ func allowedTransition(from, to State) bool {
 	case Verifying:
 		return to == AwaitingReview || to == Failed
 	case AwaitingReview:
-		return to == Accepted || to == Refinement
-	case Refinement:
-		return to == Ready
+		// Preparing is a refine: a new attempt on the task's branch.
+		return to == Accepted || to == Preparing
+	case Failed, Canceled:
+		return to == Preparing
 	case CancelRequested:
 		return to == Canceled || to == Interrupted
 	case Interrupted:
