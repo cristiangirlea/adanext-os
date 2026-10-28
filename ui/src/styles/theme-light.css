@@ -1,0 +1,46 @@
+/* Light slate, the default: cool grey-blue paper with a deep blue-green accent. Every colour is
+   a six-digit hex so scripts/contrast.mjs can check it; dims are pre-mixed, never alpha. */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #eef1f4;
+  --sidebar: #e3e8ed;
+  --surface: #f8fafb;
+  --elevated: #ffffff;
+  --overlay: #ffffff;
+  --scrim: #1a242b;
+
+  --border-1: #d3dbe1;
+  --border-2: #74838d;
+  --border-3: #5f6e78;
+
+  --text-1: #16222a;
+  --text-2: #364650;
+  --text-3: #52616b;
+
+  --accent: #13707f;
+  --accent-text: #0e6170;
+  --accent-dim: #d3e9ec;
+  --accent-fg: #ffffff;
+
+  --success: #1d6a3b;
+  --success-dim: #d9eee0;
+  --warning: #855000;
+  --warning-dim: #f5e8d0;
+  --danger: #a12f29;
+  --danger-dim: #f6dcd9;
+  --info: #2556a3;
+  --info-dim: #dce6f5;
+
+  --focus: #1f5fc4;
+
+  --chart-1: #13707f;
+  --chart-2: #2556a3;
+  --chart-3: #b26a00;
+  --chart-4: #7a4fa0;
+  --chart-5: #2f8a4c;
+  --chart-6: #b2452f;
+  --chart-7: #5f6e78;
+  --chart-8: #a3407a;
+}

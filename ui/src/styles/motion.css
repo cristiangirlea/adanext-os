@@ -1,0 +1,109 @@
+/* Motion: named durations and the one easing, transform and opacity only. The two loops run only
+   while something loads. Each effect's element carries data-effect and data-reduced from the
+   registry (src/motion/effects.ts); the rules at the end stop them as each declares. */
+
+[data-effect="press"] {
+  transition: transform var(--dur-90) var(--ease);
+}
+@media (prefers-reduced-motion: no-preference) {
+  body:not([data-motion="off"]) [data-effect="press"]:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+}
+
+[data-effect="entrance"] {
+  animation: rise var(--dur-180) var(--ease) both;
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Skeleton: the shape of the content, with a slow band of light across it. */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-row {
+  display: grid;
+  grid-template-columns: 5fr 2fr 1fr;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-2) var(--space-2);
+  border-bottom: 1px solid var(--border-1);
+}
+.skeleton-bar {
+  display: block;
+  height: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--border-1);
+}
+.skeleton-narrow {
+  width: 70%;
+}
+.skeleton-chip {
+  width: 56px;
+  height: 14px;
+  border-radius: var(--radius-pill);
+}
+.skeleton-shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 30%, var(--elevated) 50%, transparent 70%);
+  opacity: 0.6;
+  transform: translateX(-100%);
+}
+[data-effect="shimmer"] {
+  animation: sweep calc(var(--dur-350) * 4) var(--ease) infinite;
+}
+@keyframes sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Spinner: a ring beside a pressed button's label. */
+.spinner {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  margin-left: var(--space-2);
+  vertical-align: -0.1em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+}
+[data-effect="spinner"] {
+  animation: turn calc(var(--dur-350) * 2) var(--ease) infinite;
+}
+@keyframes turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* The kill switch and the system setting stop every registered effect the same way. */
+body[data-motion="off"] [data-reduced="static"],
+body[data-motion="off"] [data-reduced="off"] {
+  animation: none;
+  transition: none;
+}
+body[data-motion="off"] [data-reduced="off"] {
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-reduced="static"],
+  [data-reduced="off"] {
+    animation: none;
+    transition: none;
+  }
+  [data-reduced="off"] {
+    transform: none;
+  }
+}

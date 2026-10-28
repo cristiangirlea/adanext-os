@@ -1,0 +1,174 @@
+/* Today's single view: the task list, the selected task, the status bar. M4.4b replaces this
+   with the workspace layout. */
+.ada {
+  display: grid;
+  grid-template-columns: var(--tasks-width, 380px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+}
+.tasks,
+.detail {
+  overflow: auto;
+  padding: var(--space-3);
+}
+.tasks-pane {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  border-right: 1px solid var(--border-1);
+  background: var(--sidebar);
+}
+.tasks {
+  flex: 1;
+  min-width: 0;
+}
+.detail {
+  background: var(--surface);
+}
+.status {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border-1);
+  background: var(--sidebar);
+  color: var(--text-2);
+}
+.status > :first-child {
+  margin-right: auto;
+}
+.status .hint {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.theme-switch {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.create {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: flex-end;
+  margin-bottom: var(--space-3);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  text-align: left;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border-1);
+}
+th {
+  font-weight: 600;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+tbody tr {
+  cursor: pointer;
+}
+tbody tr:hover {
+  background: var(--surface);
+}
+tbody tr.selected {
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.state {
+  display: inline-block;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  background: var(--elevated);
+  color: var(--text-2);
+  border: 1px solid var(--border-1);
+}
+.state-running,
+.state-preparing,
+.state-verifying {
+  background: var(--info-dim);
+  color: var(--info);
+  border-color: transparent;
+}
+.state-awaiting_review {
+  background: var(--warning-dim);
+  color: var(--warning);
+  border-color: transparent;
+}
+.state-accepted {
+  background: var(--success-dim);
+  color: var(--success);
+  border-color: transparent;
+}
+.state-failed,
+.state-interrupted,
+.state-recovery_required {
+  background: var(--danger-dim);
+  color: var(--danger);
+  border-color: transparent;
+}
+
+.detail h2 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-lg);
+}
+.detail h3 {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  margin: var(--space-4) 0 6px;
+}
+.detail header p {
+  margin: 0;
+  color: var(--text-2);
+}
+.actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.stream {
+  font-weight: normal;
+  margin-left: var(--space-2);
+}
+.error {
+  margin: 0 0 10px;
+  padding: 6px var(--space-2);
+  border-left: 3px solid var(--danger);
+  background: var(--danger-dim);
+  color: var(--text-1);
+}
+.empty {
+  color: var(--text-3);
+}
+.events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.events li {
+  display: grid;
+  grid-template-columns: 4em 10em 1fr;
+  gap: var(--space-2);
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-1);
+}
+.seq {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+.payload {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
