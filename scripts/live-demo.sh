@@ -3,6 +3,7 @@
 # plan. Never run by check.sh or CI. Needs ADANEXT_LIVE=1, ADANEXT_ENGINE (the hrn built by
 # scripts/build-engine.sh) and ADANEXT_LIVE_SCRATCH, an absolute directory outside the home folder
 # (its path shows on screen); ADANEXT_LIVE_BACKEND picks claude or codex (codex by default).
+# `--check-inputs` validates these and exits before building (desktop/src/live.test.ts).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ "${ADANEXT_LIVE:-}" != "1" ]; then
@@ -21,7 +22,7 @@ fi
 norm() {
   local p="$1"
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) p=$(cygpath -m "$p");; esac
-  p="${p//\\//}"
+  p=$(printf '%s' "$p" | tr '\\' /)
   p="${p,,}"
   printf '%s' "${p%/}"
 }
@@ -35,6 +36,11 @@ for home in "${HOME:-}" "${USERPROFILE:-}"; do
     exit 2
   fi
 done
+# --check-inputs stops here, so the refusals above can be tested without building anything.
+if [ "${1:-}" = "--check-inputs" ]; then
+  echo "live-demo: inputs accepted"
+  exit 0
+fi
 ADANEXT_ENGINE="$(cd "$(dirname "$ADANEXT_ENGINE")" && pwd -P)/$(basename "$ADANEXT_ENGINE")"
 export GOFLAGS="${GOFLAGS:-} -p=4"
 mkdir -p .hrn

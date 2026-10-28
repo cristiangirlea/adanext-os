@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import config from "../playwright.config";
@@ -70,13 +72,43 @@ describe("the live demonstration", () => {
     expect(underHome("/home/someone/ada-live", ["/home/someone/"])).toBe(true);
   });
 
+  it("keeps why a preflight was refused, as ada-live masked it", () => {
+    const kept = preflightRecord({ outcome: "refused", refused_at: "preflight", reason: "claude auth status: exit status 1", preflight: {} });
+    expect(kept.refused_at).toBe("preflight");
+    expect(kept.reason).toBe("claude auth status: exit status 1");
+  });
+
   it("keeps only the outcome, version, masked status, settings line and a count of the user configuration", () => {
     const kept = preflightRecord({
       backend: "codex",
       outcome: "passed",
       preflight: { version: "0.163.0", status: "Logged in using ChatGPT\n", status_command: "codex login status", settings: "no apiKeyHelper, no key in env, managed settings included", user_configuration: ["plugin private-tool", "mcp server work-mail"] },
     });
-    expect(kept).toEqual({ outcome: "passed", version: "0.163.0", status: "Logged in using ChatGPT\n", settings: "no apiKeyHelper, no key in env, managed settings included", user_configuration_entries: 2 });
+    expect(kept).toEqual({ outcome: "passed", refused_at: undefined, reason: undefined, version: "0.163.0", status: "Logged in using ChatGPT\n", settings: "no apiKeyHelper, no key in env, managed settings included", user_configuration_entries: 2 });
     expect(preflightRecord({ outcome: "refused", preflight: { user_configuration: null } }).user_configuration_entries).toBe(0);
+  });
+});
+
+// Git Bash on Windows (plain `bash` there may be WSL), bash elsewhere.
+const bash = process.platform === "win32" ? path.join(process.env.ProgramFiles ?? "C:/Program Files", "Git", "bin", "bash.exe") : "bash";
+
+describe.skipIf(!existsSync(bash) && process.platform === "win32")("live-demo.sh's scratch check", () => {
+  const home = os.homedir();
+  const run = (scratch: string) =>
+    spawnSync(bash, [path.join(root, "scripts", "live-demo.sh"), "--check-inputs"], {
+      env: { ...process.env, ADANEXT_LIVE: "1", ADANEXT_ENGINE: path.join(root, "AGENTS.md"), ADANEXT_LIVE_SCRATCH: scratch },
+      encoding: "utf8",
+    });
+
+  it("accepts an absolute directory outside the home folder", () => {
+    const outside = process.platform === "win32" ? "Z:/ada-live" : "/tmp/ada-live";
+    const r = run(outside);
+    expect(r.stdout + r.stderr).toContain("inputs accepted");
+    expect(r.status).toBe(0);
+  });
+
+  it("refuses a relative directory and one in the home folder, in either slash form or case", () => {
+    const refused = ["ada-live", path.join(home, "ada-live"), path.join(home, "ada-live").split(path.sep).join("/").toUpperCase()];
+    for (const scratch of refused) expect(run(scratch).status, scratch).toBe(2);
   });
 });

@@ -58,6 +58,8 @@ export function underHome(scratch: string, homes: string[]): boolean {
 
 interface Preflight {
   outcome?: string;
+  refused_at?: string;
+  reason?: string;
   [key: string]: unknown;
   preflight?: { version?: string; status?: unknown; settings?: string; user_configuration?: unknown[] | null; [key: string]: unknown };
 }
@@ -66,5 +68,5 @@ interface Preflight {
 // owner's plugins or MCP servers, only how many there are.
 export function preflightRecord(result: Preflight) {
   const pre = result.preflight ?? {};
-  return { outcome: result.outcome, version: pre.version, status: pre.status, settings: pre.settings, user_configuration_entries: pre.user_configuration?.length ?? 0 };
+  return { outcome: result.outcome, refused_at: result.refused_at, reason: result.reason, version: pre.version, status: pre.status, settings: pre.settings, user_configuration_entries: pre.user_configuration?.length ?? 0 };
 }
