@@ -127,7 +127,26 @@ func (w *Workspaces) streamGit(ctx context.Context, repo string, args []string, 
 	if err := cmd.Start(); err != nil {
 		return false, err
 	}
-	reader := bufio.NewReaderSize(stdout, 64<<10)
+	complete, readErr := readTokens(stdout, each)
+	stopped := !complete
+	if stopped {
+		cancel()
+	}
+	_, _ = io.Copy(io.Discard, stdout)
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return false, fmt.Errorf("git %s: reading its output: %w", args[0], readErr)
+	}
+	if !stopped && waitErr != nil {
+		return false, fmt.Errorf("git %s: %w: %s", args[0], waitErr, strings.TrimSpace(stderr.String()))
+	}
+	return !stopped, nil
+}
+
+// readTokens gives each NUL-separated token of r to each until it returns false; complete is
+// false when it stopped there or at the hard caps on tokens and bytes. A read error is returned.
+func readTokens(r io.Reader, each func([]byte) bool) (complete bool, err error) {
+	reader := bufio.NewReaderSize(r, 64<<10)
 	var token []byte
 	var read int64
 	records, stopped := 0, false
@@ -144,7 +163,7 @@ func (w *Workspaces) streamGit(ctx context.Context, repo string, args []string, 
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				stopped = true
+				return false, err
 			}
 			break
 		}
@@ -154,14 +173,6 @@ func (w *Workspaces) streamGit(ctx context.Context, repo string, args []string, 
 		}
 		records++
 		token = token[:0]
-	}
-	if stopped {
-		cancel()
-	}
-	_, _ = io.Copy(io.Discard, stdout)
-	waitErr := cmd.Wait()
-	if !stopped && waitErr != nil {
-		return false, fmt.Errorf("git %s: %w: %s", args[0], waitErr, strings.TrimSpace(stderr.String()))
 	}
 	return !stopped, nil
 }

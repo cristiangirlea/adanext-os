@@ -1774,6 +1774,12 @@ by hand (the built page was, in a browser with a fake bridge, in both themes).
      of the user's attributes file are compared with copies Ada keeps outside the clone, written
      with the config, so an agent's `* -diff` is a workspace mismatch, not hidden patches; a
      clone synced before this has no copies and refuses until its next preparation syncs it.
+     Review round 2: each copy holds the bytes Ada wrote, not the clone's file read back. The
+     copies have no hash in SQLite, unlike the config, so they fall inside the boundary of item 8
+     of the M4.2 second review: they catch a careless agent, not a determined one. A clone without the copies (no
+     `ada-attribute-copies` mark) that holds an attributes file is refused with a plain error,
+     409 `workspace_mismatch` over HTTP, and an ended attempt in it is not moved to recovery. A
+     read error from git is an error, not `total_capped`.
   3. Findings attach to the attempt the task shows, at most 200 per task and 16 KiB each, any
      current member. A refine's prompt carries the findings of the attempts since the newest
      earlier one with a worktree (that one included), so a refine withdrawn while queued loses

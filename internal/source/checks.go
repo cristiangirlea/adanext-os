@@ -30,8 +30,19 @@ func (w *Workspaces) safeConfigFlags() []string {
 	}
 }
 
+// ErrNoAttributeCopies is a clone holding an attributes file Ada kept no copy of: one synced before
+// Ada kept them. It is refused until the clone's next preparation, and is not a mismatch, so an
+// ended attempt in it is not moved to recovery.
+var ErrNoAttributeCopies = errors.New("the clone predates Ada's copies of its attributes files")
+
 // attributeFile is an attributes file git reads in the clone, and Ada's copy of it outside.
 type attributeFile struct{ inClone, copy string }
+
+// attributeCopiesMark marks a project whose attribute copies Ada keeps: a clone synced before it
+// has none, and its attributes files are refused but not taken as a mismatch.
+func (w *Workspaces) attributeCopiesMark(project string) string {
+	return filepath.Join(w.Root, project, "ada-attribute-copies")
+}
 
 // attributeFiles are the clone's info/attributes and the copy of the user's attributes file.
 func (w *Workspaces) attributeFiles(project string) []attributeFile {
@@ -85,11 +96,14 @@ func (w *Workspaces) verifyCloneConfig(project, want, admin string) error {
 			}
 		}
 	}
+	_, markErr := os.Lstat(w.attributeCopiesMark(project))
 	for _, a := range w.attributeFiles(project) {
 		got, _, gotErr := readUnder(repo, filepath.Join(repo, a.inClone), maxFileSize)
 		kept, _, keptErr := readUnder(w.Root, a.copy, maxFileSize)
 		switch {
 		case errors.Is(gotErr, fs.ErrNotExist) && errors.Is(keptErr, fs.ErrNotExist):
+		case errors.Is(markErr, fs.ErrNotExist) && gotErr == nil && errors.Is(keptErr, fs.ErrNotExist):
+			return fmt.Errorf("%s: %w", filepath.ToSlash(a.inClone), ErrNoAttributeCopies)
 		case gotErr != nil || keptErr != nil || !bytes.Equal(got, kept):
 			return mismatch("the clone's %s differs from what Ada wrote", filepath.ToSlash(a.inClone))
 		}

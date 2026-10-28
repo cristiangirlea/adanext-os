@@ -65,6 +65,7 @@ func reviewError(w http.ResponseWriter, err error) {
 		{source.ErrNoSuchPath, 404, "not_found"},
 		{errNoChanges, 409, "no_changes"},
 		{errWorkspaceMismatch, 409, "workspace_mismatch"},
+		{source.ErrNoAttributeCopies, 409, "workspace_mismatch"},
 	} {
 		if errors.Is(err, c.err) {
 			writeJSON(w, c.status, errorBody{c.code, c.err.Error()})

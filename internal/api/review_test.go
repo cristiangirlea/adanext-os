@@ -426,3 +426,15 @@ func TestTheRefineResponseListsTheFindingsItCarries(t *testing.T) {
 		t.Fatalf("refine = %d %s", status, data)
 	}
 }
+
+func TestARefineInAnOlderCloneIsRefusedAndTheAttemptIsNotRecovered(t *testing.T) {
+	f := newReviewFixture(t, store.Failed, "ended_failed", "")
+	f.reviewer.commitFn = func() (string, error) { return "", fmt.Errorf("verify: %w", source.ErrNoAttributeCopies) }
+	if status, data := f.do(t, "erin", "POST", "/v1/tasks/rt/refine", "r", "4", refineBody); status != 409 || !bytes.Contains(data, []byte(`"workspace_mismatch"`)) {
+		t.Fatalf("refine = %d %s", status, data)
+	}
+	a, _ := f.s.AttemptByID(context.Background(), "ra")
+	if a.State != "ended_failed" || len(f.runner.launches()) != 0 {
+		t.Fatalf("attempt %+v, launches %v", a, f.runner.launches())
+	}
+}
