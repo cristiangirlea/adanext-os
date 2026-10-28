@@ -19,6 +19,19 @@ export const rowNames: Record<string, string> = {
   turn_limit: "Turn limit",
 };
 
+// The caps a start may set, offered only where the backend's options list them.
+export const timeLimits = ["2m", "5m", "10m", "30m"];
+export const turnLimits = [3, 5, 10, 25];
+
+// withLimit sets or clears one cap, so an unset cap is never sent.
+export function withLimit(policy: ExecutionPolicy, key: "timeout" | "max_turns", value: string): ExecutionPolicy {
+  const next = { ...policy };
+  if (value === "") delete next[key];
+  else if (key === "timeout") next.timeout = value;
+  else next.max_turns = Number(value);
+  return next;
+}
+
 // The rows a mode card shows; the rest are under "Every row".
 export const cardRows = ["read_only", "workspace_writes_and_shell", "network"];
 

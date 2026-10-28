@@ -516,6 +516,57 @@ fake engine that writes the agent's changes). Status: implemented. The decisions
 Not verified: hosted GitHub CI until the pull request runs; the Electron window was looked at only
 through the end-to-end test and a browser with a fake bridge.
 
+### M4.5 Demonstrations (2026-10-29, #124)
+
+The code part: an opt-in live demonstration of the whole workflow through the real app.
+`desktop/e2e/live/demo.spec.ts` runs the Electron window against an `adad` release build from
+this branch (it trusts only its embedded engine hash) and the pinned engine from `ADANEXT_ENGINE`.
+It proves the sign-in first with `cmd/ada-live -preflight-only` (the CLI's own status shows a plan
+sign-in; no `apiKeyHelper` and no key in `env`, managed settings included; the record masked),
+then builds a fixture repository in a scratch directory (`sum.js` with a failing
+`node --test sum.test.js`), imports it through the folder dialog (answered in the test only),
+creates the task with a fixed objective, the backend from `ADANEXT_LIVE_BACKEND` (codex by
+default), mode auto, a 5 minute time limit and, for claude, a 5 turn limit, and the test as the
+task's check; then Ready, Start, the review, the check, the changes and Accept. Each of the eight
+screenshots is kept only when the page held no e-mail-shaped text, home directory or user name
+both before and after it was taken, read from its text, its form values and its title,
+placeholder and aria-label attributes; Playwright's own screenshots, traces and videos are off.
+The fixture's git runs without the global and system git configuration. The results folder holds
+the screenshots and `results.json`: backend, CLI version, the preflight's outcome, masked status,
+settings line and a count of the user configuration it found (no plugin or server names), run id,
+duration, the check's result and baseline, the changed files and the accepted commit.
+
+The policy picker now offers a time limit and, where the backend takes one, a turn limit, and the
+bridge passes them to `adad`, which already enforced them on a start (M4.1); decisions log,
+2026-10-29.
+
+The opt-in: Playwright's default config ignores `e2e/live/`, the live config's spec skips itself
+unless `ADANEXT_LIVE=1`, and `scripts/live-demo.sh` refuses without it; `check.sh`, `test-e2e.sh`
+and the workflows never set it (`desktop/src/live.test.ts`, `TestCINeverSetsTheLiveOptIn`).
+
+To run it (Windows from Git Bash, or Ubuntu; the engine built first by
+`scripts/build-engine.sh`, `npm ci` done in `ui/` and `desktop/`):
+
+```bash
+ADANEXT_LIVE=1 ADANEXT_LIVE_BACKEND=codex ADANEXT_ENGINE=.engine/hrn.exe \
+  ADANEXT_LIVE_SCRATCH=E:/ada-live bash scripts/live-demo.sh
+```
+
+On Ubuntu `ADANEXT_ENGINE=.engine/hrn` and a scratch such as `/tmp/ada-live`. The scratch path
+appears on screen in the import dialog, so `ADANEXT_LIVE_SCRATCH` is required and must be an
+absolute directory outside the home folder (`HOME` and `USERPROFILE`, either slash form, any
+case); the script and the spec refuse it otherwise, before anything is built or started. Results go to `.hrn/live-demo/<backend>-<time>/` unless
+`ADANEXT_LIVE_RESULTS` names a folder; the scratch is removed after a passing run.
+
+Evidence, left for the supervisor:
+
+- Windows: revision, command, preflight (masked), CLI version, run id, duration, check, changed
+  files, accepted commit, screenshots: not yet run.
+- Ubuntu (owner action 13): not yet run.
+- Playwright flow on the pull request's ubuntu-latest job and the windows-latest job of the push
+  to `main`: not yet run.
+
+
 ## Decisions log
 
 - **2026-10-16, #76 review fixes: endpoint proof and shutdown order.** A predictable per-user
@@ -1918,6 +1969,21 @@ through the end-to-end test and a browser with a fake bridge.
      fillers; a file's patch is in the page only while its row is open; a check log's refusal
      keeps its request id and details.
 
+- **2026-10-29, M4.5 time and turn limits in the policy picker (#124).** The demonstration has to
+  run mode auto under a time and a turn cap through the app, and the UI had no way to set them,
+  though `adad` has taken `timeout` and `max_turns` on a start since M4.1. So the picker offers
+  them, and the bridge passes them on.
+  1. Fixed choices, not free text: a time limit of none, 2m, 5m, 10m or 30m, and a turn limit of
+     none, 3, 5, 10 or 25. None is the default, and an unset cap is not sent.
+  2. Each is offered only where the backend's `options` in the capability matrix list it: the time
+     limit for claude and codex, the turn limit only for claude (codex has no turn limit, M4.1).
+  3. `adad` owns the ranges (a turn limit of 1 to 1000, a time limit up to 24 hours) and the
+     matrix check; the bridge checks only the shape (a positive whole number of turns, a duration
+     string of at most 32 lower-case characters) and refuses unknown keys.
+  4. A backend change clears both caps, as it already returns the mode to readonly; a mode change
+     keeps them.
+  5. A refine takes the same caps as a start, through the same policy shape.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
@@ -1956,7 +2022,10 @@ through the end-to-end test and a browser with a fake bridge.
     answer by exiting) goes to `recovery_required` with the result kept, until a reconcile flow
     exists; a cancel or a Stop the engine answers by exiting naturally ends the task `canceled`
     with the result kept.
-13. For M4.5 (decisions log, 2026-10-20): an Ubuntu machine with a desktop session Ada's
-    desktop app can open in, and a claude or codex CLI signed in there on the owner's plan, so
-    the Ubuntu demonstration can run. Say which machine. The CLI's own status command must show
-    a plan sign-in, not an API key, and its settings no `apiKeyHelper` or key in `env`.
+13. For M4.5 (decisions log, 2026-10-20), the Ubuntu demonstration: an Ubuntu machine with a
+    desktop session (or xvfb) where Ada's desktop app can open, with Go and Node as pinned, git,
+    a Harness checkout for `scripts/build-engine.sh`, and a claude or codex CLI signed in there on
+    the owner's plan. Say which machine. Before the run, the CLI's own status command (`claude
+    auth status` or `codex login status`) must show a plan sign-in, not an API key, and its
+    settings no `apiKeyHelper` or key in `env`; `scripts/live-demo.sh` checks both through
+    `cmd/ada-live -preflight-only` and refuses otherwise. The command is in the M4.5 section above.

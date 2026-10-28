@@ -147,12 +147,15 @@ function carriesPath(args: unknown[]): boolean {
 function isPolicy(value: unknown): value is ExecutionPolicy {
   return (
     isRecord(value) &&
-    hasKeys(value, ["backend", "model", "effort", "mode"]) &&
+    hasKeys(value, ["backend", "model", "effort", "mode"], ["timeout", "max_turns"]) &&
     typeof value.backend === "string" &&
     typeof value.model === "string" &&
     typeof value.effort === "string" &&
     typeof value.mode === "string" &&
-    modes.has(value.mode as ExecutionPolicy["mode"])
+    modes.has(value.mode as ExecutionPolicy["mode"]) &&
+    // adad checks the caps' ranges; the bridge only their shape.
+    (value.timeout === undefined || (typeof value.timeout === "string" && /^[0-9a-z.]{1,32}$/.test(value.timeout))) &&
+    (value.max_turns === undefined || (typeof value.max_turns === "number" && Number.isSafeInteger(value.max_turns) && value.max_turns > 0))
   );
 }
 

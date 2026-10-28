@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { call } from "../src/adad";
 import { exec, executable, fixtureTest } from "./fixture";
+import { screenText } from "./live/guard";
 
 // The M4.4b flow in the real window against the real coordinator: import -> task -> fake engine
 // -> checks -> changes -> accept. The repository is a fixture this test builds in its own
@@ -61,7 +62,11 @@ fixtureTest("import, task, fake engine, checks, changes and accept through the w
     await expect(importer.getByRole("radio", { name: /readonly/ })).toBeChecked();
     await expect(importer.getByRole("radio", { name: /yolo/ })).not.toBeChecked();
     await expect(importer.getByText("Checks are not sandboxed.")).toBeVisible();
+    // The live demonstration finds each policy select inside its label, as here.
+    for (const name of ["Backend", "Time limit", "Turn limit"]) await expect(importer.locator("label").filter({ hasText: new RegExp(`^${name}`) }).locator("select"), name).toHaveCount(1);
     await importer.getByLabel("Objective", { exact: true }).fill("complete the workspace flow");
+    // The live demonstration's screen guard, run in the page, reads form values too.
+    expect(await page.locator("body").evaluate(screenText)).toContain("complete the workspace flow");
     await importer.getByRole("button", { name: "Add a check", exact: true }).click();
     await importer.getByLabel("Name", { exact: true }).fill("git works");
     await importer.getByLabel("Command", { exact: true }).fill("git --version");

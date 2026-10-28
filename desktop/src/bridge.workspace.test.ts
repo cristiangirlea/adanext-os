@@ -188,6 +188,7 @@ describe("the review routes through the bridge", () => {
       ["addFinding", ["t1", "the test is missing"]],
       ["accept", ["t1", 4, commit, 2]],
       ["refine", ["t1", 4, policy]],
+      ["refine", ["t1", 4, { ...policy, mode: "auto", timeout: "5m", max_turns: 3 }]],
     ];
     for (const [method, args] of calls) expect((await bridge.handle(event(), method, args)).ok, method).toBe(true);
     expect(seen.map((s) => `${s.method} ${s.url}`)).toEqual([
@@ -200,12 +201,15 @@ describe("the review routes through the bridge", () => {
       "POST /v1/tasks/t1/findings",
       "POST /v1/tasks/t1/accept",
       "POST /v1/tasks/t1/refine",
+      "POST /v1/tasks/t1/refine",
     ]);
     expect(seen[6]!.body).toBe(JSON.stringify({ body: "the test is missing" }));
     expect(seen[7]!.body).toBe(JSON.stringify({ commit, generation: 2 }));
     expect(seen[7]!.headers["if-match"]).toBe('"4"');
     expect(seen[8]!.body).toBe(JSON.stringify(policy));
     expect(seen[8]!.headers["if-match"]).toBe('"4"');
+    // A refine takes the caps as a start does.
+    expect(seen[9]!.body).toBe(JSON.stringify({ ...policy, mode: "auto", timeout: "5m", max_turns: 3 }));
   });
 
   it("refuses malformed review calls without reaching adad", async () => {
@@ -222,6 +226,8 @@ describe("the review routes through the bridge", () => {
       ["accept", ["t1", 4, "a".repeat(40), -1]],
       ["refine", ["t1", 4, { ...policy, mode: "ask" }]],
       ["refine", ["t1", 4, { backend: "claude", model: "", effort: "", mode: "readonly" }]],
+      ["refine", ["t1", 4, { ...policy, max_turns: 0 }]],
+      ["refine", ["t1", 4, { ...policy, timeout: 300 }]],
       ["createTask", [{ project: "p", objective: "o", checks: [{ argv: "go test" }] }]],
       ["createTask", [{ project: "p", objective: "o", snapshot: "../s" }]],
       ["capabilities", ["x"]],

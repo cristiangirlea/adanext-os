@@ -1,6 +1,6 @@
 import { useId } from "react";
 import type { Capabilities, ExecutionPolicy } from "../client/api";
-import { cardRows, claim, modeOrder, rowNames, yoloDisables } from "./policy";
+import { cardRows, claim, modeOrder, rowNames, timeLimits, turnLimits, withLimit, yoloDisables } from "./policy";
 
 // Backend, model, effort and mode, all from the capability matrix. Each mode shows what it
 // actually holds for the chosen backend, cell by cell, so "readonly" never reads as a sandbox
@@ -54,6 +54,32 @@ export function PolicyPicker({ matrix, value, onChange, legend = "Agent" }: { ma
             ))}
           </select>
         </label>
+        {backend?.options.includes("timeout") && (
+          <label>
+            Time limit
+            <select value={value.timeout ?? ""} onChange={(e) => onChange(withLimit(value, "timeout", e.target.value))}>
+              <option value="">None</option>
+              {timeLimits.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {backend?.options.includes("max_turns") && (
+          <label>
+            Turn limit
+            <select value={value.max_turns === undefined ? "" : String(value.max_turns)} onChange={(e) => onChange(withLimit(value, "max_turns", e.target.value))}>
+              <option value="">None</option>
+              {turnLimits.map((t) => (
+                <option key={t} value={String(t)}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {backend?.installed && (
         <p className="policy-cli">
