@@ -46,7 +46,7 @@ func writeMirror(mirror string, src mirrorSource) error {
 		}
 	}
 	l := src.layout
-	if err := writeAdaConfig(mirror, src, false, ""); err != nil {
+	if _, err := writeAdaConfig(mirror, src, false, ""); err != nil {
 		return err
 	}
 	if copied, err := copyRepoFile(l.gitDir, filepath.Join(l.gitDir, "HEAD"), filepath.Join(mirror, "HEAD")); err != nil || !copied {
@@ -103,8 +103,8 @@ func writeMirror(mirror string, src mirrorSource) error {
 // writeAdaConfig writes the config of Ada's git directory dir: the format
 // version and object format, the data-only keys, and copies of the user's
 // excludes and attributes files; core holds further [core] lines, and
-// sections further sections.
-func writeAdaConfig(dir string, src mirrorSource, bare bool, sections string, core ...string) error {
+// sections further sections. It returns the attributes it copied, nil for none.
+func writeAdaConfig(dir string, src mirrorSource, bare bool, sections string, core ...string) (attributes []byte, err error) {
 	var cfg strings.Builder
 	version, _ := src.repo.get("core.repositoryformatversion")
 	if version == "" {
@@ -125,17 +125,20 @@ func writeAdaConfig(dir string, src mirrorSource, bare bool, sections string, co
 	} {
 		dst := filepath.Join(dir, f.name)
 		if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
+			return nil, err
 		}
 		path := src.files.userFile(src.merged, f.key, f.fallback)
 		if path == "" || IsRemotePath(path) {
 			continue
 		}
-		copied, err := copyUserFile(path, dst)
+		data, copied, err := copyUserFile(path, dst)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if copied {
+			if f.name == "ada-attributes" {
+				attributes = data
+			}
 			cfg.WriteString("\t" + f.key[len("core."):] + " = " + quoteConfig(filepath.ToSlash(dst)) + "\n")
 		}
 	}
@@ -143,25 +146,26 @@ func writeAdaConfig(dir string, src mirrorSource, bare bool, sections string, co
 		cfg.WriteString("[extensions]\n\tobjectformat = " + quoteConfig(format) + "\n")
 	}
 	cfg.WriteString(sections)
-	return os.WriteFile(filepath.Join(dir, "config"), []byte(cfg.String()), 0o600)
+	return attributes, os.WriteFile(filepath.Join(dir, "config"), []byte(cfg.String()), 0o600)
 }
 
 // copyUserFile copies a regular file a config names, following its local
-// links; a missing, non-regular or remote one is not copied.
-func copyUserFile(src, dst string) (bool, error) {
+// links, and returns what it wrote; a missing, non-regular or remote one is not copied.
+func copyUserFile(src, dst string) ([]byte, bool, error) {
 	resolved, ok := localPath(src, true)
 	if !ok {
-		return false, nil
+		return nil, false, nil
 	}
 	if info, err := os.Lstat(resolved); errors.Is(err, fs.ErrNotExist) {
-		return false, nil
+		return nil, false, nil
 	} else if err != nil {
-		return false, err
+		return nil, false, err
 	} else if !info.Mode().IsRegular() {
-		return false, nil
+		return nil, false, nil
 	}
 	data, _, err := readFile(resolved, maxFileSize)
-	return writeCopy(dst, data, err)
+	copied, err := writeCopy(dst, data, err)
+	return data, copied, err
 }
 
 // copyRepoFile copies a file of the git directory base, read through no link;

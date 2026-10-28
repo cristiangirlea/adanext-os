@@ -565,3 +565,89 @@ func TestListingsAndDiffRecordsStopAtTheirHardCap(t *testing.T) {
 		t.Fatal("a lookup past the record cap found its entry")
 	}
 }
+
+func TestAnOlderCloneWithAttributesButNoCopiesIsRefusedWithoutAMismatch(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"a.txt": "a\n"})
+	write(t, filepath.Join(dir, ".git", "info", "attributes"), "*.bin binary\n")
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	// A clone synced before Ada kept copies of its attributes files.
+	for _, path := range []string{w.attributeFiles("p")[0].copy, w.attributeFiles("p")[1].copy, w.attributeCopiesMark("p")} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	write(t, filepath.Join(m.Path, "a.txt"), "changed\n")
+	row := m
+	row.Head = ""
+	var mm *MismatchError
+	if _, _, err := w.CommitAgentChanges(context.Background(), row, m.Hash()); !errors.Is(err, ErrNoAttributeCopies) || errors.As(err, &mm) {
+		t.Fatalf("commit in an older clone: %v", err)
+	}
+	if _, err := w.Changes(context.Background(), "p", m.Head, m.Head, configHash(t, w), DefaultChangeLimits); !errors.Is(err, ErrNoAttributeCopies) {
+		t.Fatalf("changes in an older clone: %v", err)
+	}
+}
+
+func TestAttributeCopiesHoldWhatAdaWrote(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"a.txt": "a\n"})
+	write(t, filepath.Join(dir, ".git", "info", "attributes"), "*.bin binary\n")
+	w := newWorkspaces(t)
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	got, err := os.ReadFile(w.attributeFiles("p")[0].copy)
+	if err != nil || string(got) != "*.bin binary\n" {
+		t.Fatalf("the info/attributes copy: %q %v", got, err)
+	}
+}
+
+type failingReader struct {
+	data []byte
+	err  error
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func TestAReadErrorIsAnErrorNotACap(t *testing.T) {
+	broken := errors.New("pipe broke")
+	var seen []string
+	complete, err := readTokens(&failingReader{data: []byte("a\x00b\x00partial"), err: broken}, func(tok []byte) bool {
+		seen = append(seen, string(tok))
+		return true
+	})
+	if !errors.Is(err, broken) || complete || strings.Join(seen, ",") != "a,b" {
+		t.Fatalf("complete %v, err %v, seen %v", complete, err, seen)
+	}
+	complete, err = readTokens(strings.NewReader("a\x00b\x00"), func([]byte) bool { return false })
+	if err != nil || complete {
+		t.Fatalf("a stop by the callback: complete %v, err %v", complete, err)
+	}
+}
+
+func TestVerifyCloneRefusesAnOlderCloneWithAttributes(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"a.txt": "a\n"})
+	write(t, filepath.Join(dir, ".git", "info", "attributes"), "*.bin binary\n")
+	w := newWorkspaces(t)
+	mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	if err := w.VerifyClone("p", configHash(t, w)); err != nil {
+		t.Fatalf("a synced clone: %v", err)
+	}
+	if err := os.Remove(w.attributeCopiesMark("p")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(w.attributeFiles("p")[0].copy); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.VerifyClone("p", configHash(t, w)); !errors.Is(err, ErrNoAttributeCopies) {
+		t.Fatalf("an older clone: %v", err)
+	}
+}
