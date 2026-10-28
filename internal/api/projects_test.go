@@ -471,6 +471,40 @@ func TestASnapshotThatDeclinesTheChangesStoresNoPatchesButKeepsTheChosenFiles(t 
 	}
 }
 
+func TestADeclinedSnapshotReportsAProviderFileStagedForDeletionThatItsWorktreeStillHolds(t *testing.T) {
+	p := newProjectsFixture(t)
+	dir := canonicalTemp(t)
+	runGit(t, dir, "init", "-q")
+	writeFile(t, filepath.Join(dir, "a.txt"), "one\n")
+	writeFile(t, filepath.Join(dir, ".claude", "settings.json"), "{}\n")
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-q", "-m", "first")
+	runGit(t, dir, "rm", "-q", ".claude/settings.json")
+	project := p.importRepo(t, "alice", "import-1", dir)
+	path := "/v1/projects/" + project.ID + "/snapshots"
+	type provider struct {
+		ID                    string `json:"id"`
+		ProviderConfiguration *struct {
+			Paths []string `json:"paths"`
+			Count int      `json:"count"`
+		} `json:"provider_configuration"`
+	}
+	status, data := p.call(t, "alice", "POST", path, "snap-off", map[string]any{"untracked": []string{}, "include_sensitive": []string{}, "include_changes": false})
+	declined := decodeJSON[provider](t, data)
+	if status != 201 || declined.ProviderConfiguration == nil || !slices.Contains(declined.ProviderConfiguration.Paths, ".claude/settings.json") || declined.ProviderConfiguration.Count != 1 {
+		t.Fatalf("declined snapshot = %d %s", status, data)
+	}
+	status, data = p.call(t, "alice", "POST", "/v1/tasks", "task-1", map[string]any{"project": project.ID, "objective": "o", "snapshot": declined.ID})
+	if status != 201 || !strings.Contains(string(data), `"provider_configuration":{"paths":[".claude/settings.json"],"count":1}`) {
+		t.Fatalf("task = %d %s", status, data)
+	}
+	// With the changes carried the deletion is applied, and nothing is reported.
+	status, data = p.call(t, "alice", "POST", path, "snap-on", map[string]any{"untracked": []string{}, "include_sensitive": []string{}})
+	if carried := decodeJSON[provider](t, data); status != 201 || carried.ProviderConfiguration == nil || carried.ProviderConfiguration.Count != 0 {
+		t.Fatalf("carried snapshot = %d %s", status, data)
+	}
+}
+
 func TestSnapshotRefusesBadSelectionsWithTheirCodeAndStoresNothing(t *testing.T) {
 	p := newProjectsFixture(t)
 	dir := newRepo(t)
