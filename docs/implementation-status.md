@@ -527,13 +527,18 @@ then builds a fixture repository in a scratch directory (`sum.js` with a failing
 `node --test sum.test.js`), imports it through the folder dialog (answered in the test only),
 creates the task with a fixed objective, the backend from `ADANEXT_LIVE_BACKEND` (codex by
 default), mode auto, a 5 minute time limit and, for claude, a 5 turn limit, and the test as the
-task's check; then Ready, Start, the review, the check, the changes and Accept. Before each of the
-eight screenshots the page must hold no e-mail-shaped text, home directory or user name. The
-results folder holds the screenshots and `results.json`: backend, CLI version, masked sign-in
-kind, run id, duration, the check's result and baseline, the changed files and the accepted commit.
+task's check; then Ready, Start, the review, the check, the changes and Accept. Each of the eight
+screenshots is kept only when the page held no e-mail-shaped text, home directory or user name
+both before and after it was taken, read from its text, its form values and its title,
+placeholder and aria-label attributes; Playwright's own screenshots, traces and videos are off.
+The fixture's git runs without the global and system git configuration. The results folder holds
+the screenshots and `results.json`: backend, CLI version, the preflight's outcome, masked status,
+settings line and a count of the user configuration it found (no plugin or server names), run id,
+duration, the check's result and baseline, the changed files and the accepted commit.
 
 The policy picker now offers a time limit and, where the backend takes one, a turn limit, and the
-bridge passes them to `adad`, which already enforced them on a start (M4.1).
+bridge passes them to `adad`, which already enforced them on a start (M4.1); decisions log,
+2026-10-29.
 
 The opt-in: Playwright's default config ignores `e2e/live/`, the live config's spec skips itself
 unless `ADANEXT_LIVE=1`, and `scripts/live-demo.sh` refuses without it; `check.sh`, `test-e2e.sh`
@@ -548,8 +553,9 @@ ADANEXT_LIVE=1 ADANEXT_LIVE_BACKEND=codex ADANEXT_ENGINE=.engine/hrn.exe \
 ```
 
 On Ubuntu `ADANEXT_ENGINE=.engine/hrn` and a scratch such as `/tmp/ada-live`. The scratch path
-appears on screen in the import dialog, so it must not hold the user's name; the spec refuses to
-take a screenshot otherwise. Results go to `.hrn/live-demo/<backend>-<time>/` unless
+appears on screen in the import dialog, so `ADANEXT_LIVE_SCRATCH` is required and must be an
+absolute directory outside the home folder (`HOME` and `USERPROFILE`, either slash form, any
+case); the script and the spec refuse it otherwise, before anything is built or started. Results go to `.hrn/live-demo/<backend>-<time>/` unless
 `ADANEXT_LIVE_RESULTS` names a folder; the scratch is removed after a passing run.
 
 Evidence, left for the supervisor:
@@ -1962,6 +1968,21 @@ Evidence, left for the supervisor:
      classes Cc, Cf, Zl and Zp (tab and, in multi-line text, newline excepted) plus the Hangul
      fillers; a file's patch is in the page only while its row is open; a check log's refusal
      keeps its request id and details.
+
+- **2026-10-29, M4.5 time and turn limits in the policy picker (#124).** The demonstration has to
+  run mode auto under a time and a turn cap through the app, and the UI had no way to set them,
+  though `adad` has taken `timeout` and `max_turns` on a start since M4.1. So the picker offers
+  them, and the bridge passes them on.
+  1. Fixed choices, not free text: a time limit of none, 2m, 5m, 10m or 30m, and a turn limit of
+     none, 3, 5, 10 or 25. None is the default, and an unset cap is not sent.
+  2. Each is offered only where the backend's `options` in the capability matrix list it: the time
+     limit for claude and codex, the turn limit only for claude (codex has no turn limit, M4.1).
+  3. `adad` owns the ranges (a turn limit of 1 to 1000, a time limit up to 24 hours) and the
+     matrix check; the bridge checks only the shape (a positive whole number of turns, a duration
+     string of at most 32 lower-case characters) and refuses unknown keys.
+  4. A backend change clears both caps, as it already returns the mode to readonly; a mode change
+     keeps them.
+  5. A refine takes the same caps as a start, through the same policy shape.
 
 ## Owner actions pending
 

@@ -68,9 +68,13 @@ describe("the policy picker", () => {
     fireEvent.change(screen.getByLabelText("Time limit"), { target: { value: "5m" } });
     fireEvent.change(screen.getByLabelText("Turn limit"), { target: { value: "3" } });
     expect(seen.at(-1)).toEqual({ backend: "claude", model: "", effort: "", mode: "readonly", timeout: "5m", max_turns: 3 });
+    // A mode change keeps the caps; a backend change clears them.
+    fireEvent.click(screen.getByRole("radio", { name: /^auto/ }));
+    expect(seen.at(-1)).toEqual({ backend: "claude", model: "", effort: "", mode: "auto", timeout: "5m", max_turns: 3 });
     fireEvent.change(screen.getByLabelText("Turn limit"), { target: { value: "" } });
-    expect(seen.at(-1)).toEqual({ backend: "claude", model: "", effort: "", mode: "readonly", timeout: "5m" });
+    expect(seen.at(-1)).toEqual({ backend: "claude", model: "", effort: "", mode: "auto", timeout: "5m" });
     fireEvent.change(screen.getByLabelText("Backend"), { target: { value: "codex" } });
+    expect(seen.at(-1)).toEqual({ backend: "codex", model: "", effort: "", mode: "readonly" });
     expect(screen.getByLabelText("Time limit")).toBeTruthy();
     expect(screen.queryByLabelText("Turn limit")).toBeNull();
     cleanup();

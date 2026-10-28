@@ -10,5 +10,7 @@ export default defineConfig({
   timeout: 20 * 60_000,
   expect: { timeout: 15_000 },
   reporter: "list",
+  // Only the spec's own screenshots, each taken after the guard; nothing unguarded is kept.
+  use: { screenshot: "off", trace: "off", video: "off" },
   outputDir: "../.hrn/playwright-live-results",
 });

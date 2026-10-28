@@ -7,13 +7,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { call, coordinatorConfig, currentSID, endpoint, endpointPresent, waitForExit } from "../../src/adad";
 import type { AttemptEvent, Changes, CheckResult, Task } from "../../../ui/src/client/api";
-import { liveEnabled, personalText } from "./guard";
+import { liveEnabled, personalText, preflightRecord, screenText, underHome } from "./guard";
 
 // M4.5: the whole workflow through the real app on the owner's plan, with the release adad and the
 // pinned engine. Run by scripts/live-demo.sh; never by check.sh or CI (the default config ignores
 // this folder, and the spec skips itself without ADANEXT_LIVE=1). The sign-in is proven first by
-// cmd/ada-live -preflight-only; every screenshot is taken only after the page holds no e-mail-shaped
-// text, home directory or user name.
+// cmd/ada-live -preflight-only; every screenshot is kept only when the page held no e-mail-shaped
+// text, home directory or user name both before and after it was taken.
 
 const exec = promisify(execFile);
 const windows = process.platform === "win32";
@@ -32,8 +32,10 @@ function required(name: string): string {
   return value;
 }
 
+// git without the owner's global and system configuration (signing, hooks), as cmd/ada-live runs it.
+const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: windows ? "NUL" : "/dev/null" };
 async function git(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await exec("git", args, { cwd, windowsHide: true });
+  const { stdout } = await exec("git", args, { cwd, env: gitEnv, windowsHide: true });
   return stdout;
 }
 
@@ -64,7 +66,11 @@ test("the whole workflow through the app on a real backend", async () => {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const results = process.env.ADANEXT_LIVE_RESULTS || path.resolve("..", ".hrn", "live-demo", `${backend}-${stamp}`);
   await mkdir(results, { recursive: true });
-  const scratchRoot = process.env.ADANEXT_LIVE_SCRATCH || os.tmpdir();
+  // The scratch path shows in the import dialog, so it must not lie in the home folder.
+  const scratchRoot = required("ADANEXT_LIVE_SCRATCH");
+  if (!path.isAbsolute(scratchRoot) || underHome(scratchRoot, [os.homedir(), process.env.HOME ?? "", process.env.USERPROFILE ?? ""])) {
+    throw new Error("ADANEXT_LIVE_SCRATCH must be an absolute path outside the home folder");
+  }
   await mkdir(scratchRoot, { recursive: true });
   const scratch = await mkdtemp(path.join(scratchRoot, "ada-live-"));
   const record: Record<string, unknown> = { backend, platform: process.platform, started: new Date().toISOString(), screenshots: [] as string[] };
@@ -74,17 +80,24 @@ test("the whole workflow through the app on a real backend", async () => {
   const preflight = await exec(exe("ada-live"), ["-preflight-only", "-backend", backend, "-engine", engine, "-state-dir", path.join(scratch, "preflight")], { windowsHide: true }).then(
     (r) => r.stdout,
     (e: { stdout?: string }) => {
-      record.preflight = e.stdout ?? "";
+      const all = (() => {
+        try {
+          return JSON.parse(e.stdout ?? "") as Record<string, Parameters<typeof preflightRecord>[0]>;
+        } catch {
+          return {};
+        }
+      })();
+      record.preflight = all[backend] ? preflightRecord(all[backend]) : { outcome: "refused" };
       return save().then(() => {
         throw new Error("the preflight refused the sign-in; see results.json");
       });
     },
   );
-  const pre = (JSON.parse(preflight) as Record<string, { outcome: string; preflight: { version: string; status: unknown } }>)[backend]!;
+  const pre = preflightRecord((JSON.parse(preflight) as Record<string, Parameters<typeof preflightRecord>[0]>)[backend]!);
   expect(pre.outcome).toBe("passed");
   record.preflight = pre;
-  record.cli_version = pre.preflight.version;
-  const status = pre.preflight.status;
+  record.cli_version = pre.version;
+  const status = pre.status;
   record.sign_in = backend === "claude" ? `${(status as Record<string, string>).authMethod} plan (${(status as Record<string, string>).subscriptionType})` : String(status).trim();
   await save();
 
@@ -100,11 +113,14 @@ test("the whole workflow through the app on a real backend", async () => {
   const socket = endpoint(coordinatorConfig(env, bin, os.homedir()), process.platform, windows ? await currentSID() : undefined);
 
   let step = 0;
+  const personal = async (page: Page) => personalText(await page.locator("body").evaluate(screenText), os.userInfo().username, os.homedir());
+  // Checked before and after the capture, so nothing that arrived in between is kept.
   const shot = async (page: Page, label: string) => {
-    const found = personalText(await page.locator("body").innerText(), os.userInfo().username, os.homedir());
-    expect(found, "personal details on screen; set ADANEXT_LIVE_SCRATCH to a path without them").toEqual([]);
+    expect(await personal(page), "personal details on screen before a screenshot").toEqual([]);
+    const image = await page.screenshot();
+    expect(await personal(page), "personal details on screen during a screenshot; it was discarded").toEqual([]);
     const file = `${String(++step).padStart(2, "0")}-${label}.png`;
-    await page.screenshot({ path: path.join(results, file) });
+    await writeFile(path.join(results, file), image);
     (record.screenshots as string[]).push(file);
   };
 
@@ -128,10 +144,12 @@ test("the whole workflow through the app on a real backend", async () => {
     await importButton.click();
 
     // 4. The task: the fixed objective, the backend, mode auto with a time and (claude) turn cap, the check.
-    await importer.getByLabel("Backend", { exact: true }).selectOption(backend);
+    // A select's label also holds its options' text, so the select is found inside its label.
+    const select = (name: string) => importer.locator("label").filter({ hasText: new RegExp(`^${name}`) }).locator("select");
+    await select("Backend").selectOption(backend);
     await importer.getByRole("radio", { name: /^auto/ }).check();
-    await importer.getByLabel("Time limit", { exact: true }).selectOption(timeLimit);
-    if (backend === "claude") await importer.getByLabel("Turn limit", { exact: true }).selectOption(String(turnLimit));
+    await select("Time limit").selectOption(timeLimit);
+    if (backend === "claude") await select("Turn limit").selectOption(String(turnLimit));
     await importer.getByLabel("Objective", { exact: true }).fill(objective);
     await importer.getByLabel("Acceptance criteria", { exact: true }).fill(criteria);
     await importer.getByRole("button", { name: "Add a check", exact: true }).click();

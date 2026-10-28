@@ -365,8 +365,10 @@ func TestPreflightOnlyPrintsTheMaskedRecordAndRunsNothingElse(t *testing.T) {
 			t.Errorf("ran %q", call)
 		}
 	}
+	// With the engine hello stubbed, this shows only that the preflight itself writes no fixture or
+	// adad state; the real hello still gives the engine its own HRN_HOME under the state directory.
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
-		t.Errorf("the preflight wrote %d entries into the state directory", len(entries))
+		t.Errorf("preflightAlone wrote %d entries (a fixture or adad state) into the state directory", len(entries))
 	}
 
 	// An API-key sign-in is refused, with the reason masked, and the exit says so.
