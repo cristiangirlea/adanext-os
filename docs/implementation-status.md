@@ -516,6 +516,51 @@ fake engine that writes the agent's changes). Status: implemented. The decisions
 Not verified: hosted GitHub CI until the pull request runs; the Electron window was looked at only
 through the end-to-end test and a browser with a fake bridge.
 
+### M4.5 Demonstrations (2026-10-29, #124)
+
+The code part: an opt-in live demonstration of the whole workflow through the real app.
+`desktop/e2e/live/demo.spec.ts` runs the Electron window against an `adad` release build from
+this branch (it trusts only its embedded engine hash) and the pinned engine from `ADANEXT_ENGINE`.
+It proves the sign-in first with `cmd/ada-live -preflight-only` (the CLI's own status shows a plan
+sign-in; no `apiKeyHelper` and no key in `env`, managed settings included; the record masked),
+then builds a fixture repository in a scratch directory (`sum.js` with a failing
+`node --test sum.test.js`), imports it through the folder dialog (answered in the test only),
+creates the task with a fixed objective, the backend from `ADANEXT_LIVE_BACKEND` (codex by
+default), mode auto, a 5 minute time limit and, for claude, a 5 turn limit, and the test as the
+task's check; then Ready, Start, the review, the check, the changes and Accept. Before each of the
+eight screenshots the page must hold no e-mail-shaped text, home directory or user name. The
+results folder holds the screenshots and `results.json`: backend, CLI version, masked sign-in
+kind, run id, duration, the check's result and baseline, the changed files and the accepted commit.
+
+The policy picker now offers a time limit and, where the backend takes one, a turn limit, and the
+bridge passes them to `adad`, which already enforced them on a start (M4.1).
+
+The opt-in: Playwright's default config ignores `e2e/live/`, the live config's spec skips itself
+unless `ADANEXT_LIVE=1`, and `scripts/live-demo.sh` refuses without it; `check.sh`, `test-e2e.sh`
+and the workflows never set it (`desktop/src/live.test.ts`, `TestCINeverSetsTheLiveOptIn`).
+
+To run it (Windows from Git Bash, or Ubuntu; the engine built first by
+`scripts/build-engine.sh`, `npm ci` done in `ui/` and `desktop/`):
+
+```bash
+ADANEXT_LIVE=1 ADANEXT_LIVE_BACKEND=codex ADANEXT_ENGINE=.engine/hrn.exe \
+  ADANEXT_LIVE_SCRATCH=E:/ada-live bash scripts/live-demo.sh
+```
+
+On Ubuntu `ADANEXT_ENGINE=.engine/hrn` and a scratch such as `/tmp/ada-live`. The scratch path
+appears on screen in the import dialog, so it must not hold the user's name; the spec refuses to
+take a screenshot otherwise. Results go to `.hrn/live-demo/<backend>-<time>/` unless
+`ADANEXT_LIVE_RESULTS` names a folder; the scratch is removed after a passing run.
+
+Evidence, left for the supervisor:
+
+- Windows: revision, command, preflight (masked), CLI version, run id, duration, check, changed
+  files, accepted commit, screenshots: not yet run.
+- Ubuntu (owner action 13): not yet run.
+- Playwright flow on the pull request's ubuntu-latest job and the windows-latest job of the push
+  to `main`: not yet run.
+
+
 ## Decisions log
 
 - **2026-10-16, #76 review fixes: endpoint proof and shutdown order.** A predictable per-user
@@ -1956,7 +2001,10 @@ through the end-to-end test and a browser with a fake bridge.
     answer by exiting) goes to `recovery_required` with the result kept, until a reconcile flow
     exists; a cancel or a Stop the engine answers by exiting naturally ends the task `canceled`
     with the result kept.
-13. For M4.5 (decisions log, 2026-10-20): an Ubuntu machine with a desktop session Ada's
-    desktop app can open in, and a claude or codex CLI signed in there on the owner's plan, so
-    the Ubuntu demonstration can run. Say which machine. The CLI's own status command must show
-    a plan sign-in, not an API key, and its settings no `apiKeyHelper` or key in `env`.
+13. For M4.5 (decisions log, 2026-10-20), the Ubuntu demonstration: an Ubuntu machine with a
+    desktop session (or xvfb) where Ada's desktop app can open, with Go and Node as pinned, git,
+    a Harness checkout for `scripts/build-engine.sh`, and a claude or codex CLI signed in there on
+    the owner's plan. Say which machine. Before the run, the CLI's own status command (`claude
+    auth status` or `codex login status`) must show a plan sign-in, not an API key, and its
+    settings no `apiKeyHelper` or key in `env`; `scripts/live-demo.sh` checks both through
+    `cmd/ada-live -preflight-only` and refuses otherwise. The command is in the M4.5 section above.

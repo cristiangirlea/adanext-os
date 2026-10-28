@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +29,7 @@ func TestTheHarnessRefusesWithoutTheOptIn(t *testing.T) {
 			}
 			return ""
 		}
-		code := run(context.Background(), []string{"-backend", "claude", "-state-dir", state, "-engine", "hrn", "-adad", "adad"}, env, refusingRunner{t}, &out)
+		code := run(context.Background(), []string{"-backend", "claude", "-state-dir", state, "-engine", "hrn", "-adad", "adad"}, env, refusingRunner{t}, &out, &out)
 		if code != 2 || !strings.Contains(out.String(), "ADANEXT_LIVE=1") {
 			t.Fatalf("ADANEXT_LIVE=%q: exit %d: %s", value, code, out.String())
 		}
@@ -51,7 +53,7 @@ func TestTheHarnessNeedsTheBackendNamed(t *testing.T) {
 		{"-backend", "claude", "-state-dir", t.TempDir(), "-engine", "hrn", "-adad", "adad", "-max-turns", "50"},
 	} {
 		var out bytes.Buffer
-		if code := run(context.Background(), args, env, refusingRunner{t}, &out); code != 2 {
+		if code := run(context.Background(), args, env, refusingRunner{t}, &out, &out); code != 2 {
 			t.Fatalf("%v: exit %d: %s", args, code, out.String())
 		}
 	}
@@ -290,5 +292,104 @@ func TestManagedSettingsGoThroughTheSameChecks(t *testing.T) {
 	}
 	if len(managedCodexConfigs("linux")) == 0 || len(managedCodexConfigs("darwin")) == 0 {
 		t.Error("no codex system config path")
+	}
+}
+
+// statusRunner answers the CLIs' version and status commands with fixed text and records each call.
+type statusRunner struct {
+	claude, codex string
+	calls         *[]string
+}
+
+func (s statusRunner) Output(_ context.Context, _ string, _ []string, name string, args ...string) ([]byte, error) {
+	*s.calls = append(*s.calls, name+" "+strings.Join(args, " "))
+	switch strings.Join(args, " ") {
+	case "auth status":
+		return []byte(s.claude), nil
+	case "login status":
+		return []byte(s.codex), nil
+	case "--version":
+		return []byte("1.0.0\n"), nil
+	}
+	return nil, errors.New("unexpected command")
+}
+
+func TestPreflightOnlyNeedsNoAdadButStillTheOptIn(t *testing.T) {
+	var out bytes.Buffer
+	if code := run(context.Background(), []string{"-preflight-only", "-backend", "codex", "-state-dir", t.TempDir(), "-engine", "hrn"}, func(string) string { return "" }, refusingRunner{t}, &out, &out); code != 2 || !strings.Contains(out.String(), "ADANEXT_LIVE=1") {
+		t.Fatalf("without the opt-in: exit %d: %s", code, out.String())
+	}
+	if _, err := parse([]string{"-preflight-only", "-backend", "codex", "-state-dir", t.TempDir(), "-engine", "hrn"}, func(string) string { return "" }, &out); err != nil {
+		t.Fatalf("preflight-only without -adad: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-preflight-only", "-backend", "codex", "-state-dir", t.TempDir()},
+		{"-preflight-only", "-state-dir", t.TempDir(), "-engine", "hrn"},
+		{"-backend", "codex", "-state-dir", t.TempDir(), "-engine", "hrn"},
+	} {
+		if _, err := parse(args, func(string) string { return "" }, &out); err == nil {
+			t.Errorf("%v was accepted", args)
+		}
+	}
+}
+
+func TestPreflightOnlyPrintsTheMaskedRecordAndRunsNothingElse(t *testing.T) {
+	dir := t.TempDir()
+	var calls []string
+	c := &config{backends: []string{"claude", "codex"}, stateDir: dir, home: dir, user: "someone",
+		claudeConfig: filepath.Join(dir, "claude"), codexHome: filepath.Join(dir, "codex"),
+		locate: func(context.Context, string) (string, error) { return "cli", nil }}
+	r := statusRunner{
+		claude: `{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "max", "email": "someone@example.com", "orgName": "someone's Organization"}`,
+		codex:  "Logged in using ChatGPT\n", calls: &calls,
+	}
+	var out bytes.Buffer
+	if code := c.preflightAlone(context.Background(), r, &out); code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	var report map[string]any
+	of := func(backend string) map[string]any { m, _ := report[backend].(map[string]any); return m }
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("stdout is not one JSON record: %v: %s", err, out.String())
+	}
+	for _, backend := range []string{"claude", "codex"} {
+		if of(backend)["outcome"] != "passed" || of(backend)["preflight"] == nil {
+			t.Errorf("%s: %v", backend, of(backend))
+		}
+	}
+	if strings.Contains(out.String(), "someone") || strings.Contains(out.String(), "@") {
+		t.Errorf("the record holds account details: %s", out.String())
+	}
+	for _, call := range calls {
+		if !strings.HasPrefix(call, "cli ") || strings.Contains(call, "git") {
+			t.Errorf("ran %q", call)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("the preflight wrote %d entries into the state directory", len(entries))
+	}
+
+	// An API-key sign-in is refused, with the reason masked, and the exit says so.
+	r.codex = "Logged in using an API key - sk-proj-abcdefghijklmnop\n"
+	c.backends = []string{"codex"}
+	out.Reset()
+	if code := c.preflightAlone(context.Background(), r, &out); code != 1 {
+		t.Fatalf("an API-key sign-in passed: %s", out.String())
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil || of("codex")["outcome"] != "refused" || of("codex")["refused_at"] != "preflight" {
+		t.Fatalf("refusal = %v, %v", report, err)
+	}
+	if strings.Contains(out.String(), "abcdefghijklmnop") {
+		t.Errorf("the key reached the record: %s", out.String())
+	}
+
+	// An engine that does not find the CLI is refused before any command runs.
+	calls = nil
+	c.locate = func(context.Context, string) (string, error) {
+		return "", errors.New("the engine does not find the codex CLI")
+	}
+	out.Reset()
+	if code := c.preflightAlone(context.Background(), r, &out); code != 1 || len(calls) != 0 || !strings.Contains(out.String(), "engine hello") {
+		t.Fatalf("exit %d, calls %v: %s", code, calls, out.String())
 	}
 }

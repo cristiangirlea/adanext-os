@@ -138,6 +138,9 @@ export interface ExecutionPolicy {
   model: string;
   effort: string;
   mode: "readonly" | "auto" | "yolo";
+  // Caps passed to the engine when set: a Go duration, and a turn count where the backend offers one.
+  timeout?: string;
+  max_turns?: number;
 }
 
 // The capability matrix (GET /v1/capabilities, internal/engine): per backend and mode, what each

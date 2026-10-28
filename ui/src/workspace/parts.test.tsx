@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Changes, CheckResult, ExecutionPolicy } from "../client/api";
+import type { Capabilities, Changes, CheckResult, ExecutionPolicy } from "../client/api";
 import { Marked, PathText, hiddenIn } from "../text/Marked";
 import { capabilities, FakeClient } from "../test/fakeClient";
 import { Activity, describeEvent } from "./Activity";
@@ -21,8 +21,7 @@ async function flush(): Promise<void> {
   });
 }
 
-function Picker({ initial, onChange }: { initial?: ExecutionPolicy; onChange?: (p: ExecutionPolicy) => void }) {
-  const matrix = capabilities();
+function Picker({ initial, onChange, matrix = capabilities() }: { initial?: ExecutionPolicy; onChange?: (p: ExecutionPolicy) => void; matrix?: Capabilities }) {
   const [value, setValue] = useState(initial ?? defaultPolicy(matrix));
   return (
     <PolicyPicker
@@ -58,6 +57,25 @@ describe("the policy picker", () => {
     expect(seen.at(-1)?.mode).toBe("yolo");
     fireEvent.change(screen.getByLabelText("Backend"), { target: { value: "codex" } });
     expect(seen.at(-1)).toEqual({ backend: "codex", model: "", effort: "", mode: "readonly" });
+  });
+
+  it("offers a time and a turn limit only where the backend takes them, and sends none unset", () => {
+    const matrix = capabilities();
+    matrix.backends[0]!.options = ["model", "mode", "timeout", "max_turns"];
+    matrix.backends[1]!.options = ["model", "mode", "timeout"];
+    const seen: ExecutionPolicy[] = [];
+    render(<Picker matrix={matrix} onChange={(p) => seen.push(p)} />);
+    fireEvent.change(screen.getByLabelText("Time limit"), { target: { value: "5m" } });
+    fireEvent.change(screen.getByLabelText("Turn limit"), { target: { value: "3" } });
+    expect(seen.at(-1)).toEqual({ backend: "claude", model: "", effort: "", mode: "readonly", timeout: "5m", max_turns: 3 });
+    fireEvent.change(screen.getByLabelText("Turn limit"), { target: { value: "" } });
+    expect(seen.at(-1)).toEqual({ backend: "claude", model: "", effort: "", mode: "readonly", timeout: "5m" });
+    fireEvent.change(screen.getByLabelText("Backend"), { target: { value: "codex" } });
+    expect(screen.getByLabelText("Time limit")).toBeTruthy();
+    expect(screen.queryByLabelText("Turn limit")).toBeNull();
+    cleanup();
+    render(<Picker />);
+    expect(screen.queryByLabelText("Time limit")).toBeNull();
   });
 
   it("shows what yolo turns off, what each mode actually holds, and the refused ask mode", () => {

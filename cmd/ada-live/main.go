@@ -3,10 +3,12 @@
 // that writes a marker. It refuses to start unless ADANEXT_LIVE=1, which CI never sets
 // (TestCINeverSetsTheLiveOptIn). Before each run it checks the CLI's own sign-in status (a plan,
 // never an API key) and its settings (no apiKeyHelper, no key in env), recording both with
-// identifiers masked. Results go to a JSON file under the state directory.
+// identifiers masked. Results go to a JSON file under the state directory. With -preflight-only it
+// runs the preflight alone and prints its masked record as JSON on stdout (M4.5's demonstration).
 //
 //	go build -o adad.exe ./cmd/adad
 //	ADANEXT_LIVE=1 go run ./cmd/ada-live -backend claude,codex -state-dir <dir> -engine .engine/hrn.exe -adad adad.exe
+//	ADANEXT_LIVE=1 go run ./cmd/ada-live -preflight-only -backend codex -state-dir <dir> -engine .engine/hrn.exe
 package main
 
 import (
@@ -65,7 +67,7 @@ func (execRunner) Output(ctx context.Context, dir string, env []string, name str
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	os.Exit(run(ctx, os.Args[1:], os.Getenv, execRunner{}, os.Stderr))
+	os.Exit(run(ctx, os.Args[1:], os.Getenv, execRunner{}, os.Stdout, os.Stderr))
 }
 
 type config struct {
@@ -75,13 +77,15 @@ type config struct {
 	timeout                 time.Duration
 	maxTurns                int
 	dryRun                  bool
+	preflightOnly           bool
 	home, user              string
 	claudeConfig, codexHome string
 	claudeManaged           []string // administrators' claude settings, read when present
 	codexManaged            []string // codex's system-wide config, read when present
+	locate                  func(ctx context.Context, backend string) (string, error)
 }
 
-func run(ctx context.Context, args []string, env func(string) string, r runner, out io.Writer) int {
+func run(ctx context.Context, args []string, env func(string) string, r runner, stdout, out io.Writer) int {
 	// The opt-in comes first: without it nothing is parsed, created or run.
 	if env("ADANEXT_LIVE") != "1" {
 		fmt.Fprintln(out, "ada-live: refused: live runs use the owner's plans; set ADANEXT_LIVE=1 to run them")
@@ -95,6 +99,9 @@ func run(ctx context.Context, args []string, env func(string) string, r runner, 
 	if err := os.MkdirAll(c.stateDir, 0o700); err != nil {
 		fmt.Fprintln(out, "ada-live:", err)
 		return 1
+	}
+	if c.preflightOnly {
+		return c.preflightAlone(ctx, r, stdout)
 	}
 	report := map[string]any{"started": time.Now().UTC().Format(time.RFC3339), "goos": runtime.GOOS, "goarch": runtime.GOARCH}
 	failed := false
@@ -129,6 +136,7 @@ func parse(args []string, env func(string) string, out io.Writer) (*config, erro
 	flags.DurationVar(&c.timeout, "timeout", 3*time.Minute, "each run's time cap, at most 10m")
 	flags.IntVar(&c.maxTurns, "max-turns", 3, "claude's turn cap, at most 10")
 	flags.BoolVar(&c.dryRun, "dry-run", false, "everything but the start: preflight, fixture, adad, import, snapshot, task and capabilities; no model call")
+	flags.BoolVar(&c.preflightOnly, "preflight-only", false, "only the sign-in and settings preflight, printed as masked JSON on stdout; no adad, no fixture, no run")
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
@@ -141,7 +149,9 @@ func parse(args []string, env func(string) string, out io.Writer) (*config, erro
 		}
 	}
 	switch {
-	case c.stateDir == "" || c.enginePath == "" || c.adadPath == "":
+	case c.preflightOnly && (c.stateDir == "" || c.enginePath == ""):
+		return nil, errors.New("-state-dir and -engine are required")
+	case !c.preflightOnly && (c.stateDir == "" || c.enginePath == "" || c.adadPath == ""):
 		return nil, errors.New("-state-dir, -engine and -adad are required")
 	case c.timeout <= 0 || c.timeout > 10*time.Minute:
 		return nil, errors.New("-timeout must be positive and at most 10m")
@@ -150,6 +160,9 @@ func parse(args []string, env func(string) string, out io.Writer) (*config, erro
 	}
 	var err error
 	for _, p := range []*string{&c.stateDir, &c.enginePath, &c.adadPath} {
+		if *p == "" {
+			continue
+		}
 		if *p, err = filepath.Abs(*p); err != nil {
 			return nil, err
 		}
@@ -168,7 +181,31 @@ func parse(args []string, env func(string) string, out io.Writer) (*config, erro
 		c.codexHome = filepath.Join(c.home, ".codex")
 	}
 	c.claudeManaged, c.codexManaged = managedClaudeSettings(runtime.GOOS), managedCodexConfigs(runtime.GOOS)
+	c.locate = c.cliPath
 	return c, nil
+}
+
+// preflightAlone runs each backend's preflight and nothing else, and prints the masked record as
+// JSON on stdout; it fails when any backend is refused.
+func (c *config) preflightAlone(ctx context.Context, r runner, stdout io.Writer) int {
+	report := map[string]any{"preflight_only": true, "goos": runtime.GOOS, "goarch": runtime.GOARCH}
+	code := 0
+	for _, backend := range c.backends {
+		result := map[string]any{"backend": backend, "outcome": "passed"}
+		stage := "engine hello"
+		cli, err := c.locate(ctx, backend)
+		if err == nil {
+			stage, err = "preflight", c.preflight(ctx, r, backend, cli, result)
+		}
+		if err != nil {
+			result["outcome"], result["refused_at"], result["reason"] = "refused", stage, c.mask(err.Error())
+			code = 1
+		}
+		report[backend] = result
+	}
+	data, _ := json.MarshalIndent(report, "", "  ")
+	fmt.Fprintln(stdout, string(data))
+	return code
 }
 
 func (c *config) mask(text string) string { return mask(text, c.home, c.user) }
@@ -181,7 +218,7 @@ func (c *config) runBackend(ctx context.Context, r runner, backend string) map[s
 		result["outcome"], result["refused_at"], result["reason"] = "refused", stage, c.mask(err.Error())
 		return result
 	}
-	cli, err := c.cliPath(ctx, backend)
+	cli, err := c.locate(ctx, backend)
 	if err != nil {
 		return refuse("engine hello", err)
 	}

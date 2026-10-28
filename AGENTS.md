@@ -24,6 +24,7 @@ taking a slice, and don't reopen a recorded decision.
 | `ui/` | The React and TypeScript app both shells load. It reaches `adad` only through `AdaClient` (`ui/src/client/api.ts`); the adapters under `ui/src/client/adapters/` are the only modules that may touch the bridge or the network. |
 | `desktop/` | The Electron shell: main (the bridge to `adad` over its pipe or socket, the Node SSE client, the import folder dialog) and preload. Versions are pinned. End-to-end tests in `desktop/e2e/` run the real window against a real `adad` and the fake engine. |
 | `scripts/check.sh` | Everything CI runs, in order. |
+| `scripts/live-demo.sh` | The opt-in live demonstration through the app (`ADANEXT_LIVE=1`, never in CI): `desktop/e2e/live/`. |
 | `scripts/test-hooks.sh` | Tests for the two Claude hooks, run by `check.sh`. |
 | `scripts/gen-settings.py` | Writes `.claude/settings.json`, giving every Bash rule its PowerShell twin. Edit the lists there, not the JSON. |
 | `scripts/build-engine.sh` | Builds `hrn` from a clean Harness checkout at the pinned revision into `.engine/`. |
