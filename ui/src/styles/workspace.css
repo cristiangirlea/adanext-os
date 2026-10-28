@@ -1,0 +1,490 @@
+/* The work area and the forms: tabs, patches, checks, files, the task form and the policy
+   picker. Repository text is mono and wraps anywhere; hidden characters show as marks. */
+
+button.quiet {
+  background: transparent;
+  color: var(--accent-text);
+  border-color: var(--border-2);
+}
+button.quiet:hover:not(:disabled) {
+  border-color: var(--border-3);
+}
+button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+button.link[aria-current] {
+  color: var(--text-1);
+  text-decoration: none;
+  font-weight: 600;
+}
+button.stop {
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--danger);
+  padding: 0 var(--space-3);
+}
+textarea {
+  font: inherit;
+  color: var(--text-1);
+  background: var(--elevated);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  padding: 3px var(--space-2);
+  resize: vertical;
+}
+input.mono,
+.path,
+.argv-word,
+.patch,
+.log pre,
+.file-content {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+/* JetBrains Mono draws "!=" as one sign by default; a reviewer must see the characters. */
+code,
+kbd,
+pre,
+input.mono,
+.path,
+.argv-word,
+.patch,
+.seq,
+.kind,
+.mode-name {
+  font-variant-ligatures: none;
+  font-feature-settings: "calt" 0, "liga" 0;
+}
+label.inline {
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--text-1);
+  font-size: var(--text-md);
+}
+
+/* A hidden character, shown by its code point. */
+mark.hidden-char {
+  padding: 0 2px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--danger-dim);
+  color: var(--danger);
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+.path {
+  overflow-wrap: anywhere;
+}
+.path-warning,
+.tag {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.path-warning,
+.tag-warn {
+  border-color: var(--warning);
+  background: var(--warning-dim);
+  color: var(--warning);
+}
+.note {
+  margin: var(--space-2) 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--border-2);
+  background: var(--elevated);
+  color: var(--text-1);
+}
+.note p {
+  margin: 0 0 var(--space-1);
+}
+.note-warn {
+  border-left-color: var(--warning);
+  background: var(--warning-dim);
+}
+.note ul {
+  margin: 0;
+  padding-left: var(--space-5);
+}
+
+/* The work area: three tabs over one scrolling panel. */
+.work-area {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3) 0;
+  border-bottom: 1px solid var(--border-1);
+  background: var(--sidebar);
+}
+button.tab {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--text-2);
+}
+button.tab[aria-selected="true"] {
+  border-color: var(--border-1);
+  background: var(--surface);
+  color: var(--text-1);
+  font-weight: 600;
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.tab-mark {
+  margin-left: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: normal;
+  color: var(--danger);
+}
+.work-panel {
+  flex: 1;
+  overflow: auto;
+  padding: var(--space-3);
+}
+
+/* Changes. */
+.changes-head {
+  display: flex;
+  justify-content: space-between;
+  margin: 0 0 var(--space-2);
+  color: var(--text-2);
+}
+.file-change {
+  margin-bottom: var(--space-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--elevated);
+}
+.file-change[data-provider] {
+  border-left: 3px solid var(--warning);
+}
+.file-change summary {
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.file-change > .empty,
+.file-change > .note {
+  margin: var(--space-2);
+}
+.change-status {
+  display: inline-block;
+  min-width: 6.5em;
+  margin-right: var(--space-2);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.change-A {
+  color: var(--success);
+}
+.change-D {
+  color: var(--danger);
+}
+.counts {
+  margin-left: var(--space-2);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+.to {
+  color: var(--text-3);
+}
+.patch {
+  border-top: 1px solid var(--border-1);
+  overflow-x: auto;
+}
+.patch-line {
+  padding: 0 var(--space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-height: 1.4em;
+}
+.patch-meta {
+  color: var(--text-3);
+}
+.patch-hunk {
+  background: var(--info-dim);
+  color: var(--text-1);
+}
+.patch-add {
+  background: var(--success-dim);
+  color: var(--text-1);
+}
+.patch-del {
+  background: var(--danger-dim);
+  color: var(--text-1);
+}
+.provider-changes {
+  margin: 0;
+  padding-left: var(--space-5);
+}
+.provider-change {
+  font-weight: 600;
+}
+
+/* Checks: the unsandboxed notice wherever checks appear. */
+.unsandboxed {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--danger);
+  background: var(--danger-dim);
+  color: var(--text-1);
+  max-width: 72ch;
+}
+.check {
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--elevated);
+}
+.check[data-new-failure] {
+  border-left: 3px solid var(--danger);
+}
+.check header {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.check h4 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+.check-state {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-2);
+}
+.check-passed {
+  color: var(--success);
+}
+.check-failed,
+.check-timed_out,
+.check-killed,
+.check-changed_tree {
+  color: var(--danger);
+}
+.check-argv,
+.check-facts {
+  margin: var(--space-1) 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.argv-word {
+  display: inline-block;
+  margin-right: var(--space-1);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-1);
+  white-space: pre-wrap;
+}
+.log pre,
+.file-content {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-1);
+}
+
+/* Files. */
+.crumbs {
+  margin-bottom: var(--space-2);
+  color: var(--text-3);
+}
+table.tree {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.tree th,
+table.tree td {
+  text-align: left;
+  padding: 3px var(--space-2);
+  border-bottom: 1px solid var(--border-1);
+}
+table.tree th {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* The task form and the policy picker. */
+.task-form {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 760px;
+}
+.task-form-project {
+  margin: 0;
+  color: var(--text-2);
+}
+fieldset {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  min-width: 0;
+}
+legend {
+  padding: 0 var(--space-1);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.check-row {
+  display: grid;
+  grid-template-columns: minmax(6em, 1fr) minmax(12em, 3fr) minmax(6em, 1fr) minmax(5em, 0.7fr) auto;
+  gap: var(--space-2);
+  align-items: end;
+  margin-bottom: var(--space-3);
+}
+.check-row .argv {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.policy {
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-3) 0;
+}
+.policy-selects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.policy-cli {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--space-2);
+}
+.mode {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--elevated);
+}
+.mode[data-checked] {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.mode-yolo {
+  border-left: 4px solid var(--danger);
+}
+.mode-head {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-1);
+  font-size: var(--text-md);
+}
+.mode-name {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+.mode-tag {
+  font-size: var(--text-sm);
+  color: var(--accent-text);
+}
+.cells {
+  margin: var(--space-2) 0 0;
+  display: grid;
+  gap: 2px;
+}
+.cell {
+  display: grid;
+  grid-template-columns: 7.5em 1fr;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+.cell dt {
+  color: var(--text-2);
+}
+.cell dd {
+  margin: 0;
+}
+[data-status="enforced"] > dd,
+tr[data-status="enforced"] td:nth-child(2) {
+  color: var(--success);
+}
+[data-status="requested"] > dd,
+tr[data-status="requested"] td:nth-child(2) {
+  color: var(--warning);
+}
+[data-status="unsupported"] > dd,
+tr[data-status="unsupported"] td:nth-child(2) {
+  color: var(--text-3);
+}
+[data-status="unverified"] > dd,
+[data-status="unsandboxed"] > dd,
+tr[data-status="unverified"] td:nth-child(2) {
+  color: var(--danger);
+}
+.yolo-warning {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+.yolo-warning p {
+  margin: 0;
+  font-weight: 600;
+}
+.yolo-warning ul {
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--text-1);
+}
+.mode-refused {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+.all-rows summary {
+  cursor: pointer;
+  color: var(--accent-text);
+}
+.all-rows table {
+  border-collapse: collapse;
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+}
+.all-rows th,
+.all-rows td {
+  text-align: left;
+  vertical-align: top;
+  padding: 3px var(--space-2);
+  border-bottom: 1px solid var(--border-1);
+}

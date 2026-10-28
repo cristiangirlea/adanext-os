@@ -1,5 +1,7 @@
-import type { BridgeResult, ExecutionPolicy, NewTask, StreamMessage } from "../../ui/src/client/api";
-import { BadResponse, call, isUnreachable, listingLimit, Refusal } from "./adad";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import type { BridgeResult, CheckDefinition, ExecutionPolicy, NewTask, StreamMessage } from "../../ui/src/client/api";
+import { BadResponse, call, callText, isUnreachable, listingLimit, Refusal } from "./adad";
 import { openEventStream, type EventStream, type StreamOptions } from "./sse";
 
 // The typed bridge between the renderer and adad. Every call is checked to come from the Ada
@@ -39,6 +41,10 @@ export interface BridgeOptions {
   eventChannel?: string;
   openStream?: (options: StreamOptions) => EventStream;
   finishQuit?: () => Promise<void>;
+  // Opens the native folder dialog for the calling window: the chosen path, or null. A path
+  // enters only this way (decisions log, 2026-10-20).
+  chooseFolder?: (event: BridgeEvent) => Promise<string | null>;
+  now?: () => number;
 }
 
 export interface Bridge {
@@ -47,7 +53,17 @@ export interface Bridge {
 }
 
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/;
+const commitPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const modes = new Set<ExecutionPolicy["mode"]>(["readonly", "auto", "yolo"]);
+// A chosen folder's handle lives this long, for the inspect, import, snapshot and create calls.
+const folderTtlMs = 15 * 60 * 1000;
+// The most of a check log the renderer is sent; the whole log stays an artifact in adad.
+export const checkLogLimit = 1 << 20;
+const changesLimit = 32 << 20;
+const filesLimit = 4 << 20;
+const maxFinding = 16 << 10;
+const maxCommitPath = 4096;
+const maxSelected = 1000;
 
 function refused(code: string, message: string): BridgeResult<never> {
   return { ok: false, error: { code, status: 0, message } };
@@ -68,16 +84,65 @@ function hasKeys(value: Record<string, unknown>, required: string[], optional: s
   const keys = Object.keys(value);
   return required.every((k) => keys.includes(k)) && keys.every((k) => required.includes(k) || optional.includes(k));
 }
+function isStrings(value: unknown, max: number): value is string[] {
+  return Array.isArray(value) && value.length <= max && value.every((v) => typeof v === "string");
+}
+// The shape of a declared check; adad checks its limits (M4.2).
+function isCheck(value: unknown): value is CheckDefinition {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["argv"], ["name", "workdir", "timeout", "max_output_bytes", "env"]) &&
+    isStrings(value.argv, 256) &&
+    value.argv.length > 0 &&
+    (value.name === undefined || typeof value.name === "string") &&
+    (value.workdir === undefined || typeof value.workdir === "string") &&
+    (value.timeout === undefined || typeof value.timeout === "string") &&
+    (value.max_output_bytes === undefined || (typeof value.max_output_bytes === "number" && Number.isSafeInteger(value.max_output_bytes))) &&
+    (value.env === undefined || isStrings(value.env, 64))
+  );
+}
 function isNewTask(value: unknown): value is NewTask {
   return (
     isRecord(value) &&
-    hasKeys(value, ["project", "objective"], ["criteria"]) &&
+    hasKeys(value, ["project", "objective"], ["criteria", "snapshot", "checks"]) &&
     typeof value.project === "string" &&
     value.project !== "" &&
     typeof value.objective === "string" &&
     value.objective !== "" &&
-    (value.criteria === undefined || typeof value.criteria === "string")
+    (value.criteria === undefined || typeof value.criteria === "string") &&
+    (value.snapshot === undefined || isId(value.snapshot)) &&
+    (value.checks === undefined || (Array.isArray(value.checks) && value.checks.length <= 16 && value.checks.every(isCheck)))
   );
+}
+function isSelection(value: unknown): value is { untracked: string[]; include_sensitive: string[]; include_changes?: boolean } {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["untracked", "include_sensitive"], ["include_changes"]) &&
+    isStrings(value.untracked, maxSelected) &&
+    isStrings(value.include_sensitive, maxSelected) &&
+    (value.include_changes === undefined || typeof value.include_changes === "boolean")
+  );
+}
+function isRefine(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.acknowledge_provider_changes !== "boolean") return false;
+  const policy: Record<string, unknown> = { ...value };
+  delete policy.acknowledge_provider_changes;
+  return isPolicy(policy);
+}
+// A path inside a commit, as the files route takes it: never a host path, which it cannot reach.
+function isCommitPath(value: unknown): value is string {
+  return typeof value === "string" && value.length <= maxCommitPath && !value.includes("\u0000");
+}
+// A folder from the dialog: an absolute local path. A UNC or device path is refused, as adad
+// refuses it.
+function isLocalFolder(value: unknown): value is string {
+  if (typeof value !== "string" || value === "" || value.includes("\u0000")) return false;
+  if (process.platform === "win32") return /^[A-Za-z]:[\\/]/.test(value);
+  return path.posix.isAbsolute(value);
+}
+// carriesPath finds a `path` field in a call's arguments: the renderer never sends one.
+function carriesPath(args: unknown[]): boolean {
+  return args.some((arg) => arg !== null && typeof arg === "object" && !Array.isArray(arg) && Object.prototype.hasOwnProperty.call(arg, "path"));
 }
 function isPolicy(value: unknown): value is ExecutionPolicy {
   return (
@@ -102,7 +167,17 @@ function sameTopFrame(frame: FrameLike | null, pageUrl: string): boolean {
   }
 }
 
+interface Folder {
+  path: string;
+  senderId: number;
+  expires: number;
+  project?: string;
+  snapshot?: string;
+}
+
 export function createBridge(options: BridgeOptions): Bridge {
+  const now = options.now ?? Date.now;
+  const folders = new Map<string, Folder>();
   const channel = options.eventChannel ?? "ada:event";
   const openStream = options.openStream ?? openEventStream;
   const streams = new Map<string, { stream: EventStream; senderId: number }>();
@@ -137,20 +212,48 @@ export function createBridge(options: BridgeOptions): Bridge {
     });
   };
 
-  const forward = async (request: Parameters<typeof call>[1]): Promise<BridgeResult<unknown>> => {
+  // send runs one request to adad and maps every failure the same way: adad's refusal with its
+  // request id and details, an unreadable answer, an unreachable coordinator.
+  const send = async (request: (socketPath: string) => Promise<unknown>): Promise<BridgeResult<unknown>> => {
     if (options.socketPath === undefined) return refused("coordinator_unreachable", "the shell was not told adad's pipe or socket");
     try {
-      return { ok: true, value: await call(options.socketPath, request) };
+      return { ok: true, value: await request(options.socketPath) };
     } catch (error) {
       if (error instanceof Refusal) {
         const refusal: BridgeResult<never> = { ok: false, error: { code: error.code, status: error.status, message: error.message } };
         if (error.requestId !== undefined) refusal.error.request_id = error.requestId;
+        if (error.details !== undefined) refusal.error.details = error.details;
         return refusal;
       }
       if (error instanceof BadResponse) return refused(error.code, error.message);
       if (isUnreachable(error)) return refused("coordinator_unreachable", `adad is not reachable at ${options.socketPath}`);
       return refused("internal", error instanceof Error ? error.message : String(error));
     }
+  };
+  const forward = (request: Parameters<typeof call>[1]): Promise<BridgeResult<unknown>> => send((socketPath) => call(socketPath, request));
+  const forwardText = (urlPath: string): Promise<BridgeResult<unknown>> => send((socketPath) => callText(socketPath, urlPath, checkLogLimit));
+
+  // The folder a handle stands for, to the window that chose it, while the handle lives.
+  const folder = (event: BridgeEvent, handle: string): Folder | undefined => {
+    const entry = folders.get(handle);
+    if (!entry) return undefined;
+    if (entry.expires <= now()) {
+      folders.delete(handle);
+      return undefined;
+    }
+    return entry.senderId === event.sender.id ? entry : undefined;
+  };
+  const expired = (): BridgeResult<never> => refused("folder_expired", "choose the folder again: this choice has expired or belongs to another window");
+
+  const chooseFolder = async (event: BridgeEvent): Promise<BridgeResult<unknown>> => {
+    if (!options.chooseFolder) return refused("malformed_call", "this shell has no folder dialog");
+    const chosen = await options.chooseFolder(event);
+    if (chosen === null) return { ok: true, value: null };
+    if (!isLocalFolder(chosen)) return refused("malformed_call", "the folder must be a local absolute path");
+    for (const [h, entry] of folders) if (entry.expires <= now()) folders.delete(h);
+    const handle = randomUUID();
+    folders.set(handle, { path: chosen, senderId: event.sender.id, expires: now() + folderTtlMs });
+    return { ok: true, value: { handle, path: chosen } };
   };
 
   const subscribe = (event: BridgeEvent, subId: string, attemptId: string): BridgeResult<null> => {
@@ -183,10 +286,69 @@ export function createBridge(options: BridgeOptions): Bridge {
       if (!sameTopFrame(event.senderFrame, options.pageUrl)) return refused("unexpected_sender", "the call did not come from the Ada page's top frame");
       if (typeof method !== "string" || !Array.isArray(args)) return refused("malformed_call", "a method name and an argument list are required");
       const bad = (): BridgeResult<never> => refused("malformed_call", `malformed arguments for ${method}`);
+      if (carriesPath(args)) return refused("path_refused", "a folder enters only through the desktop's folder dialog");
       switch (method) {
-        case "createTask":
+        case "createTask": {
           if (args.length !== 1 || !isNewTask(args[0])) return bad();
-          return forward({ method: "POST", path: "/v1/tasks", body: args[0], idempotent: true });
+          const input = args[0];
+          const result = await forward({ method: "POST", path: "/v1/tasks", body: input, idempotent: true });
+          // A folder's handle has done its work once a task holds its snapshot.
+          if (result.ok && input.snapshot !== undefined) {
+            for (const [h, entry] of folders) if (entry.snapshot === input.snapshot && entry.senderId === event.sender.id) folders.delete(h);
+          }
+          return result;
+        }
+        case "chooseFolder":
+          if (args.length !== 0) return bad();
+          return chooseFolder(event);
+        case "inspectFolder": {
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          const entry = folder(event, args[0]);
+          if (!entry) return expired();
+          return forward({ method: "POST", path: "/v1/projects/inspect", body: { path: entry.path }, limit: changesLimit });
+        }
+        case "importFolder": {
+          if (args.length !== 2 || !isId(args[0]) || typeof args[1] !== "string" || args[1].length > 200) return bad();
+          const entry = folder(event, args[0]);
+          if (!entry) return expired();
+          const result = await forward({ method: "POST", path: "/v1/projects", body: { path: entry.path, name: args[1] }, idempotent: true });
+          const project = result.ok ? (result.value as { id?: unknown } | null)?.id : result.error.code === "already_imported" ? result.error.details?.project : undefined;
+          if (isId(project)) entry.project = project;
+          return result;
+        }
+        case "snapshot": {
+          if (args.length !== 2 || !isId(args[0]) || !isSelection(args[1])) return bad();
+          const entry = folder(event, args[0]);
+          if (!entry) return expired();
+          if (entry.project === undefined) return refused("malformed_call", "import the folder before taking its snapshot");
+          const result = await forward({ method: "POST", path: `/v1/projects/${entry.project}/snapshots`, body: args[1], idempotent: true });
+          const id = result.ok ? (result.value as { id?: unknown } | null)?.id : undefined;
+          if (isId(id)) entry.snapshot = id;
+          return result;
+        }
+        case "capabilities":
+          if (args.length !== 0) return bad();
+          return forward({ method: "GET", path: "/v1/capabilities" });
+        case "changes":
+        case "checks":
+        case "findings":
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          return forward({ method: "GET", path: `/v1/tasks/${args[0]}/${method}`, limit: changesLimit });
+        case "files":
+          if (args.length !== 2 || !isId(args[0]) || !isCommitPath(args[1])) return bad();
+          return forward({ method: "GET", path: `/v1/tasks/${args[0]}/files?path=${encodeURIComponent(args[1])}`, limit: filesLimit });
+        case "checkLog":
+          if (args.length !== 2 || !isId(args[0]) || !isId(args[1])) return bad();
+          return forwardText(`/v1/tasks/${args[0]}/checks/${args[1]}/log`);
+        case "addFinding":
+          if (args.length !== 2 || !isId(args[0]) || typeof args[1] !== "string" || args[1].trim() === "" || args[1].length > maxFinding) return bad();
+          return forward({ method: "POST", path: `/v1/tasks/${args[0]}/findings`, body: { body: args[1] }, idempotent: true });
+        case "accept":
+          if (args.length !== 4 || !isId(args[0]) || !isRevision(args[1]) || typeof args[2] !== "string" || !commitPattern.test(args[2]) || !isRevision(args[3])) return bad();
+          return forward({ method: "POST", path: `/v1/tasks/${args[0]}/accept`, revision: args[1], body: { commit: args[2], generation: args[3] }, idempotent: true });
+        case "refine":
+          if (args.length !== 3 || !isId(args[0]) || !isRevision(args[1]) || !isRefine(args[2])) return bad();
+          return forward({ method: "POST", path: `/v1/tasks/${args[0]}/refine`, revision: args[1], body: args[2], idempotent: true });
         case "listTasks":
           if (args.length !== 0) return bad();
           return forward({ method: "GET", path: "/v1/tasks", limit: listingLimit });

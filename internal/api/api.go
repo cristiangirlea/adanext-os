@@ -409,6 +409,11 @@ type taskAttemptJSON struct {
 	ID            string `json:"id"`
 	State         string `json:"state"`
 	QueuePosition int    `json:"queue_position,omitempty"`
+	// The execution policy the attempt was started with ("" for a model or effort left to the CLI).
+	Backend string `json:"backend"`
+	Model   string `json:"model"`
+	Effort  string `json:"effort"`
+	Mode    string `json:"mode"`
 	// ProviderChanges is what the attempt added, altered or removed of the provider configuration,
 	// null until assessed after its engine's tree has ended; ProviderFlagged is set when it must
 	// be shown before review or refine, and for an attempt that ended with a worktree unassessed.
@@ -427,7 +432,7 @@ type startedTaskJSON struct {
 func taskValue(t store.Task) taskJSON {
 	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated, Snapshot: t.Snapshot, ProviderConfiguration: t.ProviderConfiguration, Checks: t.CheckDefinitions()}
 	if a := t.Attempt; a.ID != "" {
-		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged(), TestedCommit: a.TestedCommit, Checks: a.CheckResults(), ChecksFailed: a.ChecksFailed}
+		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, Backend: a.Backend, Model: a.Model, Effort: a.Effort, Mode: a.Mode, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged(), TestedCommit: a.TestedCommit, Checks: a.CheckResults(), ChecksFailed: a.ChecksFailed}
 		// Keep the existing top-level field for /v1 clients.
 		v.QueuePosition = a.QueuePosition
 	}

@@ -108,6 +108,11 @@
 // mistake or by a careless agent, not by a determined one; the M5 guest is
 // the boundary against hostile code.
 //
+// Snapshots and attempts (M4.4b). A snapshot's body may set include_changes
+// (true when absent); false stores no staged or unstaged patch, so the
+// snapshot is the base commit and the chosen untracked files. A task's attempt
+// carries the backend, model, effort and mode it was started with.
+//
 // Changes and review (M4.3). GET /v1/tasks/{id}/changes is the diff from the
 // task's imported-changes commit ("base") to its newest agent-changes commit
 // ("commit"), read from Ada's clone with --no-ext-diff --no-textconv -z and

@@ -183,19 +183,36 @@ func snapshotValue(s store.Snapshot) snapshotJSON {
 const maxProviderPaths = 100
 
 // snapshotProvider is the provider configuration a capture puts in a worktree: every tracked
-// provider path, and an untracked one only when the selection took it.
-func snapshotProvider(c source.Capture) *store.ProviderConfiguration {
+// provider path, and an untracked one only when the selection took it. A snapshot that declines
+// the changes builds its worktree from the base commit, which still holds a provider file the
+// owner staged for deletion, so declined also counts those.
+func snapshotProvider(c source.Capture, declined bool) *store.ProviderConfiguration {
 	selected := map[string]bool{}
 	for _, f := range c.Untracked {
 		selected[f.Path] = true
 	}
 	p := &store.ProviderConfiguration{Paths: []string{}}
+	seen := map[string]bool{}
+	add := func(path string) {
+		if seen[path] {
+			return
+		}
+		seen[path] = true
+		if p.Count++; len(p.Paths) < maxProviderPaths {
+			p.Paths = append(p.Paths, path)
+		}
+	}
 	for _, path := range c.Inspection.ProviderPaths {
 		if path.Untracked && !selected[path.Path] {
 			continue
 		}
-		if p.Count++; len(p.Paths) < maxProviderPaths {
-			p.Paths = append(p.Paths, path.Path)
+		add(path.Path)
+	}
+	if declined {
+		for _, change := range c.Inspection.Status.Staged {
+			if change.Status == "D" && source.IsProviderPath(change.Path) {
+				add(change.Path)
+			}
 		}
 	}
 	return p
@@ -264,6 +281,9 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Untracked        []string `json:"untracked"`
 		IncludeSensitive []string `json:"include_sensitive"`
+		// IncludeChanges, true when absent, carries the staged and unstaged changes; false
+		// stores neither patch, so the snapshot is the base commit and the chosen files.
+		IncludeChanges *bool `json:"include_changes"`
 	}
 	sel := source.Selection{}
 	if err := decode(body, &input); err != nil {
@@ -314,7 +334,11 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		captureError(w, source.ErrSourceChanged)
 		return
 	}
-	snap := store.Snapshot{Project: project, BaseCommit: c.Inspection.Identity.Head, Fingerprint: c.Inspection.Fingerprint, State: snapshotState(c.Inspection), ProviderConfiguration: snapshotProvider(c)}
+	declined := input.IncludeChanges != nil && !*input.IncludeChanges
+	if declined {
+		c.Staged, c.Unstaged = nil, nil
+	}
+	snap := store.Snapshot{Project: project, BaseCommit: c.Inspection.Identity.Head, Fingerprint: c.Inspection.Fingerprint, State: snapshotState(c.Inspection), ProviderConfiguration: snapshotProvider(c, declined)}
 	if snap.ID, err = newID(); err != nil {
 		writeInternalError(w, err)
 		return

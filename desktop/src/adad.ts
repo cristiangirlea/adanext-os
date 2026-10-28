@@ -17,6 +17,8 @@ export class Refusal extends Error {
     message: string,
     // adad's request_id, sent with an internal error so it can be matched to its log.
     readonly requestId?: string,
+    // The fields beside the code some refusals carry: blockers, a project, a path, provider changes.
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "Refusal";
@@ -211,6 +213,19 @@ function requestId(body: unknown): string | undefined {
   return undefined;
 }
 
+// The fields of a refusal's body that are handed back with it (ui's ErrorDetails).
+const detailKeys = ["blockers", "project", "tasks", "path", "provider_changes"];
+
+export function refusalDetails(body: unknown): Record<string, unknown> | undefined {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const details: Record<string, unknown> = {};
+  for (const key of detailKeys) {
+    const value = (body as Record<string, unknown>)[key];
+    if (value !== undefined) details[key] = value;
+  }
+  return Object.keys(details).length ? details : undefined;
+}
+
 const unreachableCodes = new Set(["ENOENT", "ECONNREFUSED", "ENOTFOUND", "EACCES", "EPIPE", "ECONNRESET"]);
 
 export function isUnreachable(error: unknown): boolean {
@@ -238,7 +253,7 @@ export function call(socketPath: string, request: Call): Promise<unknown> {
       readJSON(res, request.limit ?? responseLimit).then(
         (body) => {
           if (!ok) {
-            reject(new Refusal(errorCode(body, status), status, errorMessage(body, `adad answered ${status}`), requestId(body)));
+            reject(new Refusal(errorCode(body, status), status, errorMessage(body, `adad answered ${status}`), requestId(body), refusalDetails(body)));
             return;
           }
           if (body === undefined && !request.emptyOk) {
@@ -254,6 +269,65 @@ export function call(socketPath: string, request: Call): Promise<unknown> {
     req.once("close", () => clearTimeout(timer));
     req.on("error", reject);
     req.end(payload);
+  });
+}
+
+export interface TextAnswer {
+  text: string;
+  // adad's X-Ada-Truncated: the content was already cut where it was recorded.
+  truncated: boolean;
+  // Only the first `limit` bytes were read.
+  partial: boolean;
+}
+
+// callText reads a GET answer that is not JSON (a check log) as UTF-8 text: at most `limit`
+// bytes are kept and the rest is not read. A refusal is JSON and rejects as call does.
+export function callText(socketPath: string, path: string, limit: number, timeoutMs = requestTimeoutMs): Promise<TextAnswer> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ createConnection: endpointConnection(socketPath, timeoutMs), method: "GET", path, headers: { Accept: "application/octet-stream, application/json" } }, (res) => {
+      const status = res.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        readJSON(res, responseLimit).then(
+          (body) => reject(new Refusal(errorCode(body, status), status, errorMessage(body, `adad answered ${status}`), requestId(body), refusalDetails(body))),
+          (error: BadResponse) => reject(new Refusal(`http_${status}`, status, `adad answered ${status}: ${error.message}`)),
+        );
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let partial = false;
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({ text, truncated: res.headers["x-ada-truncated"] === "true", partial });
+      };
+      res.on("data", (chunk: Buffer) => {
+        if (partial) return;
+        const room = limit - size;
+        if (chunk.length > room) {
+          chunks.push(chunk.subarray(0, room));
+          size = limit;
+          partial = true;
+          done();
+          res.destroy();
+          return;
+        }
+        chunks.push(chunk);
+        size += chunk.length;
+      });
+      res.on("end", () => {
+        if (!res.complete) { if (!settled) { settled = true; reject(new BadResponse("adad's answer ended before its body was complete")); } return; }
+        done();
+      });
+      res.on("error", (error: Error) => { if (!settled) { settled = true; reject(new BadResponse(`adad's answer could not be read: ${error.message}`)); } });
+      res.on("close", () => { if (!settled) { settled = true; reject(new BadResponse("adad's answer ended before its body was complete")); } });
+    });
+    const timer = setTimeout(() => req.destroy(Object.assign(new Error("adad did not answer in time"), { code: "ETIMEDOUT" })), timeoutMs);
+    req.once("close", () => clearTimeout(timer));
+    req.on("error", reject);
+    req.end();
   });
 }
 

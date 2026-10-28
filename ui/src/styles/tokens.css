@@ -1,7 +1,7 @@
 /* The tiers every theme shares: type, the 4-point space scale, layers, and motion. Colours live
    in theme-*.css, one file per theme, each defining the same colour tokens. */
 :root {
-  /* Source Sans 3 and JetBrains Mono are bundled with M4.4b; until then, system fallbacks. */
+  /* Source Sans 3 and JetBrains Mono are bundled (fonts.css); the system faces cover other scripts. */
   --font: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", Consolas, "Liberation Mono", monospace;
   --text-sm: 12px;
