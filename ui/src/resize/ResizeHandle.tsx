@@ -103,6 +103,9 @@ export function ResizeHandle({ side, size, min, max, onResize, label, controls, 
       onPointerMove={onPointerMove}
       onPointerUp={end}
       onPointerCancel={end}
+      onLostPointerCapture={() => {
+        drag.current = null;
+      }}
     />
   );
 }

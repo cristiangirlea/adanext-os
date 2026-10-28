@@ -93,11 +93,17 @@ describe("the contrast script", () => {
     for (const fg of ["text-1", "text-2", "text-3", "accent-text", "accent-fg", "success", "warning", "danger", "info", "focus", "border-2", "border-3"]) {
       expect(fgs.has(fg), fg).toBe(true);
     }
+    const backgrounds = ["bg", "sidebar", "surface", "elevated", "overlay"];
+    const on = (fg: string, kind: string) => pairs.filter((p) => p.fg === fg && p.kind === kind).flatMap((p) => p.bg);
     for (const status of ["success", "warning", "danger", "info"]) {
-      const bgs = pairs.filter((p) => p.fg === status).flatMap((p) => p.bg);
-      expect(bgs).toContain(`${status}-dim`);
-      expect(bgs).toContain("bg");
+      expect(on(status, "text"), status).toEqual(expect.arrayContaining([...backgrounds, `${status}-dim`]));
+      expect(on("text-1", "text"), `text-1 on ${status}-dim`).toContain(`${status}-dim`);
     }
+    expect(on("text-1", "text")).toContain("accent-dim");
+    for (const fg of ["text-1", "text-2", "text-3", "accent-text", "focus", "border-2", "border-3"]) {
+      expect([...on(fg, "text"), ...on(fg, "ui")], fg).toEqual(expect.arrayContaining(backgrounds));
+    }
+    expect(on("accent", "ui")).toEqual(expect.arrayContaining([...backgrounds, "accent-dim"]));
     expect(pairs.find((p) => p.fg === "focus")?.kind).toBe("ui");
   });
 

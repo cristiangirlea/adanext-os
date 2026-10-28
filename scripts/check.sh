@@ -71,8 +71,8 @@ step "ui lockfile installs"
 step "ui contrast (WCAG AA for every theme's declared token pairs)"
 node ui/scripts/contrast.mjs
 
-step "ui typecheck, tests and build"
-(cd ui && npm run typecheck && npm test && npm run build)
+step "ui typecheck, tests, build and the built page's boot script"
+(cd ui && npm run typecheck && npm test && npm run build && node scripts/check-dist.mjs)
 
 step "desktop typecheck, tests and build"
 (cd desktop && npm run typecheck && npm test && npm run build)

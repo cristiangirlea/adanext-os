@@ -163,6 +163,23 @@ describe("CommandPalette", () => {
     expect(optionTexts()).toEqual(["fix the buildalpha", "ship italpha"]);
   });
 
+  it("filters a chosen project's tasks by its exact id, not by text, until the filter is cleared", async () => {
+    const client = new FakeClient([
+      makeTask({ id: "t1", project: "alpha", objective: "fix the build" }),
+      makeTask({ id: "t2", project: "alpha-2", objective: "write the docs" }),
+      makeTask({ id: "t3", project: "beta", objective: "port the alpha release" }),
+    ]);
+    setup({ client });
+    press("p", { ctrlKey: true });
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Projects" }));
+    fireEvent.click(screen.getByRole("option", { name: "alpha" }));
+    expect(optionTexts()).toEqual(["fix the buildalpha"]);
+    expect(combobox()).toHaveProperty("value", "");
+    fireEvent.click(screen.getByRole("button", { name: "Show all tasks" }));
+    expect(optionTexts()).toEqual(["fix the buildalpha", "write the docsalpha-2", "port the alpha releasebeta"]);
+  });
+
   it("says what it shows on a live status line", async () => {
     const client = new FakeClient([makeTask({ id: "t1", objective: "fix the build" })]);
     let release = () => {};
@@ -208,6 +225,40 @@ describe("CommandPalette", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(before);
     before.remove();
+  });
+
+  it("closes the modal dialog before giving focus back to the opener", async () => {
+    // jsdom has no modal dialog; these stand in for the browser's, recording the order.
+    const order: string[] = [];
+    const proto = HTMLDialogElement.prototype as unknown as Record<string, unknown>;
+    proto.showModal = function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    };
+    proto.close = function (this: HTMLDialogElement) {
+      order.push("close");
+      this.removeAttribute("open");
+    };
+    try {
+      setup();
+      const opener = document.createElement("button");
+      document.body.appendChild(opener);
+      opener.focus();
+      const focus = opener.focus.bind(opener);
+      opener.focus = () => {
+        order.push("focus");
+        focus();
+      };
+      press("p", { ctrlKey: true });
+      await flush();
+      expect(screen.getByRole("dialog").hasAttribute("open")).toBe(true);
+      fireEvent.keyDown(combobox(), { key: "Escape" });
+      expect(order).toEqual(["close", "focus"]);
+      expect(document.activeElement).toBe(opener);
+      opener.remove();
+    } finally {
+      delete proto.showModal;
+      delete proto.close;
+    }
   });
 
   it("shows the key hints and labelled scope chips", async () => {

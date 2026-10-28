@@ -36,6 +36,15 @@
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border-1);
 }
+.palette-filter {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin: 0;
+  padding: var(--space-2) var(--space-3) 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
 .palette-list {
   overflow-y: auto;
   padding: var(--space-1) 0;

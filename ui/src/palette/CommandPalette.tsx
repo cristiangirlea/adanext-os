@@ -23,6 +23,8 @@ export function CommandPalette({ client, actions, onSelectTask }: Props) {
   const [open, setOpen] = useState(false);
   const [scope, setScope] = useState<Scope>("all");
   const [query, setQuery] = useState("");
+  // A chosen project narrows the tasks to that exact project id until cleared.
+  const [project, setProject] = useState<string | null>(null);
   const [active, setActive] = useState(0);
   const [load, setLoad] = useState<Load>({ state: "idle" });
   const [recent, setRecent] = useState<Item[]>([]);
@@ -35,6 +37,7 @@ export function CommandPalette({ client, actions, onSelectTask }: Props) {
   const show = useCallback((initial: Scope) => {
     returnFocus.current = document.activeElement;
     setScope(initial);
+    setProject(null);
     setQuery("");
     setActive(0);
     setOpen(true);
@@ -42,8 +45,16 @@ export function CommandPalette({ client, actions, onSelectTask }: Props) {
 
   const close = useCallback(() => {
     generation.current++;
+    // The modal dialog makes the rest of the page inert: close it before focus goes back.
+    const el = dialog.current;
+    if (el && typeof el.close === "function") {
+      if (el.open) el.close();
+    } else {
+      el?.removeAttribute("open");
+    }
     setOpen(false);
     setLoad({ state: "idle" });
+    setProject(null);
     const back = returnFocus.current;
     returnFocus.current = null;
     if (back instanceof HTMLElement && back.isConnected) back.focus();
@@ -91,7 +102,7 @@ export function CommandPalette({ client, actions, onSelectTask }: Props) {
   if (!open) return null;
 
   const tasks = load.state === "done" ? load.tasks : null;
-  const shown = groups(scope, query, tasks, actions, recent);
+  const shown = groups(scope, query, tasks, actions, recent, project);
   const options = shown.flatMap((g) => g.items);
   const current = options.length > 0 ? Math.min(active, options.length - 1) : -1;
   const optionId = (i: number) => `${id}-option-${i}`;
@@ -101,7 +112,8 @@ export function CommandPalette({ client, actions, onSelectTask }: Props) {
     setRecent((r) => remember(r, item));
     if (item.kind === "project") {
       setScope("task");
-      setQuery(item.id);
+      setProject(item.id);
+      setQuery("");
       setActive(0);
       input.current?.focus();
       return;
@@ -133,6 +145,7 @@ export function CommandPalette({ client, actions, onSelectTask }: Props) {
 
   const pick = (s: Scope) => {
     setScope(s);
+    setProject(null);
     setActive(0);
     input.current?.focus();
   };
@@ -199,6 +212,23 @@ export function CommandPalette({ client, actions, onSelectTask }: Props) {
             </button>
           ))}
         </div>
+        {project !== null && (
+          <p className="palette-filter">
+            Tasks in <code>{project}</code>{" "}
+            <button
+              type="button"
+              className="chip"
+              aria-label="Show all tasks"
+              onClick={() => {
+                setProject(null);
+                setActive(0);
+                input.current?.focus();
+              }}
+            >
+              Show all
+            </button>
+          </p>
+        )}
         <div className="palette-list" role="listbox" id={listId} aria-label="Results" aria-busy={loading}>
           {shown.map((group, g) => (
             <div key={group.name} role="group" aria-labelledby={`${id}-group-${g}`} className="palette-group">

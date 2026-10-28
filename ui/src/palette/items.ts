@@ -48,7 +48,8 @@ export function projectItems(tasks: Task[]): Item[] {
 
 // groups builds what one scope shows for a query: Recent first (only before anything is typed),
 // then quick actions, tasks and projects as the scope allows.
-export function groups(scope: Scope, query: string, tasks: Task[] | null, actions: QuickAction[], recent: Item[]): Group[] {
+// A project, when given, keeps only the tasks whose project id is exactly it.
+export function groups(scope: Scope, query: string, tasks: Task[] | null, actions: QuickAction[], recent: Item[], project: string | null = null): Group[] {
   const shows = (kind: Kind) => scope === "all" || scope === kind;
   const actionList: Item[] = actions.map((a) => ({ kind: "action", id: a.id, label: a.label }));
   const current = (item: Item): Item | undefined => (item.kind === "action" ? actionList.find((a) => a.id === item.id) : item);
@@ -58,7 +59,8 @@ export function groups(scope: Scope, query: string, tasks: Task[] | null, action
     if (items.length > 0) out.push({ name: "Recent", items });
   }
   if (shows("action")) out.push({ name: "Quick actions", items: actionList.filter((i) => matches(i, query)) });
-  if (shows("task") && tasks) out.push({ name: "Tasks", items: taskItems(tasks).filter((i) => matches(i, query)) });
+  const inProject = tasks && project !== null ? tasks.filter((t) => t.project === project) : tasks;
+  if (shows("task") && inProject) out.push({ name: "Tasks", items: taskItems(inProject).filter((i) => matches(i, query)) });
   if (shows("project") && tasks) out.push({ name: "Projects", items: projectItems(tasks).filter((i) => matches(i, query)) });
   return out.filter((g) => g.items.length > 0);
 }

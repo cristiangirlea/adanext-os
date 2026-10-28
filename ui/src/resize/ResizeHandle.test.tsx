@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ResizeHandle, sides, type Side, type Size } from "./ResizeHandle";
 
 afterEach(cleanup);
@@ -102,6 +102,28 @@ describe("ResizeHandle", () => {
     fireEvent.pointerUp(handle(), { clientX: -1000, clientY: 0, pointerId: 1 });
     fireEvent.pointerMove(handle(), { clientX: 400, clientY: 0, pointerId: 1 });
     expect(size()).toBe("200x200");
+  });
+
+  it("captures the pointer by its id and releases it on pointer up", () => {
+    render(<Pane side="e" />);
+    const h = handle();
+    const set = vi.fn();
+    const release = vi.fn();
+    Object.assign(h, { setPointerCapture: set, releasePointerCapture: release });
+    fireEvent.pointerDown(h, { clientX: 100, clientY: 0, button: 0, pointerId: 7 });
+    expect(set).toHaveBeenCalledWith(7);
+    fireEvent.pointerUp(h, { pointerId: 7 });
+    expect(release).toHaveBeenCalledWith(7);
+  });
+
+  it("ends the drag when the pointer capture is lost", () => {
+    render(<Pane side="e" />);
+    fireEvent.pointerDown(handle(), { clientX: 100, clientY: 0, button: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle(), { clientX: 120, clientY: 0, pointerId: 1 });
+    expect(size()).toBe("320x200");
+    fireEvent.lostPointerCapture(handle(), { pointerId: 1 });
+    fireEvent.pointerMove(handle(), { clientX: 200, clientY: 0, pointerId: 1 });
+    expect(size()).toBe("320x200");
   });
 
   it("resizes a west or north-west handle against the pointer", () => {

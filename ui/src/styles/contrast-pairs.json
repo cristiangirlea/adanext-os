@@ -1,16 +1,16 @@
 {
-  "about": "Foreground/background token pairs checked for WCAG AA in every theme by ui/scripts/contrast.mjs. kind: text 4.5:1, large 3:1, ui 3:1. border-1 is a decorative divider and is not listed; the focus ring is drawn with an offset, so it sits on the background, not on the control.",
+  "about": "Foreground/background token pairs checked for WCAG AA in every theme by ui/scripts/contrast.mjs. kind: text 4.5:1, large 3:1, ui 3:1. Every pair the stylesheets draw is listed; text-1 covers code, which inherits it. border-1 is a decorative divider and is not listed; the focus ring is drawn with an offset, so it sits on the background, not on the control.",
   "pairs": [
-    { "fg": "text-1", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim"], "kind": "text" },
+    { "fg": "text-1", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim", "success-dim", "warning-dim", "danger-dim", "info-dim"], "kind": "text" },
     { "fg": "text-2", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim"], "kind": "text" },
     { "fg": "text-3", "bg": ["bg", "sidebar", "surface", "elevated", "overlay"], "kind": "text" },
     { "fg": "accent-text", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim"], "kind": "text" },
     { "fg": "accent-fg", "bg": ["accent"], "kind": "text" },
-    { "fg": "accent", "bg": ["bg", "surface", "elevated"], "kind": "ui" },
-    { "fg": "success", "bg": ["bg", "surface", "elevated", "success-dim"], "kind": "text" },
-    { "fg": "warning", "bg": ["bg", "surface", "elevated", "warning-dim"], "kind": "text" },
-    { "fg": "danger", "bg": ["bg", "surface", "elevated", "danger-dim"], "kind": "text" },
-    { "fg": "info", "bg": ["bg", "surface", "elevated", "info-dim"], "kind": "text" },
+    { "fg": "accent", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "accent-dim"], "kind": "ui" },
+    { "fg": "success", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "success-dim"], "kind": "text" },
+    { "fg": "warning", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "warning-dim"], "kind": "text" },
+    { "fg": "danger", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "danger-dim"], "kind": "text" },
+    { "fg": "info", "bg": ["bg", "sidebar", "surface", "elevated", "overlay", "info-dim"], "kind": "text" },
     { "fg": "focus", "bg": ["bg", "sidebar", "surface", "elevated", "overlay"], "kind": "ui" },
     { "fg": "border-2", "bg": ["bg", "sidebar", "surface", "elevated", "overlay"], "kind": "ui" },
     { "fg": "border-3", "bg": ["bg", "sidebar", "surface", "elevated", "overlay"], "kind": "ui" }
