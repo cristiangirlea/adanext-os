@@ -1,0 +1,105 @@
+/* The command palette: a modal dialog near the top of the window, one column wide. */
+.palette {
+  position: fixed;
+  inset: 12vh 0 auto;
+  z-index: var(--z-palette);
+  width: min(640px, calc(100vw - var(--space-8)));
+  max-height: 70vh;
+  margin: 0 auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--overlay);
+  color: var(--text-1);
+  box-shadow: 0 18px 48px -12px var(--scrim);
+}
+.palette::backdrop {
+  background: var(--scrim);
+  opacity: 0.4;
+}
+.palette-body {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(70vh - 2px);
+}
+.palette-input {
+  margin: var(--space-3) var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-lg);
+  border-color: var(--border-2);
+  background: var(--elevated);
+}
+.palette-scopes {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-1);
+}
+.palette-filter {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin: 0;
+  padding: var(--space-2) var(--space-3) 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.palette-list {
+  overflow-y: auto;
+  padding: var(--space-1) 0;
+  min-height: var(--space-12);
+}
+.palette-group-name {
+  padding: var(--space-2) var(--space-4) var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-3);
+}
+.palette-option {
+  display: flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: 6px var(--space-4);
+  cursor: pointer;
+}
+.palette-option[aria-selected="true"] {
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.palette-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-detail {
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+.palette-option[data-kind="action"] .palette-label {
+  color: var(--accent-text);
+}
+.palette-option[aria-selected="true"] .palette-label {
+  color: var(--text-1);
+}
+.palette-status {
+  margin: 0;
+  padding: var(--space-1) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  border-top: 1px solid var(--border-1);
+}
+.palette-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+  background: var(--elevated);
+  border-top: 1px solid var(--border-1);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}

@@ -13,6 +13,8 @@
       content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
     />
     <title>Ada</title>
+    <!-- Blocking on purpose: it sets the saved theme on <html> before anything paints. -->
+    <script src="/theme-boot.js"></script>
   </head>
   <body>
     <div id="root"></div>
