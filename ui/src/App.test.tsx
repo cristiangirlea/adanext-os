@@ -355,4 +355,12 @@ describe("the New task button", () => {
       vi.useRealTimers();
     }
   });
+
+  it("focuses Objective when the form opens from a project, whose Project field is already filled", async () => {
+    const client = new FakeClient([makeTask({ id: "t1", state: "draft", revision: 1 })]);
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getAllByRole("button", { name: /^New task in / })[0]!);
+    expect(document.activeElement).toBe(screen.getByLabelText("Objective"));
+  });
 });

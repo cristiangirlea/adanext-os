@@ -73,7 +73,7 @@ export function TaskForm({
   const projectInput = useRef<HTMLInputElement>(null);
   const objectiveInput = useRef<HTMLInputElement>(null);
   useLayoutEffect(() => {
-    if (autoFocus) (projectInput.current ?? objectiveInput.current)?.focus();
+    if (autoFocus) (defaultProject ? objectiveInput.current : (projectInput.current ?? objectiveInput.current))?.focus();
     // Only on mount: the owner moves focus from here.
   }, []);
 
