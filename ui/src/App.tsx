@@ -51,6 +51,8 @@ export function App({ client }: { client: AdaClient }) {
   const [names, setNames] = useState<Record<string, string>>({});
   const [importing, setImporting] = useState(false);
   const [formProject, setFormProject] = useState("");
+  // Counts the "New task" openings: each opens a fresh form with its first field focused.
+  const [formOpened, setFormOpened] = useState(0);
   const [reviewed, setReviewed] = useState<Changes | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [pressed, setPressed] = useState<string | null>(null);
@@ -58,7 +60,6 @@ export function App({ client }: { client: AdaClient }) {
   const motionOn = useMotionOn();
   const [width, setWidth] = useState(navWidth.start);
   const [work, setWork] = useState(workWidth.start);
-  const objectiveInput = useRef<HTMLInputElement>(null);
 
   const selected = tasks.find((task) => task.id === selectedId) ?? null;
   const attemptId = selected?.attempt?.id ?? (selected ? attempts[selected.id] : undefined);
@@ -123,7 +124,16 @@ export function App({ client }: { client: AdaClient }) {
   useEffect(() => {
     void run(async () => {
       try {
-        setTasks(await client.listTasks());
+        const listed = await client.listTasks();
+        // A task created or read while the listing was on its way is newer than the listing: keep
+        // it, and keep the higher revision of a task both hold.
+        setTasks((current) => {
+          const merged = listed.map((task) => {
+            const held = current.find((t) => t.id === task.id);
+            return held && held.revision > task.revision ? held : task;
+          });
+          return [...merged, ...current.filter((t) => !listed.some((task) => task.id === t.id))];
+        });
       } finally {
         setLoaded(true);
       }
@@ -217,7 +227,7 @@ export function App({ client }: { client: AdaClient }) {
   const newTask = (project?: string) => {
     setSelectedId(null);
     setFormProject(project ?? "");
-    setTimeout(() => objectiveInput.current?.focus(), 0);
+    setFormOpened((n) => n + 1);
   };
   const started = useCallback(
     (task: Task, attempt: string, used: ExecutionPolicy) => {
@@ -337,7 +347,7 @@ export function App({ client }: { client: AdaClient }) {
           <div className="start">
             <h2>New task</h2>
             <p className="empty">Import a repository to give a task its own workspace, or add a task to a project here.</p>
-            <TaskForm key={formProject} matrix={matrix} defaultProject={formProject} busy={pressed === "create"} objectiveRef={objectiveInput} onCreate={(input, chosen) => void run(() => created(input, chosen), undefined, "create")} />
+            <TaskForm key={`${formProject}:${formOpened}`} matrix={matrix} defaultProject={formProject} busy={pressed === "create"} autoFocus={formOpened > 0} onCreate={(input, chosen) => void run(() => created(input, chosen), undefined, "create")} />
           </div>
         )}
       </main>

@@ -1,4 +1,4 @@
-import { useId, useState, type FormEvent, type Ref } from "react";
+import { useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import type { Capabilities, CheckDefinition, ExecutionPolicy, NewTask } from "../client/api";
 import { BusyButton } from "../motion/parts";
 import { Marked } from "../text/Marked";
@@ -49,7 +49,7 @@ export function TaskForm({
   snapshot,
   busy,
   onCreate,
-  objectiveRef,
+  autoFocus = false,
 }: {
   matrix: Capabilities | null;
   project?: { id: string; name: string };
@@ -57,7 +57,9 @@ export function TaskForm({
   snapshot?: string;
   busy: boolean;
   onCreate: (input: NewTask, policy: ExecutionPolicy) => void;
-  objectiveRef?: Ref<HTMLInputElement>;
+  // Focus the first field as the form mounts, in the same commit, so focus never moves later
+  // while someone is already typing.
+  autoFocus?: boolean;
 }) {
   const id = useId();
   const [projectId, setProjectId] = useState(project?.id ?? defaultProject);
@@ -68,6 +70,12 @@ export function TaskForm({
   const [chosen, setPolicy] = useState<ExecutionPolicy | null>(null);
   const [problem, setProblem] = useState("");
   const policy = chosen ?? defaultPolicy(matrix);
+  const projectInput = useRef<HTMLInputElement>(null);
+  const objectiveInput = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    if (autoFocus) (projectInput.current ?? objectiveInput.current)?.focus();
+    // Only on mount: the owner moves focus from here.
+  }, []);
 
   const update = (key: number, field: keyof Omit<CheckRow, "key">, value: string) => setRows((current) => current.map((r) => (r.key === key ? { ...r, [field]: value } : r)));
 
@@ -97,12 +105,12 @@ export function TaskForm({
       ) : (
         <label>
           Project
-          <input value={projectId} onChange={(e) => setProjectId(e.target.value)} required />
+          <input ref={projectInput} value={projectId} onChange={(e) => setProjectId(e.target.value)} required />
         </label>
       )}
       <label>
         Objective
-        <input ref={objectiveRef} value={objective} onChange={(e) => setObjective(e.target.value)} required />
+        <input ref={objectiveInput} value={objective} onChange={(e) => setObjective(e.target.value)} required />
       </label>
       <label>
         Acceptance criteria

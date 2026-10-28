@@ -305,3 +305,54 @@ describe("App", () => {
     expect(within(row).getByText("draft")).toBeTruthy();
   });
 });
+
+describe("the first task listing", () => {
+  it("keeps a task created while the listing was still on its way, and keeps it selected", async () => {
+    const client = new FakeClient();
+    let answer = () => {};
+    // The listing answers with what adad held when it was asked, after the create has answered.
+    client.listTasks = () => {
+      const before = [...client.tasks];
+      return new Promise((resolve) => {
+        answer = () => resolve(before);
+      });
+    };
+    render(<App client={client} />);
+    await flush();
+    fireEvent.change(screen.getByLabelText("Project"), { target: { value: "repo" } });
+    fireEvent.change(screen.getByLabelText("Objective"), { target: { value: "made early" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await flush();
+    expect(screen.getByRole("button", { name: "Ready" })).toBeTruthy();
+    await act(async () => answer());
+    await flush();
+    expect(screen.getByRole("heading", { level: 2, name: "made early" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Ready" })).toBeTruthy();
+    expect(screen.getAllByRole("row").filter((r) => r.getAttribute("data-task") === "t1")).toHaveLength(1);
+  });
+});
+
+describe("the New task button", () => {
+  it("focuses the form's first field as it opens, and never moves focus later while the owner types", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeClient([makeTask({ id: "t1", state: "running", revision: 2, attempt: { id: "a1", state: "running" } })]);
+      render(<App client={client} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      fireEvent.click(screen.getByText("objective t1"));
+      fireEvent.click(screen.getByRole("button", { name: "New task" }));
+      const project = screen.getByLabelText("Project");
+      expect(document.activeElement).toBe(project);
+      // The owner (or a test driver) starts typing in Project; nothing queued moves focus away.
+      project.focus();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(document.activeElement).toBe(project);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -13,6 +13,8 @@ async function createAndStart(page: Page, objective: string) {
   await page.getByLabel("Project", { exact: true }).fill("project");
   await page.getByLabel("Objective", { exact: true }).fill(objective);
   await page.getByRole("button", { name: "Create", exact: true }).click();
+  // The created task is selected: its heading names it.
+  await expect(page.getByRole("heading", { level: 2, name: objective, exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Ready", exact: true }).click();
   await page.getByRole("button", { name: "Start", exact: true }).click();
 }

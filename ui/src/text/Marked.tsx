@@ -28,13 +28,26 @@ const names: Record<number, string> = {
 
 // Controls (Cc), format characters (Cf: the bidirectional controls, zero-width characters, the
 // soft hyphen, the tag characters, invisible operators, interlinear annotations), the line and
-// paragraph separators (Zl, Zp), and the Hangul fillers, which draw as blank letters.
-const hiddenClass = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u115F\u1160\u3164\uFFA0\u180E]/u;
+// paragraph separators (Zl, Zp), and the Hangul fillers, which draw as blank letters. Every
+// named character above is in Cf. Text is scanned with one regular expression, not a test per
+// character: an attempt's activity re-renders often and must stay cheap.
+const hiddenClass = "[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\u115F\\u1160\\u3164\\uFFA0\\u180E]";
+const hiddenOne = new RegExp(hiddenClass, "u");
+
+function kept(ch: string, keepNewlines: boolean): boolean {
+  return ch === "\t" || (keepNewlines && ch === "\n");
+}
 
 export function isHidden(code: number, keepNewlines = false): boolean {
-  if (code === 0x09) return false;
-  if (keepNewlines && code === 0x0a) return false;
-  return names[code] !== undefined || hiddenClass.test(String.fromCodePoint(code));
+  const ch = String.fromCodePoint(code);
+  return !kept(ch, keepNewlines) && hiddenOne.test(ch);
+}
+
+// hiddenMatches yields each hidden character of a text with its index.
+function* hiddenMatches(text: string, keepNewlines: boolean): Generator<{ index: number; ch: string }> {
+  for (const m of text.matchAll(new RegExp(hiddenClass, "gu"))) {
+    if (!kept(m[0], keepNewlines)) yield { index: m.index, ch: m[0] };
+  }
 }
 
 function label(code: number): string {
@@ -51,9 +64,9 @@ function describe(code: number): string {
 // hiddenIn lists the hidden characters of a text, once each, in the order first met.
 export function hiddenIn(text: string, keepNewlines = false): string[] {
   const found: string[] = [];
-  for (const ch of text) {
-    const code = ch.codePointAt(0)!;
-    if (isHidden(code, keepNewlines) && !found.includes(label(code))) found.push(label(code));
+  for (const { ch } of hiddenMatches(text, keepNewlines)) {
+    const name = label(ch.codePointAt(0)!);
+    if (!found.includes(name)) found.push(name);
   }
   return found;
 }
@@ -62,23 +75,20 @@ export function hiddenIn(text: string, keepNewlines = false): string[] {
 // break stays a line break (file contents, logs).
 export function Marked({ text, keepNewlines = false }: { text: string; keepNewlines?: boolean }) {
   const parts: ReactNode[] = [];
-  let run = "";
+  let at = 0;
   let n = 0;
-  for (const ch of text) {
+  for (const { index, ch } of hiddenMatches(text, keepNewlines)) {
+    if (index > at) parts.push(text.slice(at, index));
     const code = ch.codePointAt(0)!;
-    if (!isHidden(code, keepNewlines)) {
-      run += ch;
-      continue;
-    }
-    if (run) parts.push(run);
-    run = "";
     parts.push(
       <mark key={n++} className="hidden-char" title={describe(code)} aria-label={`${describe(code)} ${label(code)}`}>
         {label(code)}
       </mark>,
     );
+    at = index + ch.length;
   }
-  if (run) parts.push(run);
+  if (parts.length === 0) return <>{text}</>;
+  if (at < text.length) parts.push(text.slice(at));
   return <>{parts}</>;
 }
 
