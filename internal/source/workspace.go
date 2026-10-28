@@ -406,6 +406,22 @@ func (w *Workspaces) writeConfig(project, repo, mirror string, src mirrorSource)
 			return "", err
 		}
 	}
+	// Attributes change what a diff shows: a copy of each kept outside the clone.
+	for _, a := range w.attributeFiles(project) {
+		data, _, err := readUnder(repo, filepath.Join(repo, a.inClone), maxFileSize)
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := os.Remove(a.copy); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return "", err
+			}
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if err := writeNoFollow(a.copy, data); err != nil {
+			return "", err
+		}
+	}
 	return hex.EncodeToString(sum[:]), nil
 }
 

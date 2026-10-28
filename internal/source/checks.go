@@ -30,6 +30,18 @@ func (w *Workspaces) safeConfigFlags() []string {
 	}
 }
 
+// attributeFile is an attributes file git reads in the clone, and Ada's copy of it outside.
+type attributeFile struct{ inClone, copy string }
+
+// attributeFiles are the clone's info/attributes and the copy of the user's attributes file.
+func (w *Workspaces) attributeFiles(project string) []attributeFile {
+	dir := filepath.Join(w.Root, project)
+	return []attributeFile{
+		{filepath.Join("info", "attributes"), filepath.Join(dir, "ada-info-attributes")},
+		{"ada-attributes", filepath.Join(dir, "ada-attributes")},
+	}
+}
+
 func allowedCloneConfigKey(key string) bool {
 	switch key {
 	case "core.repositoryformatversion", "core.bare", "core.hookspath", "core.fsmonitor",
@@ -71,6 +83,15 @@ func (w *Workspaces) verifyCloneConfig(project, want, admin string) error {
 			if _, err := os.Lstat(filepath.Join(admin, name)); !errors.Is(err, fs.ErrNotExist) {
 				return mismatch("the worktree git directory holds %s", name)
 			}
+		}
+	}
+	for _, a := range w.attributeFiles(project) {
+		got, _, gotErr := readUnder(repo, filepath.Join(repo, a.inClone), maxFileSize)
+		kept, _, keptErr := readUnder(w.Root, a.copy, maxFileSize)
+		switch {
+		case errors.Is(gotErr, fs.ErrNotExist) && errors.Is(keptErr, fs.ErrNotExist):
+		case gotErr != nil || keptErr != nil || !bytes.Equal(got, kept):
+			return mismatch("the clone's %s differs from what Ada wrote", filepath.ToSlash(a.inClone))
 		}
 	}
 	parsed, err := parseConfig(cfgData)
@@ -343,6 +364,8 @@ func removeTreeNoFollow(path string) error {
 		}
 		return nil
 	}
+	// A real directory, so chmod changes it alone: a read-only one must open and lose entries.
+	_ = os.Chmod(path, 0o700)
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -360,7 +383,6 @@ func removeTreeNoFollow(path string) error {
 	if firstErr != nil {
 		return firstErr
 	}
-	_ = os.Chmod(path, 0o700)
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}

@@ -61,6 +61,7 @@ func reviewError(w http.ResponseWriter, err error) {
 		{store.ErrAttemptRecovery, 409, "recovery_required"},
 		{store.ErrNoAttempt, 409, "no_attempt"},
 		{store.ErrInvalidFinding, 400, "bad_request"},
+		{store.ErrTooManyFindings, 409, "too_many_findings"},
 		{source.ErrNoSuchPath, 404, "not_found"},
 		{errNoChanges, 409, "no_changes"},
 		{errWorkspaceMismatch, 409, "workspace_mismatch"},
@@ -115,6 +116,7 @@ type changesJSON struct {
 	Total           int                    `json:"total"`
 	FilesTruncated  bool                   `json:"files_truncated"`
 	BytesTruncated  bool                   `json:"bytes_truncated"`
+	TotalCapped     bool                   `json:"total_capped"` // total is a lower bound
 	ProviderChanges *store.ProviderChanges `json:"provider_changes"`
 	ProviderFlagged bool                   `json:"provider_flagged"`
 	ProviderFiles   bool                   `json:"provider_files"`
@@ -161,7 +163,7 @@ func (h *handler) changes(w http.ResponseWriter, r *http.Request) {
 	tip := h.tip(rs.Project, id)
 	out := changesJSON{Task: id, Attempt: a.ID, Base: a.ImportedCommit, Commit: a.TestedCommit, Tip: tip, Stale: tip != a.TestedCommit, Generation: rs.Generation,
 		RenameThreshold: source.RenameThreshold, Limits: map[string]int64{"files": int64(lim.Files), "file_bytes": lim.FileBytes, "total_bytes": lim.TotalBytes},
-		Files: make([]changedFileJSON, 0, len(set.Files)), Total: set.Total, FilesTruncated: set.FilesTruncated, BytesTruncated: set.BytesTruncated,
+		Files: make([]changedFileJSON, 0, len(set.Files)), Total: set.Total, FilesTruncated: set.FilesTruncated, BytesTruncated: set.BytesTruncated, TotalCapped: set.TotalCapped,
 		ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged()}
 	for _, f := range set.Files {
 		j := changedFileJSON{Status: f.Status, Similarity: f.Similarity, OldMode: f.OldMode, NewMode: f.NewMode, Binary: f.Binary, Added: f.Added, Deleted: f.Deleted, PatchTruncated: f.PatchTruncated,
@@ -187,6 +189,8 @@ type fileEntryJSON struct {
 	Type    string `json:"type"`
 	Mode    string `json:"mode"`
 	Size    int64  `json:"size"`
+	// Submodule is a submodule's recorded commit.
+	Submodule string `json:"submodule,omitempty"`
 }
 
 type fileJSON struct {
@@ -202,6 +206,7 @@ type fileJSON struct {
 	Content          *string         `json:"content,omitempty"`
 	Truncated        bool            `json:"truncated"`
 	Target           *string         `json:"target,omitempty"`
+	Submodule        string          `json:"submodule,omitempty"`
 	TargetRaw        string          `json:"target_raw,omitempty"`
 }
 
@@ -224,12 +229,12 @@ func (h *handler) files(w http.ResponseWriter, r *http.Request) {
 		reviewError(w, err)
 		return
 	}
-	out := fileJSON{Task: id, Commit: view.Commit, Path: view.Path, Type: view.Type, Mode: view.Mode, EntriesTruncated: view.EntriesTruncated, Size: view.Size, Truncated: view.Truncated}
+	out := fileJSON{Task: id, Commit: view.Commit, Path: view.Path, Type: view.Type, Mode: view.Mode, EntriesTruncated: view.EntriesTruncated, Size: view.Size, Truncated: view.Truncated, Submodule: view.Submodule}
 	switch view.Type {
 	case "tree":
 		out.Entries = make([]fileEntryJSON, 0, len(view.Entries))
 		for _, e := range view.Entries {
-			j := fileEntryJSON{Type: e.Type, Mode: e.Mode, Size: e.Size}
+			j := fileEntryJSON{Type: e.Type, Mode: e.Mode, Size: e.Size, Submodule: e.Submodule}
 			j.Name, j.NameRaw = rawText(e.Name)
 			j.Path, j.PathRaw = rawText(e.Path)
 			out.Entries = append(out.Entries, j)
@@ -363,6 +368,13 @@ func (h *handler) accept(w http.ResponseWriter, r *http.Request) {
 	writeCached(w, cached)
 }
 
+// refinedTaskJSON is a refine's answer: the started task and the ids of the findings the new
+// attempt's prompt carries, from any member, by design.
+type refinedTaskJSON struct {
+	startedTaskJSON
+	Findings []string `json:"findings"`
+}
+
 // refine starts a new attempt of the task as a fresh engine session of the requester, on their
 // profile, continuing ada/<task> from its tip with the findings in its prompt. An ended attempt's
 // remaining changes are committed and its worktree removed first; each of those steps is safe to
@@ -453,11 +465,12 @@ func (h *handler) refine(w http.ResponseWriter, r *http.Request) {
 		}
 		a := store.Attempt{ID: attemptID, Backend: input.Backend, Model: input.Model, Effort: input.Effort, Mode: input.Mode, Executor: "local",
 			OwnershipGeneration: h.exec.Generation, EngineSHA256: h.exec.EngineSHA256, MaxTurns: input.MaxTurns, Timeout: limit}
-		if err := tx.Refine(r.Context(), id, revision, a, input.Acknowledge); err != nil {
+		carried, err := tx.Refine(r.Context(), id, revision, a, input.Acknowledge)
+		if err != nil {
 			return 0, nil, err
 		}
 		task, err := scanTaskTx(r.Context(), tx, id)
-		return 200, startedTaskJSON{h.taskAtTip(task), attemptID}, err
+		return 200, refinedTaskJSON{startedTaskJSON{h.taskAtTip(task), attemptID}, carried}, err
 	})
 	if err != nil {
 		attemptID = ""

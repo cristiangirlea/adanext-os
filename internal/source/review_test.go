@@ -389,3 +389,179 @@ func TestContinueGivesTheNextAttemptTheBranchFromItsTip(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// indexCommit commits, in the worktree, an entry of mode at path whose object is oid (a blob's
+// content for a symlink, a commit id for a gitlink), then checks the worktree out to match.
+func indexCommit(t *testing.T, m Manifest, mode, path, oid string) {
+	t.Helper()
+	git(t, m.Path, "update-index", "--add", "--cacheinfo", mode+","+oid+","+path)
+	git(t, m.Path, "commit", "-q", "-m", "agent's "+mode)
+	git(t, m.Path, "reset", "-q", "--hard")
+}
+
+func blobOf(t *testing.T, dir, content string) string {
+	t.Helper()
+	cmd := exec.Command("git", "hash-object", "-w", "--stdin")
+	cmd.Dir, cmd.Env, cmd.Stdin = dir, fixtureEnv(), strings.NewReader(content)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func changesBetween(t *testing.T, w *Workspaces, from, to string) ChangeSet {
+	t.Helper()
+	set, err := w.Changes(context.Background(), "p", from, to, configHash(t, w), DefaultChangeLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return set
+}
+
+func TestChangesKeepEachPatchWithItsFileAfterATypeChange(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"a.txt": "regular\n", "b.txt": "b\n"})
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	write(t, filepath.Join(m.Path, "b.txt"), "b changed\n")
+	git(t, m.Path, "add", "b.txt")
+	// a.txt becomes a symlink: git writes its patch as a deletion and an addition.
+	indexCommit(t, m, "120000", "a.txt", blobOf(t, m.Path, "b.txt"))
+	tested := agentCommit(t, w, m)
+	set := changesBetween(t, w, m.Head, tested)
+	if len(set.Files) != 2 || set.Files[0].Path != "a.txt" || set.Files[0].Status != "T" || set.Files[1].Path != "b.txt" {
+		t.Fatalf("changes = %+v", set)
+	}
+	for _, f := range set.Files {
+		if got, want := string(f.Patch), gitDiff(t, m.Path, m.Head, tested, f.Path); got != want {
+			t.Errorf("%s patch:\n%s\nwant:\n%s", f.Path, got, want)
+		}
+	}
+}
+
+func TestChangesShowAnAddedAndABumpedSubmodulePointer(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	first, bumped, other := strings.Repeat("1", 40), strings.Repeat("2", 40), strings.Repeat("3", 40)
+	if err := os.MkdirAll(filepath.Join(m.Path, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	indexCommit(t, m, "160000", "lib", first)
+	added := agentCommit(t, w, m)
+	set := changesBetween(t, w, m.Head, added)
+	if len(set.Files) != 1 || set.Files[0].Path != "lib" || set.Files[0].Status != "A" || set.Files[0].NewMode != "160000" {
+		t.Fatalf("an added submodule: %+v", set)
+	}
+	if got, want := string(set.Files[0].Patch), gitDiff(t, m.Path, m.Head, added, "lib"); got != want || !strings.Contains(got, "+Subproject commit "+first) {
+		t.Fatalf("added patch:\n%s\nwant:\n%s", got, want)
+	}
+	if err := os.MkdirAll(filepath.Join(m.Path, "other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, m.Path, "update-index", "--cacheinfo", "160000,"+bumped+",lib")
+	indexCommit(t, m, "160000", "other", other)
+	row := m
+	row.Head = ""
+	tip, _, err := w.CommitAgentChanges(context.Background(), row, m.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	set = changesBetween(t, w, added, tip)
+	if len(set.Files) != 2 || set.Files[0].Path != "lib" || set.Files[0].Status != "M" || set.Files[1].Path != "other" {
+		t.Fatalf("a bumped and an added submodule: %+v", set)
+	}
+	if got := string(set.Files[0].Patch); !strings.Contains(got, "-Subproject commit "+first) || !strings.Contains(got, "+Subproject commit "+bumped) {
+		t.Fatalf("bumped patch:\n%s", got)
+	}
+	view, err := w.Files(context.Background(), "p", tip, "lib", configHash(t, w), 10, 10)
+	if err != nil || view.Type != "submodule" || view.Submodule != bumped {
+		t.Fatalf("the submodule in files: %+v %v", view, err)
+	}
+	root, err := w.Files(context.Background(), "p", tip, "", configHash(t, w), 10, 10)
+	if err != nil || len(root.Entries) != 3 || root.Entries[1].Name != "lib" || root.Entries[1].Submodule != bumped {
+		t.Fatalf("the root listing: %+v %v", root, err)
+	}
+}
+
+func TestChangesAreRefusedWhenTheCloneHoldsAttributesAdaDidNotWrite(t *testing.T) {
+	t.Parallel()
+	dir := newRepo(t, map[string]string{"a.txt": "a\n"})
+	write(t, filepath.Join(dir, ".git", "info", "attributes"), "*.bin binary\n")
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	write(t, filepath.Join(m.Path, "a.txt"), "changed\n")
+	tested := agentCommit(t, w, m)
+	// The user's own attributes, copied by Ada, are no reason to refuse.
+	changesBetween(t, w, m.Head, tested)
+	for _, name := range []string{filepath.Join("info", "attributes"), "ada-attributes"} {
+		path := filepath.Join(w.repo("p"), name)
+		write(t, path, "* -diff\n")
+		var mm *MismatchError
+		if _, err := w.Changes(context.Background(), "p", m.Head, tested, configHash(t, w), DefaultChangeLimits); !errors.As(err, &mm) {
+			t.Fatalf("%s written by an agent: %v", name, err)
+		}
+		if _, err := w.Files(context.Background(), "p", tested, "", configHash(t, w), 10, 10); !errors.As(err, &mm) {
+			t.Fatalf("files with %s written by an agent: %v", name, err)
+		}
+		if name == "ada-attributes" {
+			os.Remove(path)
+		} else {
+			write(t, path, "*.bin binary\n")
+		}
+	}
+	changesBetween(t, w, m.Head, tested)
+}
+
+func TestRemovalOfAWorktreeHoldingAReadOnlyDirectory(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory's mode does not stop a removal on Windows")
+	}
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	ro := filepath.Join(m.Path, "ro")
+	write(t, filepath.Join(ro, "inner", "file.txt"), "x\n")
+	for _, d := range []string{filepath.Join(ro, "inner"), ro} {
+		if err := os.Chmod(d, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { os.Chmod(ro, 0o755); os.Chmod(filepath.Join(ro, "inner"), 0o755) })
+	if err := w.RemoveWorktree("p", "a1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(m.Path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the worktree remains: %v", err)
+	}
+}
+
+func TestListingsAndDiffRecordsStopAtTheirHardCap(t *testing.T) {
+	dir := newRepo(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n", "c.txt": "c\n", "d.txt": "d\n"})
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt"} {
+		write(t, filepath.Join(m.Path, name), name+" changed\n")
+	}
+	tested := agentCommit(t, w, m)
+	set, err := w.Changes(context.Background(), "p", m.Head, tested, configHash(t, w), ChangeLimits{Files: 1})
+	if err != nil || len(set.Files) != 1 || set.Total != 4 || !set.FilesTruncated || set.TotalCapped || len(set.Files[0].Patch) == 0 {
+		t.Fatalf("a listing past the file cap: %+v %v", set, err)
+	}
+	defer func(old int) { maxStreamRecords = old }(maxStreamRecords)
+	maxStreamRecords = 2
+	set, err = w.Changes(context.Background(), "p", m.Head, tested, configHash(t, w), ChangeLimits{Files: 1})
+	if err != nil || len(set.Files) != 1 || !set.TotalCapped || set.Total > 2 {
+		t.Fatalf("a diff past the record cap: %+v %v", set, err)
+	}
+	view, err := w.Files(context.Background(), "p", tested, "", configHash(t, w), 1, 10)
+	if err != nil || len(view.Entries) != 1 || !view.EntriesTruncated {
+		t.Fatalf("a listing past the record cap: %+v %v", view, err)
+	}
+	if _, err := w.Files(context.Background(), "p", tested, "d.txt", configHash(t, w), 1, 10); err == nil {
+		t.Fatal("a lookup past the record cap found its entry")
+	}
+}

@@ -1743,10 +1743,23 @@ request runs.
      lists at most 5000 entries and reads at most 1 MiB, walking the commit's trees by object id;
      a symlink shows its stored target (4 KiB at most) and is never descended into. Both check the
      clone config against Ada's copy first; a difference is 409 `workspace_mismatch`.
+     Review round 1 (PR #122): a type change, which git's patch writes as a deletion and an
+     addition under two headers, keeps both with its one file, and more patches than listed
+     files is an error unless the list was cut. Submodule pointers are shown: the diffs add
+     `--ignore-submodules=dirty` after the runner's `all`, and Files gives a submodule's recorded
+     commit. Git's listings (`--raw`, `--numstat`, `ls-tree`) are read as a stream: the first
+     records kept, the rest counted, and reading stops at 1,048,576 records or 64 MiB, where
+     `total_capped` says the total is a lower bound. The clone's `info/attributes` and Ada's copy
+     of the user's attributes file are compared with copies Ada keeps outside the clone, written
+     with the config, so an agent's `* -diff` is a workspace mismatch, not hidden patches; a
+     clone synced before this has no copies and refuses until its next preparation syncs it.
   3. Findings attach to the attempt the task shows, at most 200 per task and 16 KiB each, any
      current member. A refine's prompt carries the findings of the attempts since the newest
      earlier one with a worktree (that one included), so a refine withdrawn while queued loses
-     none; with none recorded the prompt says so.
+     none; with none recorded the prompt says so. Findings from any member are carried into the
+     requester's refined attempt, which runs on the requester's profile, by design; the refine
+     response lists the ids of the findings it carried. A 201st finding is 409
+     `too_many_findings`.
   4. Accept takes `{"commit","generation"}` under If-Match from `awaiting_review`. The commit must
      be the newest attempt's agent-changes commit and the branch's current tip, the generation the
      coordinator's current ownership generation (Changes returns both); otherwise 409
@@ -1772,7 +1785,9 @@ request runs.
      entry with each entry Lstat-checked, a link or junction removed as itself; the project
      directory, its `worktrees/`, the clone and the clone's `worktrees/` must be real directories,
      else the removal is a workspace mismatch. The admin directory is `repo.git/worktrees/<attempt>`,
-     the one Prepare verified the worktree uses. The shared removal no longer changes a link's
+     the one Prepare verified the worktree uses. A real directory is made 0700 before it is read,
+     so a read-only directory an agent left does not block removal on Unix. The shared removal no
+     longer changes a link's
      target mode: it chmodded the path before removing it, which on Unix followed a symlink and
      made its target directory unreadable to others (seen in the Linux leg, fixed for check
      worktrees too).

@@ -46,7 +46,14 @@ type ChangeSet struct {
 	Total          int  // Files in the diff, listed or not.
 	FilesTruncated bool // More files than the cap.
 	BytesTruncated bool // A patch was cut by the cap on all bytes.
+	TotalCapped    bool // Counting stopped at the hard cap: Total is a lower bound.
 }
+
+// maxStreamRecords and maxStreamBytes are the hard caps on what Ada reads of one git listing.
+var (
+	maxStreamRecords = 1 << 20
+	maxStreamBytes   = int64(64 << 20)
+)
 
 func validObjectID(id string) bool {
 	return (len(id) == 40 || len(id) == 64) && isHex(id)
@@ -55,7 +62,8 @@ func validObjectID(id string) bool {
 // diffArgs are the flags every Changes call gives git diff: no external diff or textconv (the
 // runner adds both), NUL-separated output, a fixed rename threshold and no copies.
 func diffArgs(format string, from, to string) []string {
-	return []string{"diff", format, "-z", "-M" + RenameThreshold, "--no-color", "--no-relative", "--full-index", "--src-prefix=a/", "--dst-prefix=b/", from, to, "--"}
+	// After the runner's --ignore-submodules=all, so a submodule's recorded commit is shown.
+	return []string{"diff", format, "-z", "-M" + RenameThreshold, "--ignore-submodules=dirty", "--no-color", "--no-relative", "--full-index", "--src-prefix=a/", "--dst-prefix=b/", from, to, "--"}
 }
 
 // Changes is the diff from one commit of the project's clone to another, through Ada's git
@@ -69,104 +77,189 @@ func (w *Workspaces) Changes(ctx context.Context, project, from, to, configSHA25
 	if err := w.verifyCloneConfig(project, configSHA256, ""); err != nil {
 		return ChangeSet{}, err
 	}
-	g, repo, flags := w.Inspector.Git, w.repo(project), w.safeConfigFlags()
-	raw, err := output(g.commandWith(ctx, flags, repo, "", diffArgs("--raw", from, to)...), "diff")
+	repo := w.repo(project)
+	set := ChangeSet{From: from, To: to, Files: []ChangedFile{}}
+	keep := lim.Files
+	if keep <= 0 {
+		keep = maxStreamRecords
+	}
+	raw := rawParser{keep: keep}
+	complete, err := w.streamGit(ctx, repo, diffArgs("--raw", from, to), raw.token)
+	if err == nil {
+		err = raw.err
+	}
 	if err != nil {
 		return ChangeSet{}, err
 	}
-	files, err := parseRaw(raw)
-	if err != nil {
-		return ChangeSet{}, err
-	}
-	numstat, err := output(g.commandWith(ctx, flags, repo, "", diffArgs("--numstat", from, to)...), "diff")
-	if err != nil {
-		return ChangeSet{}, err
-	}
-	if err := applyNumstat(files, numstat); err != nil {
-		return ChangeSet{}, err
-	}
-	set := ChangeSet{From: from, To: to, Total: len(files)}
-	if lim.Files > 0 && len(files) > lim.Files {
-		files, set.FilesTruncated = files[:lim.Files], true
-	}
-	set.Files = files
-	if len(files) == 0 {
+	set.Files, set.Total = raw.files, raw.count
+	set.TotalCapped = !complete
+	set.FilesTruncated = set.Total > len(set.Files) || set.TotalCapped
+	if len(set.Files) == 0 {
 		set.Files = []ChangedFile{}
 		return set, nil
 	}
-	set.BytesTruncated, err = w.readPatches(ctx, repo, from, to, set.Files, lim)
+	stat := numstatParser{files: set.Files}
+	if _, err := w.streamGit(ctx, repo, diffArgs("--numstat", from, to), stat.token); err != nil {
+		return ChangeSet{}, err
+	}
+	if stat.err != nil {
+		return ChangeSet{}, stat.err
+	}
+	if stat.n != len(set.Files) {
+		return ChangeSet{}, fmt.Errorf("git diff --numstat listed %d files, --raw %d", stat.n, len(set.Files))
+	}
+	set.BytesTruncated, err = w.readPatches(ctx, repo, from, to, set.Files, lim, set.FilesTruncated)
 	return set, err
 }
 
-// parseRaw reads git diff --raw -z: ":<old> <new> <oid> <oid> <status>" then the path, or for a
-// rename the old and the new path.
-func parseRaw(out []byte) ([]ChangedFile, error) {
-	tokens := bytes.Split(bytes.TrimSuffix(out, []byte{0}), []byte{0})
-	var files []ChangedFile
-	for i := 0; i < len(tokens); i++ {
-		if len(tokens[i]) == 0 && len(out) == 0 {
+// streamGit runs a git call whose output is NUL-separated tokens and gives each to each until it
+// returns false; complete is false when it stopped there or at the hard caps on tokens and bytes.
+func (w *Workspaces) streamGit(ctx context.Context, repo string, args []string, each func([]byte) bool) (complete bool, err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := w.Inspector.Git.commandWith(ctx, w.safeConfigFlags(), repo, "", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return false, err
+	}
+	if err := cmd.Start(); err != nil {
+		return false, err
+	}
+	reader := bufio.NewReaderSize(stdout, 64<<10)
+	var token []byte
+	var read int64
+	records, stopped := 0, false
+	for !stopped {
+		part, err := reader.ReadSlice(0)
+		read += int64(len(part))
+		if read > maxStreamBytes || len(token)+len(part) > 1<<20 {
+			stopped = true
 			break
 		}
-		meta := strings.Fields(strings.TrimPrefix(string(tokens[i]), ":"))
-		if len(meta) != 5 || i+1 >= len(tokens) {
-			return nil, fmt.Errorf("unexpected git diff --raw record %q", tokens[i])
+		token = append(token, part...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
 		}
-		f := ChangedFile{OldMode: meta[0], NewMode: meta[1], Status: meta[4][:1]}
-		if f.Status == "R" || f.Status == "C" {
-			if i+2 >= len(tokens) {
-				return nil, fmt.Errorf("a rename record without its paths")
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				stopped = true
 			}
-			f.Similarity, _ = strconv.Atoi(meta[4][1:])
-			f.OldPath, f.Path = string(tokens[i+1]), string(tokens[i+2])
-			i += 2
-		} else {
-			f.Path = string(tokens[i+1])
-			i++
+			break
 		}
-		files = append(files, f)
+		if records >= maxStreamRecords || !each(bytes.TrimSuffix(token, []byte{0})) {
+			stopped = true
+			break
+		}
+		records++
+		token = token[:0]
 	}
-	return files, nil
+	if stopped {
+		cancel()
+	}
+	_, _ = io.Copy(io.Discard, stdout)
+	waitErr := cmd.Wait()
+	if !stopped && waitErr != nil {
+		return false, fmt.Errorf("git %s: %w: %s", args[0], waitErr, strings.TrimSpace(stderr.String()))
+	}
+	return !stopped, nil
 }
 
-// applyNumstat reads git diff --numstat -z, in the same order as --raw: "<added>\t<deleted>\t"
-// then the path, or an empty path and the old and new paths for a rename; "-" marks binary.
-func applyNumstat(files []ChangedFile, out []byte) error {
-	tokens := bytes.Split(bytes.TrimSuffix(out, []byte{0}), []byte{0})
-	n := 0
-	for i := 0; i < len(tokens) && len(out) > 0; i++ {
-		parts := strings.SplitN(string(tokens[i]), "\t", 3)
-		if len(parts) != 3 || n >= len(files) {
-			return fmt.Errorf("unexpected git diff --numstat record %q", tokens[i])
+// rawParser reads git diff --raw -z: ":<old> <new> <oid> <oid> <status>" then the path, or for a
+// rename the old and the new path. It keeps the first keep files and counts the rest.
+type rawParser struct {
+	keep, count, want int
+	files             []ChangedFile
+	cur               ChangedFile
+	err               error
+}
+
+func (p *rawParser) token(tok []byte) bool {
+	if p.want == 0 {
+		meta := strings.Fields(strings.TrimPrefix(string(tok), ":"))
+		if len(meta) != 5 || !strings.HasPrefix(string(tok), ":") {
+			p.err = fmt.Errorf("unexpected git diff --raw record %q", tok)
+			return false
 		}
-		path := parts[2]
-		if path == "" {
-			if i+2 >= len(tokens) {
-				return fmt.Errorf("a numstat rename without its paths")
-			}
-			path = string(tokens[i+2])
-			i += 2
+		p.cur = ChangedFile{OldMode: meta[0], NewMode: meta[1], Status: meta[4][:1]}
+		p.want = 1
+		if p.cur.Status == "R" || p.cur.Status == "C" {
+			p.cur.Similarity, _ = strconv.Atoi(meta[4][1:])
+			p.want = 2
 		}
-		if path != files[n].Path {
-			return fmt.Errorf("git diff --numstat and --raw disagree at %q", path)
-		}
-		if parts[0] == "-" && parts[1] == "-" {
-			files[n].Binary, files[n].Added, files[n].Deleted = true, -1, -1
-		} else {
-			files[n].Added, _ = strconv.Atoi(parts[0])
-			files[n].Deleted, _ = strconv.Atoi(parts[1])
-		}
-		n++
+		return true
 	}
-	if n != len(files) {
-		return fmt.Errorf("git diff --numstat listed %d files, --raw %d", n, len(files))
+	if p.want == 2 && p.cur.OldPath == "" {
+		p.cur.OldPath = string(tok)
+		p.want = 1
+		if p.cur.OldPath == "" {
+			p.err = errors.New("a rename record without its old path")
+			return false
+		}
+		return true
 	}
-	return nil
+	p.cur.Path, p.want = string(tok), 0
+	if len(p.files) < p.keep {
+		p.files = append(p.files, p.cur)
+	}
+	p.count++
+	return true
+}
+
+// numstatParser reads git diff --numstat -z, in --raw's order, for the files kept:
+// "<added> TAB <deleted> TAB" then the path, or an empty path and the old and new paths for a rename;
+// "-" marks binary.
+type numstatParser struct {
+	files      []ChangedFile
+	n, skip    int
+	added, del string
+	err        error
+}
+
+func (p *numstatParser) token(tok []byte) bool {
+	if p.skip > 0 {
+		p.skip--
+		if p.skip > 0 {
+			return true
+		}
+		return p.record(string(tok))
+	}
+	parts := strings.SplitN(string(tok), "\t", 3)
+	if len(parts) != 3 || p.n >= len(p.files) {
+		p.err = fmt.Errorf("unexpected git diff --numstat record %q", tok)
+		return false
+	}
+	p.added, p.del = parts[0], parts[1]
+	if parts[2] == "" {
+		p.skip = 2
+		return true
+	}
+	return p.record(parts[2])
+}
+
+func (p *numstatParser) record(path string) bool {
+	f := &p.files[p.n]
+	if path != f.Path {
+		p.err = fmt.Errorf("git diff --numstat and --raw disagree at %q", path)
+		return false
+	}
+	if p.added == "-" && p.del == "-" {
+		f.Binary, f.Added, f.Deleted = true, -1, -1
+	} else {
+		f.Added, _ = strconv.Atoi(p.added)
+		f.Deleted, _ = strconv.Atoi(p.del)
+	}
+	p.n++
+	return p.n < len(p.files)
 }
 
 // readPatches reads git's patch and gives each listed file its part, the text from its
 // "diff --git" line to the next one; a hunk line always starts with a prefix character, so only
-// a header starts that way. Reading stops at the cap on all bytes, and the rest is marked cut.
-func (w *Workspaces) readPatches(ctx context.Context, repo, from, to string, files []ChangedFile, lim ChangeLimits) (bool, error) {
+// a header starts that way. A type change is written as a deletion and an addition, two headers
+// for one file. Reading stops at the cap on all bytes, and the rest is marked cut; past the
+// listed files it stops only when the list was cut, and is an error otherwise.
+func (w *Workspaces) readPatches(ctx context.Context, repo, from, to string, files []ChangedFile, lim ChangeLimits, listCut bool) (bool, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := w.Inspector.Git.commandWith(ctx, w.safeConfigFlags(), repo, "", diffArgs("-p", from, to)...)
@@ -181,16 +274,24 @@ func (w *Workspaces) readPatches(ctx context.Context, repo, from, to string, fil
 	}
 	reader := bufio.NewReaderSize(stdout, 64<<10)
 	header := []byte("diff --git ")
-	index, total, lineStart, cut := -1, int64(0), true, false
+	index, headers, total, lineStart, cut, beyond := -1, 0, int64(0), true, false, false
 	for {
 		part, err := reader.ReadSlice('\n')
 		if len(part) > 0 {
 			if lineStart && bytes.HasPrefix(part, header) {
-				index++
+				if headers == 0 {
+					index++
+					headers = 1
+					if index < len(files) && files[index].Status == "T" {
+						headers = 2
+					}
+				}
+				headers--
 			}
 			lineStart = part[len(part)-1] == '\n'
 			if index >= len(files) {
-				break // past the listed files
+				beyond = true
+				break
 			}
 			if index >= 0 {
 				f := &files[index]
@@ -220,7 +321,13 @@ func (w *Workspaces) readPatches(ctx context.Context, repo, from, to string, fil
 			break
 		}
 	}
-	stopped := cut || index >= len(files)
+	if beyond && !listCut {
+		cancel()
+		_, _ = io.Copy(io.Discard, stdout)
+		_ = cmd.Wait()
+		return false, fmt.Errorf("git diff gave more patches than the %d files it listed", len(files))
+	}
+	stopped := cut || beyond
 	if stopped {
 		cancel()
 	}
@@ -233,7 +340,7 @@ func (w *Workspaces) readPatches(ctx context.Context, repo, from, to string, fil
 		for i := index + 1; i < len(files); i++ {
 			files[i].PatchTruncated = true
 		}
-	} else if !stopped && index != len(files)-1 {
+	} else if !stopped && (index != len(files)-1 || headers != 0) {
 		return false, fmt.Errorf("git diff gave %d patches for %d files", index+1, len(files))
 	}
 	return cut, nil
@@ -245,7 +352,8 @@ var ErrNoSuchPath = errors.New("no such path in the commit")
 // TreeEntry is one entry of a directory in a commit; Type is blob, tree, symlink or submodule.
 type TreeEntry struct {
 	Name, Path, Type, Mode string
-	Size                   int64 // -1 for a tree or a submodule.
+	Size                   int64  // -1 for a tree or a submodule.
+	Submodule              string // A submodule's recorded commit.
 }
 
 // FileView is what Files reads at a path: a directory's entries, a file's content, or a link's
@@ -258,6 +366,7 @@ type FileView struct {
 	Content                  []byte
 	Truncated                bool
 	Target                   string // A symlink's target, as stored.
+	Submodule                string // A submodule's recorded commit.
 }
 
 // validTreePath is a slash path inside a commit, "" for its root.
@@ -288,31 +397,41 @@ func entryType(mode string) string {
 	return "blob"
 }
 
-// lsTree lists one tree object, NUL-separated: "<mode> <type> <oid> <size>\t<name>".
-func (w *Workspaces) lsTree(ctx context.Context, repo, tree string) ([]TreeEntry, []string, error) {
-	out, err := output(w.Inspector.Git.commandWith(ctx, w.safeConfigFlags(), repo, "", "ls-tree", "-z", "-l", "--full-tree", tree), "ls-tree")
-	if err != nil {
-		return nil, nil, err
-	}
+// lsTree lists one tree object, NUL-separated: "<mode> <type> <oid> <size> TAB <name>". It keeps
+// the first keep entries (all with keep 0), or with name only that entry, and reports whether it
+// read the whole tree within the hard caps.
+func (w *Workspaces) lsTree(ctx context.Context, repo, tree string, keep int, name string) ([]TreeEntry, []string, bool, error) {
 	var entries []TreeEntry
 	var oids []string
-	for _, rec := range bytes.Split(bytes.TrimSuffix(out, []byte{0}), []byte{0}) {
-		if len(rec) == 0 {
-			continue
-		}
-		meta, name, ok := bytes.Cut(rec, []byte{'\t'})
+	var bad error
+	complete, err := w.streamGit(ctx, repo, []string{"ls-tree", "-z", "-l", "--full-tree", tree}, func(rec []byte) bool {
+		meta, entryName, ok := bytes.Cut(rec, []byte{'\t'})
 		fields := strings.Fields(string(meta))
 		if !ok || len(fields) != 4 {
-			return nil, nil, fmt.Errorf("unexpected git ls-tree record %q", rec)
+			bad = fmt.Errorf("unexpected git ls-tree record %q", rec)
+			return false
+		}
+		if name != "" && string(entryName) != name {
+			return true
+		}
+		if name == "" && keep > 0 && len(entries) >= keep {
+			return false
 		}
 		size, err := strconv.ParseInt(fields[3], 10, 64)
 		if err != nil {
 			size = -1
 		}
-		entries = append(entries, TreeEntry{Name: string(name), Type: entryType(fields[0]), Mode: fields[0], Size: size})
-		oids = append(oids, fields[2])
+		e := TreeEntry{Name: string(entryName), Type: entryType(fields[0]), Mode: fields[0], Size: size}
+		if e.Type == "submodule" {
+			e.Submodule = fields[2]
+		}
+		entries, oids = append(entries, e), append(oids, fields[2])
+		return name == ""
+	})
+	if err == nil {
+		err = bad
 	}
-	return entries, oids, nil
+	return entries, oids, complete, err
 }
 
 // readBlob reads at most limit bytes of a blob, reporting whether it holds more.
@@ -363,32 +482,27 @@ func (w *Workspaces) Files(ctx context.Context, project, commit, path, configSHA
 		parts = strings.Split(path, "/")
 	}
 	for i, part := range parts {
-		entries, oids, err := w.lsTree(ctx, repo, oid)
+		entries, oids, complete, err := w.lsTree(ctx, repo, oid, 0, part)
 		if err != nil {
 			return FileView{}, err
 		}
-		found := -1
-		for j, e := range entries {
-			if e.Name == part {
-				found = j
-				break
-			}
+		if len(entries) == 0 && !complete {
+			return FileView{}, fmt.Errorf("the tree holding %q is past the listing cap", part)
 		}
-		if found < 0 || (i < len(parts)-1 && entries[found].Type != "tree") {
+		if len(entries) == 0 || (i < len(parts)-1 && entries[0].Type != "tree") {
 			return FileView{}, ErrNoSuchPath
 		}
-		oid, view.Type, view.Mode, view.Size = oids[found], entries[found].Type, entries[found].Mode, entries[found].Size
+		e := entries[0]
+		oid, view.Type, view.Mode, view.Size, view.Submodule = oids[0], e.Type, e.Mode, e.Size, e.Submodule
 	}
 	switch view.Type {
 	case "tree":
 		view.Size = -1
-		entries, _, err := w.lsTree(ctx, repo, oid)
+		entries, _, complete, err := w.lsTree(ctx, repo, oid, maxEntries, "")
 		if err != nil {
 			return FileView{}, err
 		}
-		if maxEntries > 0 && len(entries) > maxEntries {
-			entries, view.EntriesTruncated = entries[:maxEntries], true
-		}
+		view.EntriesTruncated = !complete
 		for i := range entries {
 			entries[i].Path = entries[i].Name
 			if path != "" {

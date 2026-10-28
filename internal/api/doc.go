@@ -113,7 +113,9 @@
 // ("commit"), read from Ada's clone with --no-ext-diff --no-textconv -z and
 // rename threshold 50%: per file its status, modes, binary mark, counts,
 // patch and provider mark, at most 1000 files, 512 KiB per patch and 8 MiB in
-// all, each cut marked (files_truncated, patch_truncated, bytes_truncated). A
+// all, each cut marked (files_truncated, patch_truncated, bytes_truncated;
+// total_capped when counting stopped at the hard cap). Type changes and
+// submodule pointers are shown; a submodule's commit is in files' submodule. A
 // path is the bytes git reported: the JSON string when they are UTF-8, else
 // also path_raw in base64 (patch_raw likewise). "tip" and "stale" compare it
 // with the branch, "generation" is the coordinator's, and both go back in an
@@ -133,5 +135,7 @@
 // attempt not ended is attempt_active, one recovery_required refuses it. Each
 // earlier attempt's remaining changes are committed and its worktree removed,
 // then the requester's attempt is queued on ada/<task> with the findings in
-// its prompt; a refused or interrupted refine can be sent again.
+// its prompt, whose ids the answer lists in findings; a refused or interrupted
+// refine can be sent again. A task holds at most 200 findings (409
+// too_many_findings past that).
 package api

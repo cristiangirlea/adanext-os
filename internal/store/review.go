@@ -24,6 +24,8 @@ var (
 	ErrWorktreeNotRemoved = errors.New("an earlier attempt's worktree is still present")
 	// ErrInvalidFinding is an empty or oversized finding.
 	ErrInvalidFinding = errors.New("invalid finding")
+	// ErrTooManyFindings is a finding past a task's cap.
+	ErrTooManyFindings = errors.New("the task holds the most findings it may")
 	// ErrNoAttempt is a task with no attempt to review.
 	ErrNoAttempt = errors.New("the task has no attempt")
 )
@@ -197,7 +199,7 @@ func (tx *Tx) RecordFinding(ctx context.Context, taskID, body string) (Finding, 
 		return Finding{}, err
 	}
 	if count >= MaxFindingsPerTask {
-		return Finding{}, ErrInvalidFinding
+		return Finding{}, ErrTooManyFindings
 	}
 	f := Finding{ID: newReviewID("fnd_"), Task: taskID, Attempt: n.ID, Author: tx.userID, Body: body, Created: now()}
 	_, err = tx.tx.ExecContext(ctx, "INSERT INTO findings(id,task,attempt,author,body,created) VALUES(?,?,?,?,?,?)", f.ID, f.Task, f.Attempt, f.Author, f.Body, f.Created)
@@ -267,13 +269,14 @@ func (tx *Tx) Accept(ctx context.Context, taskID string, revision int64, commit 
 // attempt, and moves the task to preparing at revision. It is refused for an accepted task, while
 // any attempt has not ended or is recovery_required, while an earlier worktree is still present,
 // and, until acknowledged, when the last attempt with a worktree changed provider configuration.
-func (tx *Tx) Refine(ctx context.Context, taskID string, revision int64, a Attempt, acknowledged bool) error {
+// It returns the ids of the findings the new attempt's prompt carries.
+func (tx *Tx) Refine(ctx context.Context, taskID string, revision int64, a Attempt, acknowledged bool) ([]string, error) {
 	r, err := readReviewState(ctx, tx.tx, tx.userID, taskID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := r.CheckRefine(tx.userID, revision, acknowledged, true); err != nil {
-		return err
+		return nil, err
 	}
 	var refines any
 	if n := r.Newest(); n != nil {
@@ -281,9 +284,17 @@ func (tx *Tx) Refine(ctx context.Context, taskID string, revision int64, a Attem
 	}
 	if _, err := tx.tx.ExecContext(ctx, `INSERT INTO attempts(id,task,actor,backend,model,effort,mode,executor,ownership_generation,engine_sha256,state,started,max_turns,timeout,refines)
 		VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)`, a.ID, taskID, tx.userID, a.Backend, a.Model, a.Effort, a.Mode, a.Executor, a.OwnershipGeneration, a.EngineSHA256, now(), a.MaxTurns, a.Timeout, refines); err != nil {
-		return err
+		return nil, err
 	}
-	return transition(ctx, tx.tx, taskID, r.State, Preparing, revision)
+	carried, err := refineFindings(ctx, tx.tx, a.ID)
+	if err != nil {
+		return nil, err
+	}
+	ids := []string{}
+	for _, f := range carried {
+		ids = append(ids, f.ID)
+	}
+	return ids, transition(ctx, tx.tx, taskID, r.State, Preparing, revision)
 }
 
 // CheckRefine is Refine's refusal for user at revision, without writing; with removed, an
@@ -376,27 +387,27 @@ func (s *Store) Continuation(ctx context.Context, attemptID string) (Continuatio
 
 // refineFindings are the findings a refined attempt carries: those on the attempts since the
 // newest earlier one with a worktree, that one included.
-func refineFindings(ctx context.Context, q querier, attemptID string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `SELECT f.body FROM attempts n JOIN findings f ON f.task=n.task JOIN attempts fa ON fa.id=f.attempt
+func refineFindings(ctx context.Context, q querier, attemptID string) ([]Finding, error) {
+	rows, err := q.QueryContext(ctx, `SELECT f.id,f.body FROM attempts n JOIN findings f ON f.task=n.task JOIN attempts fa ON fa.id=f.attempt
 		WHERE n.id=? AND n.refines IS NOT NULL AND fa.rowid<n.rowid AND fa.rowid>=COALESCE((SELECT max(a.rowid) FROM attempts a JOIN workspaces w ON w.attempt=a.id
 		WHERE a.task=n.task AND a.rowid<n.rowid),0) ORDER BY f.rowid`, attemptID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []Finding
 	for rows.Next() {
-		var body string
-		if err := rows.Scan(&body); err != nil {
+		var f Finding
+		if err := rows.Scan(&f.ID, &f.Body); err != nil {
 			return nil, err
 		}
-		out = append(out, body)
+		out = append(out, f)
 	}
 	return out, rows.Err()
 }
 
 // refinePrompt appends the findings to a task's prompt, one indented item each.
-func refinePrompt(prompt string, findings []string) string {
+func refinePrompt(prompt string, findings []Finding) string {
 	var b strings.Builder
 	b.WriteString(prompt)
 	b.WriteString("\n\nThis continues earlier work on the task, already committed on the branch you are on. Address these review findings:\n")
@@ -405,7 +416,7 @@ func refinePrompt(prompt string, findings []string) string {
 	}
 	for _, f := range findings {
 		b.WriteString("- ")
-		b.WriteString(strings.ReplaceAll(strings.TrimRight(f, "\n"), "\n", "\n  "))
+		b.WriteString(strings.ReplaceAll(strings.TrimRight(f.Body, "\n"), "\n", "\n  "))
 		b.WriteString("\n")
 	}
 	return b.String()

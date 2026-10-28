@@ -49,6 +49,9 @@ func (f *fakeReviewer) Changes(_ context.Context, project, from, to, _ string, _
 
 func (f *fakeReviewer) Files(_ context.Context, _, commit, path, _ string, _ int, _ int64) (source.FileView, error) {
 	f.record("files " + path)
+	if path == "lib" {
+		return source.FileView{Commit: commit, Path: path, Type: "submodule", Mode: "160000", Size: -1, Submodule: strings.Repeat("2", 40)}, nil
+	}
 	if path == "link" {
 		return source.FileView{Commit: commit, Path: path, Type: "symlink", Mode: "120000", Target: "../outside"}, nil
 	}
@@ -204,6 +207,10 @@ func TestChangesShowTheTasksOwnDiffMarkProviderFilesAndTheGenerationToAccept(t *
 	if status != 200 || !bytes.Contains(data, []byte(`"type":"symlink"`)) || !bytes.Contains(data, []byte(`"target":"../outside"`)) || bytes.Contains(data, []byte(`"content"`)) {
 		t.Fatalf("a link = %d %s", status, data)
 	}
+	status, data = f.do(t, "dave", "GET", "/v1/tasks/rt/files?path=lib", "", "", nil)
+	if status != 200 || !bytes.Contains(data, []byte(`"submodule":"`+strings.Repeat("2", 40)+`"`)) {
+		t.Fatalf("a submodule = %d %s", status, data)
+	}
 	status, data = f.do(t, "dave", "GET", "/v1/tasks/rt/files?path=bin", "", "", nil)
 	if status != 200 || !bytes.Contains(data, []byte(`"encoding":"base64"`)) || !bytes.Contains(data, []byte(`"content":"/wA="`)) {
 		t.Fatalf("a binary file = %d %s", status, data)
@@ -354,5 +361,68 @@ func TestAnAttemptWhoseRemainingChangesCannotBeCommittedGoesToRecoveryAndRefuses
 	a, _ := f.s.AttemptByID(context.Background(), "ra")
 	if a.State != "recovery_required" || len(f.runner.launches()) != 0 {
 		t.Fatalf("attempt %+v, launches %v", a, f.runner.launches())
+	}
+}
+
+func TestRefineIsRefusedWhileTheExecutorStillHoldsTheTasksAttempt(t *testing.T) {
+	f := newReviewFixture(t, store.Failed, "ended_failed", "")
+	f.runner.setActive("rt", true)
+	if status, data := f.do(t, "erin", "POST", "/v1/tasks/rt/refine", "r", "4", refineBody); status != 409 || !bytes.Contains(data, []byte(`"attempt_active"`)) {
+		t.Fatalf("refine = %d %s", status, data)
+	}
+	if calls := f.reviewer.recorded(); len(calls) != 0 || len(f.runner.launches()) != 0 {
+		t.Fatalf("calls %v, launches %v", calls, f.runner.launches())
+	}
+}
+
+func TestAnAcceptReplaysByItsKeyAndASecondKeyIsAnInvalidTransition(t *testing.T) {
+	f := newReviewFixture(t, store.AwaitingReview, "ended_ok", reviewedCommit)
+	f.setTip(reviewedCommit)
+	body := map[string]any{"commit": reviewedCommit, "generation": 0}
+	status, first := f.do(t, "erin", "POST", "/v1/tasks/rt/accept", "accept", "4", body)
+	if status != 200 {
+		t.Fatalf("accept = %d %s", status, first)
+	}
+	if status, again := f.do(t, "erin", "POST", "/v1/tasks/rt/accept", "accept", "4", body); status != 200 || !bytes.Equal(again, first) {
+		t.Fatalf("replay = %d %s", status, again)
+	}
+	if status, data := f.do(t, "erin", "POST", "/v1/tasks/rt/accept", "accept-again", "5", body); status != 409 || !bytes.Contains(data, []byte(`"invalid_transition"`)) {
+		t.Fatalf("a second accept = %d %s", status, data)
+	}
+	if n := f.count(t, "SELECT count(*) FROM reviews"); n != 1 {
+		t.Fatalf("%d reviews", n)
+	}
+}
+
+func TestAFindingPastItsSizeOrTheTasksCountIsRefusedOverHTTP(t *testing.T) {
+	f := newReviewFixture(t, store.AwaitingReview, "ended_ok", reviewedCommit)
+	if status, data := f.do(t, "dave", "POST", "/v1/tasks/rt/findings", "big", "", map[string]string{"body": strings.Repeat("x", store.MaxFindingBytes+1)}); status != 400 {
+		t.Fatalf("an oversized finding = %d %s", status, data)
+	}
+	if _, err := f.s.Do(context.Background(), "alice", "fill", "fill", nil, func(tx *store.Tx) ([]byte, error) {
+		for i := range store.MaxFindingsPerTask {
+			if _, err := tx.ExecContext(context.Background(), "INSERT INTO findings VALUES(?,'rt','ra','dave','note','now')", fmt.Sprint("f", i)); err != nil {
+				return nil, err
+			}
+		}
+		return []byte("ok"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status, data := f.do(t, "dave", "POST", "/v1/tasks/rt/findings", "past", "", map[string]string{"body": "one more"}); status != 409 || !bytes.Contains(data, []byte(`"too_many_findings"`)) {
+		t.Fatalf("finding %d = %d %s", store.MaxFindingsPerTask+1, status, data)
+	}
+}
+
+func TestTheRefineResponseListsTheFindingsItCarries(t *testing.T) {
+	f := newReviewFixture(t, store.AwaitingReview, "ended_ok", reviewedCommit)
+	status, data := f.do(t, "dave", "POST", "/v1/tasks/rt/findings", "note", "", map[string]string{"body": "rename it"})
+	if status != 201 {
+		t.Fatalf("finding = %d %s", status, data)
+	}
+	id := decodeJSON[store.Finding](t, data).ID
+	status, data = f.do(t, "erin", "POST", "/v1/tasks/rt/refine", "refine", "4", refineBody)
+	if status != 200 || !bytes.Contains(data, []byte(`"findings":["`+id+`"]`)) {
+		t.Fatalf("refine = %d %s", status, data)
 	}
 }

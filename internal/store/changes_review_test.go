@@ -45,7 +45,8 @@ func accept(s *Store, user, commit string, generation int64, tip string) error {
 
 func refine(s *Store, user string, acknowledged bool) error {
 	return s.write(ctx, user, func(tx *Tx) error {
-		return tx.Refine(ctx, "rt", 4, Attempt{ID: "r2", Backend: "codex", Mode: "auto", Executor: "local", OwnershipGeneration: 3, EngineSHA256: "hash"}, acknowledged)
+		_, err := tx.Refine(ctx, "rt", 4, Attempt{ID: "r2", Backend: "codex", Mode: "auto", Executor: "local", OwnershipGeneration: 3, EngineSHA256: "hash"}, acknowledged)
+		return err
 	})
 }
 
@@ -168,7 +169,8 @@ func TestAnAcceptRecordsWhatWasReviewedAndMovesTheTaskToAccepted(t *testing.T) {
 			}
 			execute(t, s, "UPDATE workspaces SET removed='now'")
 			if err := s.write(ctx, user, func(tx *Tx) error {
-				return tx.Refine(ctx, "rt", 5, Attempt{ID: "r2", Backend: "codex", Mode: "auto", Executor: "local", OwnershipGeneration: 3, EngineSHA256: "hash"}, true)
+				_, err := tx.Refine(ctx, "rt", 5, Attempt{ID: "r2", Backend: "codex", Mode: "auto", Executor: "local", OwnershipGeneration: 3, EngineSHA256: "hash"}, true)
+				return err
 			}); !errors.Is(err, ErrInvalidTransition) {
 				t.Fatalf("refine of an accepted task: %v", err)
 			}
@@ -306,5 +308,54 @@ func TestAnAgentCommitIsRecordedOnceAndARemovalIsRecorded(t *testing.T) {
 	}
 	if _, err := s.ReviewState(ctx, "outsider", "rt"); !errors.Is(err, ErrNotMember) {
 		t.Fatalf("a non-member's review state: %v", err)
+	}
+}
+
+func TestAFindingPastItsSizeOrTheTasksCountIsRefused(t *testing.T) {
+	s := openTestStore(t)
+	reviewTask(t, s, AwaitingReview, "ended_ok")
+	add := func(body string) error {
+		return s.write(ctx, "reviewer", func(tx *Tx) error { _, err := tx.RecordFinding(ctx, "rt", body); return err })
+	}
+	if err := add(strings.Repeat("x", MaxFindingBytes+1)); !errors.Is(err, ErrInvalidFinding) {
+		t.Fatalf("a finding of %d bytes: %v", MaxFindingBytes+1, err)
+	}
+	if err := add(strings.Repeat("x", MaxFindingBytes)); err != nil {
+		t.Fatalf("a finding of %d bytes: %v", MaxFindingBytes, err)
+	}
+	for i := 1; i < MaxFindingsPerTask; i++ {
+		if err := add("note"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := add("one more"); !errors.Is(err, ErrTooManyFindings) {
+		t.Fatalf("finding %d: %v", MaxFindingsPerTask+1, err)
+	}
+}
+
+func TestRefineReturnsTheFindingsItCarries(t *testing.T) {
+	s := openTestStore(t)
+	reviewTask(t, s, AwaitingReview, "ended_ok")
+	var ids []string
+	for _, body := range []string{"one", "two"} {
+		if err := s.write(ctx, "reviewer", func(tx *Tx) error {
+			f, err := tx.RecordFinding(ctx, "rt", body)
+			ids = append(ids, f.ID)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execute(t, s, "UPDATE workspaces SET removed='now'")
+	var carried []string
+	if err := s.write(ctx, "actor", func(tx *Tx) error {
+		var err error
+		carried, err = tx.Refine(ctx, "rt", 4, Attempt{ID: "r2", Backend: "codex", Mode: "auto", Executor: "local", OwnershipGeneration: 3, EngineSHA256: "hash"}, false)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(carried, ",") != strings.Join(ids, ",") {
+		t.Fatalf("carried %v, recorded %v", carried, ids)
 	}
 }
