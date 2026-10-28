@@ -126,8 +126,8 @@ describe("App", () => {
     fireEvent.click(screen.getByText("objective t1"));
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     await flush();
+    // The started attempt is pending, so Cancel can withdraw it already.
     const cancel = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
-    expect(cancel.disabled).toBe(true);
     // The executor moves the task on its own; the UI only hears an engine event.
     client.tasks = client.tasks.map((t) => ({ ...t, state: "running", revision: 3 }));
     act(() => {

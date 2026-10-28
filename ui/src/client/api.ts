@@ -39,6 +39,11 @@ export interface TaskAttempt {
   id: string;
   state: string;
   queue_position?: number;
+  // The execution policy the attempt was started with; model and effort are "" when left to the CLI.
+  backend?: string;
+  model?: string;
+  effort?: string;
+  mode?: string;
   // What the attempt added, altered or removed of the provider configuration; null until assessed.
   provider_changes?: ProviderChanges | null;
   provider_flagged?: boolean;
@@ -204,6 +209,9 @@ export interface Project {
 export interface SnapshotSelection {
   untracked: string[];
   include_sensitive: string[];
+  // Carry the staged and unstaged changes (true when absent); false takes the base commit and the
+  // chosen untracked files only.
+  include_changes?: boolean;
 }
 
 export interface Snapshot {

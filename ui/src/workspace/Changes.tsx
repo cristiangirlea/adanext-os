@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ChangedFile, Changes as ChangeSet, ProviderChanges } from "../client/api";
 import { Marked, PathText } from "../text/Marked";
 
@@ -49,10 +50,13 @@ export function ProviderChangeList({ changes }: { changes: ProviderChanges }) {
   );
 }
 
-function FileChange({ file, open }: { file: ChangedFile; open: boolean }) {
+// A file's patch is put in the page only while its row is open, so a thousand files of patches
+// never sit in the DOM at once.
+function FileChange({ file, open: initiallyOpen }: { file: ChangedFile; open: boolean }) {
+  const [open, setOpen] = useState(initiallyOpen);
   const mode = file.old_mode !== file.new_mode && file.old_mode && file.new_mode ? `${file.old_mode} to ${file.new_mode}` : "";
   return (
-    <details className="file-change" open={open} data-provider={file.provider || undefined}>
+    <details className="file-change" open={open} onToggle={(e) => setOpen(e.currentTarget.open)} data-provider={file.provider || undefined}>
       <summary>
         <span className={`change-status change-${file.status}`}>{statusNames[file.status] ?? file.status}</span>
         {file.old_path !== undefined && (
@@ -65,13 +69,14 @@ function FileChange({ file, open }: { file: ChangedFile; open: boolean }) {
         {mode && <span className="tag">mode {mode}</span>}
         {file.provider && <span className="tag tag-warn">provider configuration</span>}
       </summary>
-      {file.binary ? (
-        <p className="empty">A binary file; no patch is shown.</p>
-      ) : file.patch === "" ? (
-        <p className="empty">No textual change.</p>
-      ) : (
-        <Patch text={file.patch} />
-      )}
+      {open &&
+        (file.binary ? (
+          <p className="empty">A binary file; no patch is shown.</p>
+        ) : file.patch === "" ? (
+          <p className="empty">No textual change.</p>
+        ) : (
+          <Patch text={file.patch} />
+        ))}
       {file.patch_raw !== undefined && <p className="note">This patch is not UTF-8; it is shown with replacement characters.</p>}
       {file.patch_truncated && <p className="note">The patch was cut at 512 KiB.</p>}
     </details>

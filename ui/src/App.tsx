@@ -5,6 +5,7 @@ import { BusyButton } from "./motion/parts";
 import { CommandPalette, type QuickAction } from "./palette/CommandPalette";
 import { ResizeHandle } from "./resize/ResizeHandle";
 import { currentTheme, setTheme, themeNames, themes, type Theme } from "./theme/theme";
+import { PathText } from "./text/Marked";
 import { Activity } from "./workspace/Activity";
 import { ErrorLine, shown, type Shown } from "./workspace/errors";
 import { ImportFlow } from "./workspace/ImportFlow";
@@ -248,7 +249,9 @@ export function App({ client }: { client: AdaClient }) {
     { id: "theme", label: `Switch to the ${themeNames[otherTheme].toLowerCase()} theme`, run: () => chooseTheme(otherTheme) },
     { id: "motion", label: motionOn ? "Turn motion off" : "Turn motion on", run: () => setMotion(!motionOn) },
   ];
-  const used = attemptId ? ranWith[attemptId] : undefined;
+  // The attempt's own policy, from adad; until the first read after a start, what this window sent.
+  const fromAttempt = selected?.attempt?.backend ? selected.attempt : undefined;
+  const used = fromAttempt ? { backend: fromAttempt.backend!, model: fromAttempt.model ?? "", effort: fromAttempt.effort ?? "", mode: fromAttempt.mode ?? "" } : attemptId ? ranWith[attemptId] : undefined;
 
   return (
     <div className="ada" style={{ "--tasks-width": `${width}px`, "--work-width": `${work}px` } as CSSProperties}>
@@ -284,8 +287,14 @@ export function App({ client }: { client: AdaClient }) {
               {selected.criteria && <p className="criteria">{selected.criteria}</p>}
               {selected.provider_configuration && selected.provider_configuration.count > 0 && (
                 <p className="note note-warn">
-                  The worktree holds provider configuration or hooks the CLI loads: {selected.provider_configuration.paths.join(", ")}
-                  {selected.provider_configuration.count > selected.provider_configuration.paths.length ? " and more" : ""}.
+                  The worktree holds provider configuration or hooks the CLI loads:{" "}
+                  {selected.provider_configuration.paths.map((p, i) => (
+                    <span key={p}>
+                      {i > 0 && ", "}
+                      <PathText path={p} />
+                    </span>
+                  ))}
+                  {selected.provider_configuration.count > selected.provider_configuration.paths.length && ` and ${selected.provider_configuration.count - selected.provider_configuration.paths.length} more`}.
                 </p>
               )}
             </header>
@@ -318,7 +327,7 @@ export function App({ client }: { client: AdaClient }) {
               <PolicyPicker matrix={matrix} value={policy} onChange={(next) => setNextPolicy((current) => ({ ...current, [selected.id]: next }))} legend="Start with" />
             )}
             {reviewStates.has(selected.state) && selected.attempt && (
-              <Review client={client} task={selected} matrix={matrix} reviewed={reviewed} onTask={replace} onStarted={started} />
+              <Review key={`${selected.id}:${selected.attempt.id}`} client={client} task={selected} matrix={matrix} reviewed={reviewed} onTask={replace} onStarted={started} />
             )}
             <Activity events={events} stream={stream} hasAttempt={Boolean(attemptId)} />
           </>
@@ -354,7 +363,7 @@ export function App({ client }: { client: AdaClient }) {
           <span className="status-key">Executor</span> local
         </span>
         <span className="status-item">
-          <span className="status-key">Agent</span> {used ? `${used.backend}, ${used.model || "default model"}, ${used.mode}` : selected?.attempt ? "not known in this window" : "none"}
+          <span className="status-key">Agent</span> {used ? `${used.backend}, ${used.model || "default model"}, ${used.effort ? `${used.effort} effort, ` : ""}${used.mode}` : selected?.attempt ? "not recorded" : "none"}
         </span>
         <span className="status-item">
           <span className="status-key">Task</span> {selected ? selected.state : "none selected"}

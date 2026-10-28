@@ -95,7 +95,11 @@ export class FakeClient implements AdaClient {
   async start(id: string, revision: number, policy: ExecutionPolicy): Promise<StartedTask> {
     this.check("start", id, revision, policy);
     this.calls.push(`start:${policy.backend}:${policy.mode}`);
-    return { ...this.update(id, revision, "preparing"), attempt_id: `attempt-${id}` };
+    // As adad does, the task now shows the new attempt with the policy it was started with.
+    const attempt = { id: `attempt-${id}`, state: "pending", ...policy };
+    const task = { ...this.update(id, revision, "preparing"), attempt };
+    this.tasks = this.tasks.map((t) => (t.id === id ? task : t));
+    return { ...task, attempt_id: attempt.id };
   }
   async cancel(id: string, revision: number): Promise<Task> {
     this.check("cancel");

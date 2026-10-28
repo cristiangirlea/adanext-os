@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { call } from "../src/adad";
 import { exec, executable, fixtureTest } from "./fixture";
 
 // The M4.4b flow in the real window against the real coordinator: import -> task -> fake engine
@@ -70,6 +71,10 @@ fixtureTest("import, task, fake engine, checks, changes and accept through the w
     await expect(page.getByRole("heading", { level: 2, name: "complete the workspace flow" })).toBeVisible();
     const task = (await f.tasks()).find((t) => t.objective === "complete the workspace flow")!;
     expect(task.snapshot).toBeTruthy();
+    // The snapshot took the chosen untracked file and left the credential out.
+    const snapshot = (await call(f.socket, { method: "GET", path: `/v1/projects/${task.project}/snapshots/${task.snapshot}` })) as { untracked: { path: string }[]; unstaged_patch: { size: number } };
+    expect(snapshot.untracked.map((u) => u.path)).toEqual(["notes.txt"]);
+    expect(snapshot.unstaged_patch.size).toBeGreaterThan(0);
     expect(task.checks).toMatchObject([{ name: "git works", argv: ["git", "--version"] }]);
     await page.getByRole("button", { name: "Ready", exact: true }).click();
     await page.getByRole("button", { name: "Start", exact: true }).click();

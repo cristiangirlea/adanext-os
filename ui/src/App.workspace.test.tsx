@@ -47,7 +47,7 @@ describe("the import flow", () => {
     fireEvent.click(within(d).getByRole("button", { name: "Import and take the snapshot" }));
     await flush();
     expect(client.args.importFolder).toEqual([["h1", "repo"]]);
-    expect(client.args.snapshot).toEqual([["h1", { untracked: ["notes.txt", ".env"], include_sensitive: [".env"] }]]);
+    expect(client.args.snapshot).toEqual([["h1", { untracked: ["notes.txt", ".env"], include_sensitive: [".env"], include_changes: true }]]);
 
     expect((within(d).getByRole("radio", { name: /readonly/ }) as HTMLInputElement).checked).toBe(true);
     expect(within(d).getByText("Checks are not sandboxed.")).toBeTruthy();
@@ -227,7 +227,7 @@ describe("the work area and the status bar", () => {
     await flush();
     expect(within(status).getByText("ada/t1")).toBeTruthy();
     expect(within(status).getByText("Executor").parentElement!.textContent).toContain("local");
-    expect(within(status).getByText("not known in this window")).toBeTruthy();
+    expect(within(status).getByText("not recorded")).toBeTruthy();
     fireEvent.click(within(status).getByRole("button", { name: "Stop" }));
     await flush();
     expect(client.tasks[0]!.state).toBe("cancel_requested");

@@ -445,6 +445,32 @@ func TestSnapshotStoresItsPatchesAndSelectedFilesForMembers(t *testing.T) {
 	}
 }
 
+func TestASnapshotThatDeclinesTheChangesStoresNoPatchesButKeepsTheChosenFiles(t *testing.T) {
+	p := newProjectsFixture(t)
+	dir := newRepo(t)
+	project := p.importRepo(t, "alice", "import-1", dir)
+	path := "/v1/projects/" + project.ID + "/snapshots"
+	status, data := p.call(t, "alice", "POST", path, "snap-off", map[string]any{"untracked": []string{"notes/n.bin"}, "include_sensitive": []string{}, "include_changes": false})
+	if status != 201 {
+		t.Fatalf("snapshot = %d %s", status, data)
+	}
+	got := decodeJSON[snapshotResult](t, data)
+	if got.Staged.Size != 0 || got.Unstaged.Size != 0 || len(p.content(t, got.Staged.Hash)) != 0 || len(p.content(t, got.Unstaged.Hash)) != 0 {
+		t.Fatalf("declined changes stored patches: %s", data)
+	}
+	if got.BaseCommit != runGit(t, dir, "rev-parse", "HEAD") || len(got.Untracked) != 1 || got.Untracked[0].Path != "notes/n.bin" {
+		t.Fatalf("snapshot = %s", data)
+	}
+	// Left out, include_changes is true: the patches are stored.
+	status, data = p.call(t, "alice", "POST", path, "snap-on", map[string]any{"untracked": []string{}, "include_sensitive": []string{}})
+	if got := decodeJSON[snapshotResult](t, data); status != 201 || got.Staged.Size == 0 || got.Unstaged.Size == 0 {
+		t.Fatalf("default snapshot = %d %s", status, data)
+	}
+	if status, data := p.call(t, "alice", "POST", path, "snap-bad", map[string]any{"untracked": []string{}, "include_changes": "no"}); status != 400 {
+		t.Fatalf("a non-boolean include_changes = %d %s", status, data)
+	}
+}
+
 func TestSnapshotRefusesBadSelectionsWithTheirCodeAndStoresNothing(t *testing.T) {
 	p := newProjectsFixture(t)
 	dir := newRepo(t)

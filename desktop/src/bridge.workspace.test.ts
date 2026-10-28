@@ -79,6 +79,16 @@ describe("the import flow through the bridge", () => {
     expect(await bridge.handle(event(), "inspectFolder", [handle])).toMatchObject({ ok: false, error: { code: "folder_expired" } });
   });
 
+  it("passes the owner's choice to leave the uncommitted changes out of the snapshot", async () => {
+    const { bridge, seen } = await bridgeTo(importAdad, { chooseFolder: async () => repo });
+    const handle = ((await bridge.handle(event(), "chooseFolder", [])) as { value: { handle: string } }).value.handle;
+    await bridge.handle(event(), "importFolder", [handle, "repo"]);
+    const selection = { untracked: ["notes.txt"], include_sensitive: [], include_changes: false };
+    expect((await bridge.handle(event(), "snapshot", [handle, selection])).ok).toBe(true);
+    expect(seen.at(-1)).toMatchObject({ url: "/v1/projects/p1/snapshots", body: JSON.stringify(selection) });
+    expect(await bridge.handle(event(), "snapshot", [handle, { ...selection, include_changes: "no" }])).toMatchObject({ ok: false, error: { code: "malformed_call" } });
+  });
+
   it("refuses a renderer call that types a path, before reaching adad", async () => {
     const { bridge, seen } = await bridgeTo(importAdad, { chooseFolder: async () => repo });
     const chosen = await bridge.handle(event(), "chooseFolder", []);
@@ -235,6 +245,11 @@ describe("the review routes through the bridge", () => {
     expect(log.text.length).toBe(1 << 20);
     expect(log.truncated).toBe(true);
     expect(log.partial).toBe(true);
+  });
+
+  it("hands back a check log's refusal with its request id and details, as every other call does", async () => {
+    const { bridge } = await bridgeTo((_s, res) => json(res, 500, { error: "internal", message: "internal error", request_id: "req-9", path: "x" }));
+    expect(await bridge.handle(event(), "checkLog", ["t1", "c1"])).toEqual({ ok: false, error: { code: "internal", status: 500, message: "internal error", request_id: "req-9", details: { path: "x" } } });
   });
 
   it("hands back a refine's provider changes with its refusal", async () => {

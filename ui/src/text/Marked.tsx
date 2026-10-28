@@ -2,9 +2,9 @@ import type { ReactNode } from "react";
 
 // Text from a repository or an agent (paths, patch lines, file contents, logs, event text) is
 // shown as text, never as HTML, and the characters that hide or reorder what a reader sees are
-// shown as marks: C0 and C1 controls (but tab), DEL, the bidirectional controls, and the
-// invisible joiners and marks. Each mark names its code point, so "a\u202eb" reads as
-// "a[U+202E]b" and a reviewer sees that the line is not what it seems.
+// shown as marks: controls (but tab), the bidirectional controls, format and other invisible
+// characters, line and paragraph separators, and the Hangul fillers. Each mark names its code
+// point, so "a\u202eb" reads as "a[U+202E]b" and a reviewer sees the line is not what it seems.
 
 const names: Record<number, string> = {
   0x061c: "arabic letter mark",
@@ -26,10 +26,15 @@ const names: Record<number, string> = {
   0xfeff: "zero width no-break space",
 };
 
+// Controls (Cc), format characters (Cf: the bidirectional controls, zero-width characters, the
+// soft hyphen, the tag characters, invisible operators, interlinear annotations), the line and
+// paragraph separators (Zl, Zp), and the Hangul fillers, which draw as blank letters.
+const hiddenClass = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u115F\u1160\u3164\uFFA0\u180E]/u;
+
 export function isHidden(code: number, keepNewlines = false): boolean {
   if (code === 0x09) return false;
   if (keepNewlines && code === 0x0a) return false;
-  return code < 0x20 || code === 0x7f || (code >= 0x80 && code < 0xa0) || names[code] !== undefined;
+  return names[code] !== undefined || hiddenClass.test(String.fromCodePoint(code));
 }
 
 function label(code: number): string {
@@ -37,7 +42,10 @@ function label(code: number): string {
 }
 
 function describe(code: number): string {
-  return names[code] ?? (code === 0x7f ? "delete" : "control character");
+  if (names[code]) return names[code];
+  if (code === 0x7f) return "delete";
+  if (code < 0x20 || (code >= 0x80 && code < 0xa0)) return "control character";
+  return "invisible character";
 }
 
 // hiddenIn lists the hidden characters of a text, once each, in the order first met.

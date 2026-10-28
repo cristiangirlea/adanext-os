@@ -58,7 +58,9 @@ function CheckItem({ client, taskId, result }: { client: AdaClient; taskId: stri
         {result.definition.workdir && (
           <>
             {" "}
-            in <code>{result.definition.workdir}</code>
+            in <code>
+              <Marked text={result.definition.workdir} />
+            </code>
           </>
         )}
       </p>
@@ -71,7 +73,11 @@ function CheckItem({ client, taskId, result }: { client: AdaClient; taskId: stri
           </span>
         )}
         {result.baseline && <span>baseline {stateNames[result.baseline.state] ?? result.baseline.state}</span>}
-        {result.env_keys.length > 0 && <span>environment {result.env_keys.join(", ")}</span>}
+        {result.env_keys.length > 0 && (
+          <span>
+            environment <Marked text={result.env_keys.join(", ")} />
+          </span>
+        )}
       </p>
       {result.invalidated && <p className="note note-warn">The branch changed after this check ran; its result no longer binds the current commit.</p>}
       {result.state === "changed_tree" && <p className="note note-warn">This check changed tracked files; its result binds nothing.</p>}

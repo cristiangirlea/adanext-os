@@ -1887,11 +1887,14 @@ through the end-to-end test and a browser with a fake bridge.
      keeps that project on the handle, so the owner continues with a new snapshot of it.
   3. Refusals now carry the fields some answers hold beside the code (blockers, project, tasks,
      path, provider changes) through the bridge as `details`.
-  4. "Include these changes in the new feature branch": the snapshot route always captures the
-     staged and unstaged changes, so the flow lists them as carried and lets the owner choose the
-     untracked files one by one. A file that looks like a credential (the rule of
-     `internal/source`'s `sensitive`, mirrored in `ui/src/workspace/sensitive.ts`) is marked and
-     unselected; choosing it sends it in `include_sensitive` too.
+  4. "Include these changes in the new feature branch" is the default offer and can be declined:
+     the snapshot body takes `include_changes` (true when absent); false stores no staged or
+     unstaged patch, so the snapshot is the base commit plus the chosen untracked files. The flow
+     shows the offer as a checkbox, checked, with the staged and unstaged paths listed, and lets
+     the owner choose the untracked files one by one. A file that looks like a credential (the
+     rule of `internal/source`'s `sensitive`, mirrored in `ui/src/workspace/sensitive.ts`) is
+     marked and unselected; choosing it sends it in `include_sensitive` too. With more untracked
+     files than a snapshot takes (1000), none is preselected and the flow says so.
   5. The policy: readonly is preselected and a backend change goes back to readonly, so yolo is
      never preselected; each mode shows the matrix's cells for the chosen backend (enforced by
      whom, asked and not verified, not offered), and yolo lists what it turns off. Mode `ask` is
@@ -1899,14 +1902,21 @@ through the end-to-end test and a browser with a fake bridge.
      Start uses; Start and refine offer the picker again.
   6. Accept binds the changes last read in the work area: their commit and generation, and it is
      disabled until they are read, and while they are stale.
-  7. The status bar's agent (backend, model, mode) is what this window started the attempt with:
-     the task answer of `/v1` does not carry the attempt's policy, so a task started elsewhere
-     reads "not known in this window". Executor is always local until M5.
+  7. The status bar's agent is the attempt's own: a task's attempt in `/v1` now carries the
+     backend, model, effort and mode it was started with (read from the `attempts` row, no
+     migration). Executor is always local until M5.
   8. Check logs reach the renderer as text, at most 1 MiB of each (the rest stays an artifact);
      adad's truncation mark and the bridge's own cut are both shown.
   9. Projects in the navigation are the distinct projects of the listed tasks plus those imported
      in this window; a project's name is known only for the latter (no project list route yet).
      The palette's project scope is unchanged.
+  10. Review round 1 (PR #123): the review panel is keyed by task and attempt, so an
+     acknowledgement of provider changes never carries to another task; a refusal's blockers and
+     refused path are shown; provider paths, a check's directory and environment keys and a
+     tool's name are marked like every other repository text; the marked characters are the
+     classes Cc, Cf, Zl and Zp (tab and, in multi-line text, newline excepted) plus the Hangul
+     fillers; a file's patch is in the page only while its row is open; a check log's refusal
+     keeps its request id and details.
 
 ## Owner actions pending
 

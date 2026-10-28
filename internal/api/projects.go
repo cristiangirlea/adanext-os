@@ -264,6 +264,9 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Untracked        []string `json:"untracked"`
 		IncludeSensitive []string `json:"include_sensitive"`
+		// IncludeChanges, true when absent, carries the staged and unstaged changes; false
+		// stores neither patch, so the snapshot is the base commit and the chosen files.
+		IncludeChanges *bool `json:"include_changes"`
 	}
 	sel := source.Selection{}
 	if err := decode(body, &input); err != nil {
@@ -313,6 +316,9 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		// Another repository now stands at the imported path.
 		captureError(w, source.ErrSourceChanged)
 		return
+	}
+	if input.IncludeChanges != nil && !*input.IncludeChanges {
+		c.Staged, c.Unstaged = nil, nil
 	}
 	snap := store.Snapshot{Project: project, BaseCommit: c.Inspection.Identity.Head, Fingerprint: c.Inspection.Fingerprint, State: snapshotState(c.Inspection), ProviderConfiguration: snapshotProvider(c)}
 	if snap.ID, err = newID(); err != nil {

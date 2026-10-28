@@ -114,8 +114,14 @@ function isNewTask(value: unknown): value is NewTask {
     (value.checks === undefined || (Array.isArray(value.checks) && value.checks.length <= 16 && value.checks.every(isCheck)))
   );
 }
-function isSelection(value: unknown): value is { untracked: string[]; include_sensitive: string[] } {
-  return isRecord(value) && hasKeys(value, ["untracked", "include_sensitive"]) && isStrings(value.untracked, maxSelected) && isStrings(value.include_sensitive, maxSelected);
+function isSelection(value: unknown): value is { untracked: string[]; include_sensitive: string[]; include_changes?: boolean } {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["untracked", "include_sensitive"], ["include_changes"]) &&
+    isStrings(value.untracked, maxSelected) &&
+    isStrings(value.include_sensitive, maxSelected) &&
+    (value.include_changes === undefined || typeof value.include_changes === "boolean")
+  );
 }
 function isRefine(value: unknown): boolean {
   if (!isRecord(value) || typeof value.acknowledge_provider_changes !== "boolean") return false;
@@ -206,10 +212,12 @@ export function createBridge(options: BridgeOptions): Bridge {
     });
   };
 
-  const forward = async (request: Parameters<typeof call>[1]): Promise<BridgeResult<unknown>> => {
+  // send runs one request to adad and maps every failure the same way: adad's refusal with its
+  // request id and details, an unreadable answer, an unreachable coordinator.
+  const send = async (request: (socketPath: string) => Promise<unknown>): Promise<BridgeResult<unknown>> => {
     if (options.socketPath === undefined) return refused("coordinator_unreachable", "the shell was not told adad's pipe or socket");
     try {
-      return { ok: true, value: await call(options.socketPath, request) };
+      return { ok: true, value: await request(options.socketPath) };
     } catch (error) {
       if (error instanceof Refusal) {
         const refusal: BridgeResult<never> = { ok: false, error: { code: error.code, status: error.status, message: error.message } };
@@ -222,18 +230,8 @@ export function createBridge(options: BridgeOptions): Bridge {
       return refused("internal", error instanceof Error ? error.message : String(error));
     }
   };
-
-  const forwardText = async (urlPath: string): Promise<BridgeResult<unknown>> => {
-    if (options.socketPath === undefined) return refused("coordinator_unreachable", "the shell was not told adad's pipe or socket");
-    try {
-      return { ok: true, value: await callText(options.socketPath, urlPath, checkLogLimit) };
-    } catch (error) {
-      if (error instanceof Refusal) return { ok: false, error: { code: error.code, status: error.status, message: error.message } };
-      if (error instanceof BadResponse) return refused(error.code, error.message);
-      if (isUnreachable(error)) return refused("coordinator_unreachable", `adad is not reachable at ${options.socketPath}`);
-      return refused("internal", error instanceof Error ? error.message : String(error));
-    }
-  };
+  const forward = (request: Parameters<typeof call>[1]): Promise<BridgeResult<unknown>> => send((socketPath) => call(socketPath, request));
+  const forwardText = (urlPath: string): Promise<BridgeResult<unknown>> => send((socketPath) => callText(socketPath, urlPath, checkLogLimit));
 
   // The folder a handle stands for, to the window that chose it, while the handle lives.
   const folder = (event: BridgeEvent, handle: string): Folder | undefined => {

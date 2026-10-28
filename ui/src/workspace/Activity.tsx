@@ -83,7 +83,9 @@ export function Activity({ events, stream, hasAttempt }: { events: AttemptEvent[
                   {event.kind}
                 </span>
                 <span className="event-body">
-                  {line.label !== event.kind && <span className="event-label">{line.label}</span>}
+                  {line.label !== event.kind && <span className="event-label">
+                      <Marked text={line.label} />
+                    </span>}
                   <span className="event-text">
                     <Marked text={line.text} keepNewlines />
                   </span>
