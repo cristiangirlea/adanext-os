@@ -291,6 +291,11 @@ func TestHelperFakeEngine(t *testing.T) {
 	}
 	base := map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run"}
 	line(2, "accepted", base)
+	if script == "missing_event_kind" {
+		line(3, "event", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "event": map[string]any{}})
+		line(4, "result", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "result": map[string]any{"status": "ok"}})
+		os.Exit(0)
+	}
 	if script == "unknown_event_kind" {
 		line(3, "event", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "event": map[string]any{"kind": "usage"}})
 		line(4, "event", map[string]any{"attempt_id": input.AttemptID, "run_id": "fake-run", "event": map[string]any{"kind": "text", "text": "known"}})

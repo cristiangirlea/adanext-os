@@ -65,6 +65,13 @@ func TestUnknownEventKindIsSkipped(t *testing.T) {
 	}
 }
 
+func TestAnEventWithoutAKindFailsTheAttempt(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "missing_event_kind")
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_failed")
+	errorEventContains(t, s, "event kind is missing")
+}
+
 func TestNonfatalEngineErrorIsStoredAsAnEngineNotice(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "nonfatal_error")
 	e.cfg.CancelGrace = naturalExitGrace
