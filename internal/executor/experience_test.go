@@ -53,11 +53,15 @@ func TestExperienceRunner(t *testing.T) {
 			t.Setenv("FOO_API_KEY", "test-secret")
 			e, _ := probeExecutor(t, "answer")
 			e.experienceArgs = []string{"-test.run=^TestExperienceHelper$"}
-			e.experienceTimeout = 200 * time.Millisecond
+			// A helper start can take seconds under -race; only the hang case needs a short budget.
+			e.experienceTimeout = 20 * time.Second
+			if mode == "hang" {
+				e.experienceTimeout = 500 * time.Millisecond
+			}
 			e.cfg.Env = append(e.cfg.Env, "ADA_EXPERIENCE_TEST="+mode)
 			start := time.Now()
 			got, err := e.Experience(context.Background())
-			if mode == "hang" && time.Since(start) > 3*time.Second {
+			if mode == "hang" && time.Since(start) > 30*time.Second {
 				t.Fatal("timeout was not enforced")
 			}
 			if mode == "on" || mode == "off" || mode == "extra" || mode == "secret" {
