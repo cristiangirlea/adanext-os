@@ -56,6 +56,7 @@ describe("preload api", () => {
     const fake = ipc();
     const api = createApi(fake, "doc");
     const policy = { backend: "claude", model: "", effort: "", mode: "readonly" as const, acknowledge_provider_changes: false };
+    await api.experience();
     await api.capabilities();
     await api.chooseFolder();
     await api.inspectFolder("h1");
@@ -70,6 +71,7 @@ describe("preload api", () => {
     await api.accept("t1", 3, "a".repeat(40), 1);
     await api.refine("t1", 3, policy);
     expect(fake.calls).toEqual([
+      ["experience", []],
       ["capabilities", []],
       ["chooseFolder", []],
       ["inspectFolder", ["h1"]],

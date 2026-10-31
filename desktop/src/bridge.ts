@@ -329,6 +329,9 @@ export function createBridge(options: BridgeOptions): Bridge {
           if (isId(id)) entry.snapshot = id;
           return result;
         }
+        case "experience":
+          if (args.length !== 0) return bad();
+          return forward({ method: "GET", path: "/v1/experience" });
         case "capabilities":
           if (args.length !== 0) return bad();
           return forward({ method: "GET", path: "/v1/capabilities" });

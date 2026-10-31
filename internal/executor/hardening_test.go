@@ -56,11 +56,20 @@ func TestSlowExitAfterSuccessfulResultRequiresRecovery(t *testing.T) {
 	}
 }
 
-func TestUnknownEventKindFailsAsAProtocolViolation(t *testing.T) {
+func TestUnknownEventKindIsSkipped(t *testing.T) {
 	e, s, _, _ := testExecutor(t, "unknown_event_kind")
 	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	if kinds := eventKinds(t, s, "attempt"); strings.Join(kinds, ",") != "text,result" {
+		t.Fatalf("events = %v", kinds)
+	}
+}
+
+func TestAnEventWithoutAKindFailsTheAttempt(t *testing.T) {
+	e, s, _, _ := testExecutor(t, "missing_event_kind")
+	e.LaunchAttempt("attempt")
 	waitAttempt(t, s, "ended_failed")
-	errorEventContains(t, s, "event kind")
+	errorEventContains(t, s, "event kind is missing")
 }
 
 func TestNonfatalEngineErrorIsStoredAsAnEngineNotice(t *testing.T) {

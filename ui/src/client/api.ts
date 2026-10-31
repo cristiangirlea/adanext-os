@@ -354,6 +354,7 @@ export type ErrorCode =
   | "invalid_transition"
   | "idempotency_conflict"
   | "engine_unavailable"
+  | "experience_unavailable"
   | "internal"
   | "cursor_ahead"
   | "too_many_streams"
@@ -381,7 +382,16 @@ export class AdaError extends Error {
   }
 }
 
+export type Experience = { version: 1; enabled: false } | {
+  version: 1; enabled: true; level: number; xp: number; week_start: string;
+  week: { delivery: number; practice: number }; streak: number | null; days: boolean[]; badges: string[];
+  exercise: { kind: string; source: string; material?: string; answered: boolean } | null;
+  familiarity: { known: ExperienceArea[]; unseen: ExperienceArea[] } | null;
+};
+export interface ExperienceArea { repo: string; area: string; count: number }
+
 export interface AdaClient {
+  experience(): Promise<Experience>;
   createTask(input: NewTask): Promise<Task>;
   listTasks(): Promise<Task[]>;
   getTask(id: string): Promise<Task>;
@@ -416,6 +426,7 @@ export type BridgeResult<T> =
   | { ok: false; error: { code: string; status: number; message: string; request_id?: string; details?: ErrorDetails } };
 
 export interface BridgeApi {
+  experience(): Promise<BridgeResult<Experience>>;
   createTask(input: NewTask): Promise<BridgeResult<Task>>;
   listTasks(): Promise<BridgeResult<Task[]>>;
   getTask(id: string): Promise<BridgeResult<Task>>;

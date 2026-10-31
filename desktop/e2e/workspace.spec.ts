@@ -43,6 +43,7 @@ fixtureTest("import, task, fake engine, checks, changes and accept through the w
     f.env.ADANEXT_ENGINE_SHA256 = createHash("sha256").update(await readFile(engine)).digest("hex");
 
     const { app, page } = await f.launch();
+    await expect(page.getByLabel("Experience")).toContainText("Level 4");
     // Answer the native folder dialog inside main, as the owner would.
     await app.evaluate(({ dialog }, folder) => {
       dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [folder] })) as typeof dialog.showOpenDialog;

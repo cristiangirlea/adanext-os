@@ -12,6 +12,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 4 && os.Args[1] == "bot" && os.Args[2] == "stats" && os.Args[3] == "--json" {
+		fmt.Printf(`{"version":1,"enabled":true,"level":4,"xp":23,"week_start":"2026-10-26","week":{"delivery":2,"practice":3},"streak":2,"days":[%s],"badges":[],"exercise":null,"familiarity":null}`, strings.Repeat("false,", 34)+"true")
+		return
+	}
 	if len(os.Args) != 4 || os.Args[1] != "exec" || os.Args[2] != "--protocol" || os.Args[3] != "v1" {
 		os.Exit(2)
 	}
@@ -43,6 +47,9 @@ func main() {
 		return map[string]any{"attempt_id": start.AttemptID, "run_id": "fake-" + start.AttemptID}
 	}
 	line("accepted", fields())
+	f := fields()
+	f["event"] = map[string]any{"kind": "usage"}
+	line("event", f)
 	cancel := make(chan struct{})
 	go func() {
 		defer close(cancel)

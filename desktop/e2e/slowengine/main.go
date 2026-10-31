@@ -37,6 +37,12 @@ func run() error {
 	if err := json.Unmarshal(configBytes, &config); err != nil {
 		return err
 	}
+	// Only runs are slow and marked; the experience card's bot stats must not take the run's marker.
+	if len(os.Args) > 1 && os.Args[1] == "bot" {
+		child := exec.Command(config.Engine, os.Args[1:]...)
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		return child.Run()
+	}
 	created, err := creationTime()
 	if err != nil {
 		return err

@@ -1984,6 +1984,31 @@ Evidence, left for the supervisor:
      keeps them.
   5. A refine takes the same caps as a start, through the same policy shape.
 
+- **2026-10-31, the experience card and a new engine pin (#128).** Harness's experience design
+  (its `docs/experience.md`, slice 4) puts a card for the person's level, week and streak in this
+  app; the owner chose on 2026-10-31 to build it here. Harness #728 added `hrn bot stats --json`
+  for it, a versioned object other programs read.
+  1. The pin moves to Harness `823864e` (the merge of that command), built with
+     `scripts/build-engine.sh` for all five targets; a second windows/amd64 build matched its hash.
+     The jump spans many Harness changes, so its `exec` protocol was read against what Ada uses.
+     New event kinds (`usage`, `compaction`, `quota`) arrive on every real run, and the protocol
+     now says a supervisor ignores kinds it does not know; Ada aborted the run on them, which the
+     fake engine could not show. Ada now skips an unknown kind and still refuses an event with no
+     kind, and the fake engine sends `usage` in a normal run. The rest is safe as it stands: the
+     new `limited` status falls under "not ok", Ada always names the backend and sends no
+     `purpose` or `fresh`, and a missing backend preference file in Ada's engine home means none.
+  2. `adad` runs the pinned, verified engine as `bot stats --json` with the person's own Harness
+     home (`HRN_HOME` from adad's environment, else `~/.hrn`), not the isolated home Ada's runs
+     use: the ledger is one per person, and the command only reads it (no exercise picked, no
+     rebuild, no network), with the same allowlisted environment as every other engine start (no
+     keys or tokens). Five seconds, 256 KiB of output; only `version` 1 is accepted, and fields
+     added within version 1 are ignored, as Harness's records are additive.
+  3. `GET /v1/experience` answers the object, the game switched off as `{"version":1,
+     "enabled":false}`, no engine as `engine_unavailable`, and a failed, slow, oversized or
+     unknown answer as `experience_unavailable`. The card draws nothing when the game is off, and
+     an exercise's material only while it is unanswered, as the engine gives it.
+  4. Ada's own growth card and her spoken lines are later slices of the same design.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).

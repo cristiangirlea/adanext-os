@@ -5,6 +5,7 @@ import { ChangesView } from "./Changes";
 import { ChecksView } from "./Checks";
 import { ErrorLine, shown, type Shown } from "./errors";
 import { FilesView } from "./Files";
+import { ExperienceCard } from "./ExperienceCard";
 
 // The work area beside the task: Changes, Checks and Files of the selected task, each read from
 // adad when its tab is shown and read again when the task moves on. Preview waits for M5.
@@ -94,6 +95,7 @@ export function WorkArea({ client, task, matrix, onChanges }: { client: AdaClien
 
   return (
     <section className="work-area" aria-label="Work area">
+      <ExperienceCard client={client} />
       <div className="tabs" role="tablist" aria-label="Work area" onKeyDown={onKey}>
         {tabs.map((t) => (
           <button
