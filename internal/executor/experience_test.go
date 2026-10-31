@@ -20,6 +20,13 @@ func TestExperienceHelper(t *testing.T) {
 		fmt.Printf(`{"version":1,"enabled":true,"level":4,"xp":23,"week_start":"2026-10-26","week":{"delivery":2,"practice":3},"streak":null,"days":[%s],"badges":["first"],"exercise":{"kind":"quiz","source":"x","material":"masked","answered":false},"familiarity":null}`, strings.Repeat("false,", 34)+"true")
 	case "incomplete":
 		fmt.Printf(`{"version":1,"enabled":true,"level":4,"xp":23,"week_start":"2026-10-26","week":{},"streak":null,"days":[%s],"badges":[],"exercise":null,"familiarity":null}`, strings.Repeat("false,", 34)+"true")
+	case "extra":
+		fmt.Print(`{"version":1,"enabled":false,"future":true}`)
+	case "secret":
+		if _, ok := os.LookupEnv("FOO_API_KEY"); ok {
+			os.Exit(3)
+		}
+		fmt.Print(`{"version":1,"enabled":false}`)
 	case "off":
 		fmt.Print(`{"version":1,"enabled":false}`)
 	case "version":
@@ -27,10 +34,11 @@ func TestExperienceHelper(t *testing.T) {
 	case "invalid":
 		fmt.Print(`{`)
 	case "large":
-		fmt.Print(strings.Repeat("x", 256*1024+1))
+		fmt.Printf(`{"version":1,"enabled":true,"level":1,"xp":1,"week_start":"2026-10-26","week":{"delivery":0,"practice":0},"streak":null,"days":[%s],"badges":["%s"],"exercise":null,"familiarity":null}`, strings.Repeat("false,", 34)+"false", strings.Repeat("x", 256*1024))
 	case "hang":
 		time.Sleep(time.Minute)
 	case "exit":
+		fmt.Print(`{"version":1,"enabled":false}`)
 		os.Exit(2)
 	case "home":
 		_ = os.WriteFile(os.Getenv("ADA_EXPERIENCE_HOME_FILE"), []byte(os.Getenv("HRN_HOME")), 0600)
@@ -40,14 +48,19 @@ func TestExperienceHelper(t *testing.T) {
 }
 
 func TestExperienceRunner(t *testing.T) {
-	for _, mode := range []string{"on", "off", "version", "invalid", "incomplete", "large", "hang", "exit"} {
+	for _, mode := range []string{"on", "off", "extra", "secret", "version", "invalid", "incomplete", "large", "hang", "exit"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Setenv("FOO_API_KEY", "test-secret")
 			e, _ := probeExecutor(t, "answer")
 			e.experienceArgs = []string{"-test.run=^TestExperienceHelper$"}
 			e.experienceTimeout = 200 * time.Millisecond
 			e.cfg.Env = append(e.cfg.Env, "ADA_EXPERIENCE_TEST="+mode)
+			start := time.Now()
 			got, err := e.Experience(context.Background())
-			if mode == "on" || mode == "off" {
+			if mode == "hang" && time.Since(start) > 3*time.Second {
+				t.Fatal("timeout was not enforced")
+			}
+			if mode == "on" || mode == "off" || mode == "extra" || mode == "secret" {
 				if err != nil || got.Version != 1 || got.Enabled != (mode == "on") {
 					t.Fatalf("got %+v, %v", got, err)
 				}
@@ -57,7 +70,7 @@ func TestExperienceRunner(t *testing.T) {
 				return
 			}
 			if err == nil {
-				t.Fatalf("%s succeeded: %+v", mode, got)
+				t.Fatalf("%s succeeded", mode)
 			}
 		})
 	}

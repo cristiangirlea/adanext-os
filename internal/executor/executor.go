@@ -909,8 +909,11 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		switch m.Type {
 		case "event":
 			if !contains(protocolEventKinds, m.Event.Kind) {
-				abort(fmt.Errorf("event kind %q is not in protocol v1", m.Event.Kind))
-				return
+				if m.Event.Kind == "" {
+					abort(errors.New("event kind is missing"))
+					return
+				}
+				continue
 			}
 			if err := e.append(a, m.Event.Kind, line, m.Event.Text); err != nil {
 				abort(fmt.Errorf("event storage: %w", err))

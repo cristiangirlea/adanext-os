@@ -18,18 +18,18 @@ import (
 )
 
 type experienceBuffer struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	overflow bool
 }
 
 func (b *experienceBuffer) Write(p []byte) (int, error) {
 	n := len(p)
-	remaining := 256*1024 - b.Len()
+	remaining := 256*1024 - b.buffer.Len()
 	if len(p) > remaining {
 		b.overflow = true
 		p = p[:remaining]
 	}
-	_, _ = b.Buffer.Write(p)
+	_, _ = b.buffer.Write(p)
 	return n, nil
 }
 
@@ -63,7 +63,7 @@ func (e *Executor) Experience(ctx context.Context) (api.Experience, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Path = path
 	cmd.WaitDelay = time.Second
-	cmd.Env = append(os.Environ(), e.cfg.Env...)
+	cmd.Env = e.cliEnvironment()
 	cmd.Env = append(cmd.Env, "HRN_HOME="+home)
 	var out experienceBuffer
 	cmd.Stdout = &out
@@ -77,7 +77,7 @@ func (e *Executor) Experience(ctx context.Context) (api.Experience, error) {
 	if out.overflow {
 		return result, errors.New("experience output too large")
 	}
-	raw := out.Bytes()
+	raw := out.buffer.Bytes()
 	var fields map[string]json.RawMessage
 	if err = json.Unmarshal(raw, &fields); err != nil {
 		return result, err
@@ -88,7 +88,6 @@ func (e *Executor) Experience(ctx context.Context) (api.Experience, error) {
 		}
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	if err = dec.Decode(&result); err != nil {
 		return result, err
 	}
@@ -121,8 +120,6 @@ func (e *Executor) Experience(ctx context.Context) (api.Experience, error) {
 		if result.Exercise != nil && (result.Exercise.Answered == (result.Exercise.Material != nil)) {
 			return result, errors.New("invalid exercise material")
 		}
-	} else if len(fields) != 2 {
-		return result, errors.New("invalid disabled experience")
 	}
 	return result, nil
 }

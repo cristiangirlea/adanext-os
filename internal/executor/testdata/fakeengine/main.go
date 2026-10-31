@@ -47,6 +47,9 @@ func main() {
 		return map[string]any{"attempt_id": start.AttemptID, "run_id": "fake-" + start.AttemptID}
 	}
 	line("accepted", fields())
+	f := fields()
+	f["event"] = map[string]any{"kind": "usage"}
+	line("event", f)
 	cancel := make(chan struct{})
 	go func() {
 		defer close(cancel)
