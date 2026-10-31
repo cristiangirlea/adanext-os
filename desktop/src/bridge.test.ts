@@ -87,6 +87,16 @@ async function bridgeTo(handler: (req: http.IncomingMessage, res: http.ServerRes
 const task = { id: "t1", project: "p", created_by: "local", objective: "o", criteria: "", state: "draft", revision: 0, created: "", updated: "" };
 
 describe("bridge", () => {
+  it("forwards experience only from the Ada page with no arguments", async () => {
+    const seen: string[] = [];
+    const { bridge } = await bridgeTo((req, res) => { seen.push(`${req.method} ${req.url}`); json(res, 200, { version: 1, enabled: false }); });
+    const s = sender();
+    expect(await bridge.handle(s.event(), "experience", [])).toMatchObject({ ok: true, value: { enabled: false } });
+    expect((await bridge.handle(s.event(), "experience", ["/v1/tasks"])).ok).toBe(false);
+    expect((await bridge.handle(s.event({ url: "https://elsewhere.invalid", parent: null }), "experience", [])).ok).toBe(false);
+    expect(seen).toEqual(["GET /v1/experience"]);
+  });
+
   it("validates Quit senders and only finishes an accepted stop", async () => {
     let finishes = 0;
     const fake = await listenFake((_req, res) => json(res, 202, { running: 1, queued: 1, reason: "coordinator stopped by the owner" }));

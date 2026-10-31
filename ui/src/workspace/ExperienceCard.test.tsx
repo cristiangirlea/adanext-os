@@ -1,0 +1,10 @@
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, expect, it } from "vitest";
+import { ExperienceCard } from "./ExperienceCard";
+import { FakeClient } from "../test/fakeClient";
+afterEach(cleanup);
+const on = { version: 1 as const, enabled: true as const, level: 4, xp: 23, week_start: "2026-10-26", week: { delivery: 2, practice: 3 }, streak: 2, days: Array(35).fill(true), badges: ["first"], exercise: { kind: "quiz", source: "test", material: "masked", answered: false }, familiarity: null };
+it("shows experience and unanswered exercise", async () => { const client = new FakeClient(); client.experience = async () => on; render(<ExperienceCard client={client} />); expect(await screen.findByText("Level 4 · 23 XP")).toBeTruthy(); expect(screen.getByText(/Delivery 2/)).toBeTruthy(); expect(screen.getByLabelText(/35-day streak/)).toBeTruthy(); expect(screen.getByText("first")).toBeTruthy(); expect(screen.getByText(/masked/)).toBeTruthy(); });
+it("hides when disabled", async () => { const client = new FakeClient(); client.experience = async () => ({ version: 1, enabled: false }); const view = render(<ExperienceCard client={client} />); await new Promise(r => setTimeout(r, 0)); expect(view.container.textContent).toBe(""); });
+it("shows answered", async () => { const client = new FakeClient(); client.experience = async () => ({ ...on, exercise: { kind: "quiz", source: "test", answered: true } }); render(<ExperienceCard client={client} />); expect(await screen.findByText(/answered/)).toBeTruthy(); });
+it("shows a quiet error", async () => { const client = new FakeClient(); client.experience = async () => { throw new Error("offline"); }; render(<ExperienceCard client={client} />); expect(await screen.findByText("Experience is unavailable.")).toBeTruthy(); });

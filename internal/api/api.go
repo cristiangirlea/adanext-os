@@ -147,6 +147,7 @@ type Execution struct {
 	// Capabilities reports the installed CLIs for GET /v1/capabilities; *executor.Executor satisfies
 	// it. nil shows every CLI-dependent cell unverified.
 	Capabilities CapabilityProber
+	Experience   ExperienceReader
 	// Branches reads the tip of a task's branch in Ada's clone; *source.Workspaces satisfies it.
 	// nil leaves every tip unknown, so every check result reads invalidated.
 	Branches BranchReader
@@ -204,6 +205,7 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("POST /v1/tasks/{id}/refine", h.refine)
 	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
 	mux.HandleFunc("GET /v1/capabilities", h.capabilities)
+	mux.HandleFunc("GET /v1/experience", h.experience)
 	mux.HandleFunc("POST /v1/projects/inspect", h.inspect)
 	mux.HandleFunc("POST /v1/projects", h.importProject)
 	mux.HandleFunc("POST /v1/projects/{id}/snapshots", h.snapshot)
@@ -268,7 +270,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "experience_unavailable": "experience unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit"}[code]
 	if status == 500 {
 		writeInternalError(w, errors.New("unspecified internal error"))
 		return

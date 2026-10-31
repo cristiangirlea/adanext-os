@@ -48,6 +48,7 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
     stopCoordinator: () => invoke("stopCoordinator", []),
     finishQuit: () => invoke("finishQuit", []),
     onQuitRequested: (listener) => ipc.onQuitRequested?.(listener) ?? (() => {}),
+    experience: () => invoke("experience", []),
     capabilities: () => invoke("capabilities", []),
     // Main opens the dialog; nothing the page passes here reaches it.
     chooseFolder: () => invoke("chooseFolder", []),

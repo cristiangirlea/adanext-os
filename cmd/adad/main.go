@@ -410,7 +410,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		cfg.Artifacts, cfg.Store, cfg.Hub, cfg.Generation, cfg.Workspaces = artifacts, s, hub, generation, workspaces
 		local = executor.New(cfg)
 		stop.local = local
-		execution.EngineSHA256, execution.Runner, execution.Capabilities = opts.engineHash, local, local
+		execution.EngineSHA256, execution.Runner, execution.Capabilities, execution.Experience = opts.engineHash, local, local, local
 		defer func() {
 			if err := stopExecutor(); err != nil {
 				fmt.Fprintln(stderr, "adad: stop executor:", err)

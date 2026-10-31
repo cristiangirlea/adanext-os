@@ -55,25 +55,27 @@ type active struct {
 	once          sync.Once
 }
 type Executor struct {
-	cfg              Config
-	mu               sync.Mutex
-	active           map[string]*active
-	stopped          bool
-	wg               sync.WaitGroup
-	beforeAccepted   func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
-	afterAppend      func()                          // Set only by tests to simulate slow event storage.
-	beforeClaim      func(attemptID string)          // Test seam before the launch claim, for the cancel race.
-	beforeCancel     func()                          // Test seam that pauses the cancel handling of a run.
-	afterCancelCheck func()                          // Test seam after the cancel handling first checks whether the engine is accepted.
-	afterRunning     func()                          // Test seam between storing the attempt running and accepting its events.
-	beforeRemove     func(hash string)               // Test seam between discard's reference check and its removal.
-	beforeCheck      func(attemptID string)          // Test seam between preparing the workspace and checking it before the engine starts.
-	beforeAnswer     func()                          // Test seam between the start write and the read of its answer.
-	versionArgs      []string                        // The CLIs' version command; tests run a helper instead.
-	versionTimeout   time.Duration
-	probeMu          sync.Mutex // One probe of the installed CLIs at a time.
-	probed           map[string]engine.Installed
-	probedAt         time.Time
+	cfg               Config
+	mu                sync.Mutex
+	active            map[string]*active
+	stopped           bool
+	wg                sync.WaitGroup
+	beforeAccepted    func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
+	afterAppend       func()                          // Set only by tests to simulate slow event storage.
+	beforeClaim       func(attemptID string)          // Test seam before the launch claim, for the cancel race.
+	beforeCancel      func()                          // Test seam that pauses the cancel handling of a run.
+	afterCancelCheck  func()                          // Test seam after the cancel handling first checks whether the engine is accepted.
+	afterRunning      func()                          // Test seam between storing the attempt running and accepting its events.
+	beforeRemove      func(hash string)               // Test seam between discard's reference check and its removal.
+	beforeCheck       func(attemptID string)          // Test seam between preparing the workspace and checking it before the engine starts.
+	beforeAnswer      func()                          // Test seam between the start write and the read of its answer.
+	experienceArgs    []string
+	experienceTimeout time.Duration
+	versionArgs       []string // The CLIs' version command; tests run a helper instead.
+	versionTimeout    time.Duration
+	probeMu           sync.Mutex // One probe of the installed CLIs at a time.
+	probed            map[string]engine.Installed
+	probedAt          time.Time
 	// The provider walk; tests make it fail or stop.
 	providerState func(root string, limit int) (map[string]string, bool, error)
 }

@@ -124,6 +124,11 @@ export class FakeClient implements AdaClient {
     return () => {};
   }
 
+  async experience(): Promise<import("../client/api").Experience> {
+    this.check("experience");
+    return { version: 1, enabled: false };
+  }
+
   async capabilities(): Promise<Capabilities> {
     this.check("capabilities");
     return this.matrix;

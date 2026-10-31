@@ -16,6 +16,7 @@ function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
     stopCoordinator: async () => ({ ok: true, value: { running: 0, queued: 0, reason: "coordinator stopped by the owner" } }),
     finishQuit: async () => ({ ok: true, value: null }),
     onQuitRequested: () => () => {},
+    experience: async () => ({ ok: true, value: { version: 1, enabled: false } }),
     capabilities: async () => ({ ok: true, value: { engine: "e", recorded: "", checks: { status: "unsandboxed", detail: "" }, backends: [] } }),
     chooseFolder: async () => ({ ok: true, value: null }),
     inspectFolder: async () => ({ ok: false, error: { code: "folder_expired", status: 0, message: "expired" } }),

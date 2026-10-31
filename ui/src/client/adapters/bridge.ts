@@ -33,6 +33,7 @@ export function createBridgeClient(): AdaClient {
     stopCoordinator: async () => unwrap(await bridge().stopCoordinator()),
     finishQuit: async () => { unwrap(await bridge().finishQuit()); },
     onQuitRequested: (listener) => bridge().onQuitRequested(listener),
+    experience: async () => unwrap(await bridge().experience()),
     capabilities: async () => unwrap(await bridge().capabilities()),
     chooseFolder: async () => unwrap(await bridge().chooseFolder()),
     inspectFolder: async (handle) => unwrap(await bridge().inspectFolder(handle)),
