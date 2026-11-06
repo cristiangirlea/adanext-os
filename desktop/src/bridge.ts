@@ -64,6 +64,8 @@ const filesLimit = 4 << 20;
 const maxFinding = 16 << 10;
 const maxCommitPath = 4096;
 const maxSelected = 1000;
+const maxSecretAcks = 1000;
+const maxSecretReason = 1 << 10;
 
 function refused(code: string, message: string): BridgeResult<never> {
   return { ok: false, error: { code, status: 0, message } };
@@ -128,6 +130,22 @@ function isRefine(value: unknown): boolean {
   const policy: Record<string, unknown> = { ...value };
   delete policy.acknowledge_provider_changes;
   return isPolicy(policy);
+}
+// The answers to a scan's open findings at accept; adad checks they match its findings.
+function isSecretAcks(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length <= maxSecretAcks &&
+    value.every(
+      (a) =>
+        isRecord(a) &&
+        hasKeys(a, ["finding", "kind"], ["reason"]) &&
+        typeof a.finding === "string" &&
+        /^[A-Za-z0-9_-]{1,64}$/.test(a.finding) &&
+        (a.kind === "test" || a.kind === "real") &&
+        (a.reason === undefined || (typeof a.reason === "string" && a.reason.length <= maxSecretReason && !a.reason.includes("\u0000"))),
+    )
+  );
 }
 // A path inside a commit, as the files route takes it: never a host path, which it cannot reach.
 function isCommitPath(value: unknown): value is string {
@@ -350,8 +368,8 @@ export function createBridge(options: BridgeOptions): Bridge {
           if (args.length !== 2 || !isId(args[0]) || typeof args[1] !== "string" || args[1].trim() === "" || args[1].length > maxFinding) return bad();
           return forward({ method: "POST", path: `/v1/tasks/${args[0]}/findings`, body: { body: args[1] }, idempotent: true });
         case "accept":
-          if (args.length !== 4 || !isId(args[0]) || !isRevision(args[1]) || typeof args[2] !== "string" || !commitPattern.test(args[2]) || !isRevision(args[3])) return bad();
-          return forward({ method: "POST", path: `/v1/tasks/${args[0]}/accept`, revision: args[1], body: { commit: args[2], generation: args[3] }, idempotent: true });
+          if (args.length !== 5 || !isId(args[0]) || !isRevision(args[1]) || typeof args[2] !== "string" || !commitPattern.test(args[2]) || !isRevision(args[3]) || !isSecretAcks(args[4])) return bad();
+          return forward({ method: "POST", path: `/v1/tasks/${args[0]}/accept`, revision: args[1], body: { commit: args[2], generation: args[3], secrets: args[4] }, idempotent: true });
         case "refine":
           if (args.length !== 3 || !isId(args[0]) || !isRevision(args[1]) || !isRefine(args[2])) return bad();
           return forward({ method: "POST", path: `/v1/tasks/${args[0]}/refine`, revision: args[1], body: args[2], idempotent: true });

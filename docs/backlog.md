@@ -482,6 +482,20 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   flow green on the pull request's ubuntu-latest job (under xvfb) and on the windows-latest job
   of the push to main after M4.4b merges.
 
+- [ ] **M4.6 Secret scan of the agent's changes** (#130). The decisions log, 2026-11-06. After
+  the agent-changes commit, `adad` scans the lines the task's changes add (base to commit) for
+  credentials and records findings without their values (migration 0011); changes carries the
+  scan; accept answers each open finding as a test value (allow-listed with a reason) or a real
+  secret (recorded with the review). Owned: `internal/source/secrets.go`, `internal/store`
+  (`secrets.go`, migration 0011, `Accept`), `internal/executor` (`scanSecrets`), `internal/api`
+  (changes, accept), the bridge's accept, and `ui/src/workspace/Secrets.tsx`.
+  Acceptance: each rule's sample found with file, line and rule, and no part of the value in the
+  stored scan or the answer; removed lines and lines already in the base not reported; an
+  allow-listed path and rule not reported; an allow-list entry without a reason refused; accept
+  refused until each open finding is answered, each answer stored with the review and a test
+  value written to the allow-list; binary and oversized files reported as not scanned; the
+  Playwright flow answers a fake key before it accepts.
+
 ## Later milestones
 
 Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
@@ -521,7 +535,13 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   refuses one the manifest does not match, with the tests the decisions log, 2026-10-14, lists.
 - **M6 Resume intelligence:** evidence extraction, cited summaries, next-task proposals,
   continuation.
-- **M7 Review and integration:** review package, branch export, destination checks.
+- **M7 Review and integration:** review package, branch export, destination checks. Export scans
+  every commit of the exported range for secrets (#130, the decisions log 2026-11-06), not only
+  the tip: a finding that is not allow-listed refuses the export, a real secret that a later
+  commit removed included. Ada may offer to rebuild its own `ada/<task>` branch without the
+  secret before an export, never silently, and never once the branch has been exported. Tests:
+  an export refused when an earlier commit holds the secret and the tip does not; the rebuilt
+  branch exports; a rebuild of an exported branch refused.
 - **M8 Recovery and routing:** the fault matrix, model policies, quota handling.
 - **M9 Packaging and dogfood:** installers, the web form as a service, a download page on
   adanext.si, diagnostics, accessibility, one improvement to Ada made through Ada.

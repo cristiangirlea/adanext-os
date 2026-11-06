@@ -200,6 +200,10 @@ func runFakeAgentScript(script string) {
 		_ = os.WriteFile(filepath.Join(cwd, ".gitignore"), []byte("ignored.secret\n"), 0o644)
 		_ = os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("agent-clean\n"), 0o644)
 		_ = os.WriteFile(filepath.Join(cwd, "ignored.secret"), []byte("do-not-leak\n"), 0o644)
+	case "agent_secret":
+		// The sample key is built from pieces so no source file holds one.
+		_ = os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("key = \"AKIA"+strings.Repeat("Q", 16)+"\"\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(cwd, ".env"), []byte("DEBUG=1\n"), 0o644)
 	case "agent_repo_scripts":
 		m := os.Getenv("ADA_FAKE_SCRIPT_MARKER")
 		_ = os.WriteFile(filepath.Join(cwd, "package.json"), []byte(`{"scripts":{"test":"echo ran > `+filepath.ToSlash(m)+`"}}`), 0o644)

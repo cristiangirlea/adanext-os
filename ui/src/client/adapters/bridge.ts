@@ -45,7 +45,7 @@ export function createBridgeClient(): AdaClient {
     checkLog: async (taskId, checkId) => unwrap(await bridge().checkLog(taskId, checkId)),
     findings: async (taskId) => unwrap(await bridge().findings(taskId)),
     addFinding: async (taskId, body) => unwrap(await bridge().addFinding(taskId, body)),
-    accept: async (taskId, revision, commit, generation) => unwrap(await bridge().accept(taskId, revision, commit, generation)),
+    accept: async (taskId, revision, commit, generation, secrets) => unwrap(await bridge().accept(taskId, revision, commit, generation, secrets)),
     refine: async (taskId, revision, request) => unwrap(await bridge().refine(taskId, revision, request)),
   };
 }

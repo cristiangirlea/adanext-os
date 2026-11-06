@@ -260,6 +260,35 @@ export interface Changes {
   provider_changes: ProviderChanges | null;
   provider_flagged: boolean;
   checks: CheckResult[];
+  // The scan of commit for credentials; null when the attempt was not scanned.
+  secrets: SecretScan | null;
+}
+
+// A line the agent added that looks like a credential: where and which rule, never the value.
+// Line 0 is the whole file (a key file such as .env).
+export interface SecretFinding {
+  id: string;
+  path: string;
+  path_raw?: string;
+  line: number;
+  rule: string;
+}
+export interface SecretScan {
+  commit: string;
+  rules_version: string;
+  findings: SecretFinding[];
+  findings_capped: boolean;
+  not_scanned: { path: string; path_raw?: string; reason: string }[];
+  unlisted: number;
+  capped: boolean;
+  failed: boolean;
+}
+// The answer to one open finding at accept: a test value (allow-listed, with its reason) or a
+// real secret (the user rotates it; export refuses the branch while it holds the secret).
+export interface SecretAck {
+  finding: string;
+  kind: "test" | "real";
+  reason?: string;
 }
 
 // GET /v1/tasks/{id}/files: a directory of the agent-changes commit, or one file of it.
@@ -300,7 +329,7 @@ export interface Finding {
 
 export interface Accepted {
   task: Task;
-  review: { id: string; attempt: string; reviewer: string; decision: string; commit: string; generation: number; created: string };
+  review: { id: string; attempt: string; reviewer: string; decision: string; commit: string; generation: number; secrets?: SecretAck[]; created: string };
 }
 
 export interface RefineRequest extends ExecutionPolicy {
@@ -340,6 +369,7 @@ export interface ErrorDetails {
   tasks?: { id: string; objective: string; state: string }[];
   path?: string;
   provider_changes?: ProviderChanges;
+  findings?: SecretFinding[];
 }
 
 // adad's codes (internal/api writeError), plus the client's own for a coordinator it cannot
@@ -415,7 +445,7 @@ export interface AdaClient {
   checkLog(taskId: string, checkId: string): Promise<CheckLog>;
   findings(taskId: string): Promise<Finding[]>;
   addFinding(taskId: string, body: string): Promise<Finding>;
-  accept(taskId: string, revision: number, commit: string, generation: number): Promise<Accepted>;
+  accept(taskId: string, revision: number, commit: string, generation: number, secrets: SecretAck[]): Promise<Accepted>;
   refine(taskId: string, revision: number, request: RefineRequest): Promise<Refined>;
 }
 
@@ -448,6 +478,6 @@ export interface BridgeApi {
   checkLog(taskId: string, checkId: string): Promise<BridgeResult<CheckLog>>;
   findings(taskId: string): Promise<BridgeResult<Finding[]>>;
   addFinding(taskId: string, body: string): Promise<BridgeResult<Finding>>;
-  accept(taskId: string, revision: number, commit: string, generation: number): Promise<BridgeResult<Accepted>>;
+  accept(taskId: string, revision: number, commit: string, generation: number, secrets: SecretAck[]): Promise<BridgeResult<Accepted>>;
   refine(taskId: string, revision: number, request: RefineRequest): Promise<BridgeResult<Refined>>;
 }

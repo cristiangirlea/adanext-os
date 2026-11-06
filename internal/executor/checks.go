@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cristiangirlea/ada-os/internal/artifact"
 	"github.com/cristiangirlea/ada-os/internal/source"
@@ -215,6 +217,7 @@ func (e *Executor) sweepCheckWorktrees(ctx context.Context, project string) {
 // A storage error ends verification there too: it is recorded, and the checks
 // without a result are recorded as not run.
 func (e *Executor) verifyAttempt(ctx context.Context, a store.Attempt, active *active, ws store.Workspace, importedCommit, testedCommit, configSHA256 string) {
+	e.scanSecrets(ctx, a, ws.Project, importedCommit, testedCommit, configSHA256)
 	e.sweepCheckWorktrees(ctx, ws.Project)
 	defs, err := e.cfg.Store.TaskChecks(ctx, a.Task)
 	next := 0
@@ -256,6 +259,39 @@ func (e *Executor) verifyAttempt(ctx context.Context, a store.Attempt, active *a
 	if e.cfg.Hub != nil {
 		e.cfg.Hub.Notify(a.ID)
 	}
+}
+
+// scanSecrets records what the task's changes up to testedCommit add that looks like a credential.
+// A scan that cannot read the changes is recorded as failed, never as clean.
+func (e *Executor) scanSecrets(ctx context.Context, a store.Attempt, project, importedCommit, testedCommit, configSHA256 string) {
+	scan := store.SecretScan{RulesVersion: source.SecretRulesVersion, Failed: true}
+	if set, err := e.cfg.Workspaces.Changes(ctx, project, importedCommit, testedCommit, configSHA256, source.SecretScanLimits); err == nil {
+		scan = secretScanRecord(source.ScanSecrets(set))
+	} else {
+		e.recordCause(a, fmt.Errorf("secret scan: %w", err))
+	}
+	if err := e.owned(a.ID, func(tx *store.Tx) error { return tx.RecordSecretScan(ctx, a.ID, testedCommit, scan) }); err != nil {
+		e.recordCause(a, fmt.Errorf("secret scan storage: %w", err))
+	}
+}
+
+func secretScanRecord(s source.SecretScan) store.SecretScan {
+	out := store.SecretScan{RulesVersion: s.RulesVersion, FindingsCapped: s.FindingsCapped, Unlisted: s.Unlisted, Capped: s.Capped, Failed: s.Failed}
+	for _, f := range s.Findings {
+		out.Findings = append(out.Findings, store.SecretFinding{ID: f.ID, Path: f.Path, PathRaw: rawPath(f.Path), Line: f.Line, Rule: f.Rule})
+	}
+	for _, n := range s.NotScanned {
+		out.NotScanned = append(out.NotScanned, store.SecretNotScanned{Path: n.Path, PathRaw: rawPath(n.Path), Reason: n.Reason})
+	}
+	return out
+}
+
+// rawPath keeps a path's bytes in base64 when they are not UTF-8, which JSON would replace.
+func rawPath(p string) string {
+	if utf8.ValidString(p) {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString([]byte(p))
 }
 
 // runChecks runs each check after its baseline and returns the ord of the

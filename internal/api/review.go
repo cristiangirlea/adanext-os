@@ -28,10 +28,11 @@ type Reviewer interface {
 // *executor.Executor satisfies it.
 type TaskActivity interface{ TaskActive(task string) bool }
 
-// The caps of the files route.
+// The caps of the files route, and the acknowledgements one accept may carry.
 const (
 	maxFileEntries = 5000
 	maxFileBytes   = 1 << 20
+	maxSecretAcks  = source.MaxSecretFindings
 )
 
 var (
@@ -40,6 +41,13 @@ var (
 )
 
 func reviewError(w http.ResponseWriter, err error) {
+	if e, ok := errors.AsType[*store.SecretsUnacknowledgedError](err); ok {
+		writeJSON(w, 409, struct {
+			errorBody
+			Findings []secretFindingJSON `json:"findings"`
+		}{errorBody{"secrets_unacknowledged", e.Error()}, secretFindings(e.Findings)})
+		return
+	}
 	if e, ok := errors.AsType[*store.ProviderUnacknowledgedError](err); ok {
 		writeJSON(w, 409, struct {
 			errorBody
@@ -63,6 +71,9 @@ func reviewError(w http.ResponseWriter, err error) {
 		{store.ErrNoAttempt, 409, "no_attempt"},
 		{store.ErrInvalidFinding, 400, "bad_request"},
 		{store.ErrTooManyFindings, 409, "too_many_findings"},
+		{store.ErrInvalidSecretAck, 400, "bad_request"},
+		{store.ErrStaleSecretScan, 409, "secret_scan_stale"},
+		{store.ErrTooManySecretFindings, 409, "too_many_secret_findings"},
 		{source.ErrNoSuchPath, 404, "not_found"},
 		{errNoChanges, 409, "no_changes"},
 		{errWorkspaceMismatch, 409, "workspace_mismatch"},
@@ -123,6 +134,56 @@ type changesJSON struct {
 	ProviderFlagged bool                   `json:"provider_flagged"`
 	ProviderFiles   bool                   `json:"provider_files"`
 	Checks          []store.CheckResult    `json:"checks"`
+	// Secrets is the scan of Commit for credentials, allow-listed findings left out; null when
+	// the attempt was not scanned.
+	Secrets *secretScanJSON `json:"secrets"`
+}
+
+type secretFindingJSON struct {
+	ID      string `json:"id"`
+	Path    string `json:"path"`
+	PathRaw string `json:"path_raw,omitempty"`
+	Line    int    `json:"line"`
+	Rule    string `json:"rule"`
+}
+
+type secretNotScannedJSON struct {
+	Path    string `json:"path"`
+	PathRaw string `json:"path_raw,omitempty"`
+	Reason  string `json:"reason"`
+}
+
+type secretScanJSON struct {
+	Commit         string                 `json:"commit"`
+	RulesVersion   string                 `json:"rules_version"`
+	Findings       []secretFindingJSON    `json:"findings"`
+	FindingsCapped bool                   `json:"findings_capped"`
+	NotScanned     []secretNotScannedJSON `json:"not_scanned"`
+	Unlisted       int                    `json:"unlisted"`
+	Capped         bool                   `json:"capped"`
+	Failed         bool                   `json:"failed"`
+}
+
+func secretFindings(list []store.SecretFinding) []secretFindingJSON {
+	out := make([]secretFindingJSON, 0, len(list))
+	for _, f := range list {
+		j := secretFindingJSON{ID: f.ID, Path: f.Path, PathRaw: f.PathRaw, Line: f.Line, Rule: f.Rule}
+		out = append(out, j)
+	}
+	return out
+}
+
+func secretScanValue(scan *store.SecretScan) *secretScanJSON {
+	if scan == nil {
+		return nil
+	}
+	out := &secretScanJSON{Commit: scan.Commit, RulesVersion: scan.RulesVersion, Findings: secretFindings(scan.Findings), FindingsCapped: scan.FindingsCapped,
+		NotScanned: make([]secretNotScannedJSON, 0, len(scan.NotScanned)), Unlisted: scan.Unlisted, Capped: scan.Capped, Failed: scan.Failed}
+	for _, n := range scan.NotScanned {
+		j := secretNotScannedJSON{Path: n.Path, PathRaw: n.PathRaw, Reason: n.Reason}
+		out.NotScanned = append(out.NotScanned, j)
+	}
+	return out
 }
 
 // changed is the task's newest agent-changes commit for a current member, with the clone
@@ -180,6 +241,16 @@ func (h *handler) changes(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
+	scan, err := h.store.SecretScan(r.Context(), user, id, a.ID)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if scan != nil && scan.Commit != a.TestedCommit {
+		// A scan of another commit covers nothing here; accept refuses it as secret_scan_stale.
+		scan = &store.SecretScan{Commit: a.TestedCommit, RulesVersion: scan.RulesVersion, Failed: true}
+	}
+	out.Secrets = secretScanValue(scan)
 	writeJSON(w, 200, out)
 }
 
@@ -342,8 +413,14 @@ func (h *handler) accept(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Commit     string `json:"commit"`
 		Generation *int64 `json:"generation"`
+		// Secrets answers each open secret finding of the commit's scan.
+		Secrets []struct {
+			Finding string `json:"finding"`
+			Kind    string `json:"kind"`
+			Reason  string `json:"reason"`
+		} `json:"secrets"`
 	}
-	if err := decode(body, &input); err != nil || input.Generation == nil || !printableASCII(input.Commit) {
+	if err := decode(body, &input); err != nil || input.Generation == nil || !printableASCII(input.Commit) || len(input.Secrets) > maxSecretAcks {
 		writeError(w, 400, "bad_request")
 		return
 	}
@@ -356,7 +433,11 @@ func (h *handler) accept(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
 	tip := h.tip(project, id)
 	cached, err := h.commit(r, user, k, &store.Scope{ProjectID: project}, strconv.FormatInt(revision, 10), func(tx *store.Tx) (int, any, error) {
-		review, err := tx.Accept(r.Context(), id, revision, input.Commit, *input.Generation, tip)
+		acks := make([]store.SecretAck, 0, len(input.Secrets))
+		for _, a := range input.Secrets {
+			acks = append(acks, store.SecretAck{Finding: a.Finding, Kind: a.Kind, Reason: a.Reason})
+		}
+		review, err := tx.Accept(r.Context(), id, revision, input.Commit, *input.Generation, tip, acks)
 		if err != nil {
 			return 0, nil, err
 		}
