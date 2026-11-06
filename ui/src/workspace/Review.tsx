@@ -6,11 +6,13 @@ import { ProviderChangeList } from "./Changes";
 import { ErrorLine, shown, type Shown } from "./errors";
 import { defaultPolicy } from "./policy";
 import { PolicyPicker } from "./PolicyPicker";
+import { acksFor, SecretFindings, type SecretAnswers } from "./Secrets";
 
 // The review of M4.3: findings any member can note, accept of the changes read in the work area
 // (their commit and the coordinator's generation, so a later change refuses it), and refine, a
 // new attempt with the findings in its prompt. Provider configuration an attempt changed is shown
-// before a refine starts and must be acknowledged.
+// before a refine starts and must be acknowledged; possible secrets in the changes are answered
+// one by one before accept.
 
 const refinable = new Set(["awaiting_review", "failed", "canceled"]);
 
@@ -36,6 +38,7 @@ export function Review({
   const [policy, setPolicy] = useState<ExecutionPolicy | null>(null);
   const [providerChanges, setProviderChanges] = useState<ProviderChanges | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [answers, setAnswers] = useState<SecretAnswers>({});
   const flagged = task.attempt?.provider_flagged === true;
   const shownChanges = providerChanges ?? (flagged ? (task.attempt?.provider_changes ?? null) : null);
 
@@ -74,6 +77,10 @@ export function Review({
   };
 
   const current = reviewed && reviewed.task === task.id && !reviewed.stale ? reviewed : null;
+  const scan = current?.secrets ?? null;
+  const scanCommit = scan?.commit ?? "";
+  useEffect(() => setAnswers({}), [scanCommit]);
+  const acks = acksFor(scan, answers);
   const chosen = policy ?? defaultPolicy(matrix);
 
   return (
@@ -101,14 +108,17 @@ export function Review({
           Add the finding
         </BusyButton>
       </form>
+      {task.state === "awaiting_review" && current && (
+        <SecretFindings scan={scan} answers={answers} onAnswer={(id, answer) => setAnswers((all) => ({ ...all, [id]: answer }))} />
+      )}
       {task.state === "awaiting_review" && (
         <div className="accept">
           <BusyButton
             busy={busy === "accept"}
-            disabled={!current}
+            disabled={!current || acks === null}
             onClick={() =>
               void act("accept", async () => {
-                const accepted = await client.accept(task.id, task.revision, current!.commit, current!.generation);
+                const accepted = await client.accept(task.id, task.revision, current!.commit, current!.generation, acks ?? []);
                 onTask(accepted.task);
               })
             }
@@ -116,7 +126,9 @@ export function Review({
             Accept
           </BusyButton>
           <span className="hint">
-            {current ? (
+            {current && acks === null ? (
+              "Answer each possible secret first."
+            ) : current ? (
               <>
                 Accepts commit <code>{current.commit.slice(0, 12)}</code> with its check results.
               </>

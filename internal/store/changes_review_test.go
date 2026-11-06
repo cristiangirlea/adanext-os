@@ -38,7 +38,7 @@ func reviewTask(t *testing.T, s *Store, state State, attemptState string) {
 
 func accept(s *Store, user, commit string, generation int64, tip string) error {
 	return s.write(ctx, user, func(tx *Tx) error {
-		_, err := tx.Accept(ctx, "rt", 4, commit, generation, tip)
+		_, err := tx.Accept(ctx, "rt", 4, commit, generation, tip, nil)
 		return err
 	})
 }
@@ -142,7 +142,7 @@ func TestAnAcceptRecordsWhatWasReviewedAndMovesTheTaskToAccepted(t *testing.T) {
 			var review Review
 			if err := s.write(ctx, user, func(tx *Tx) error {
 				var err error
-				review, err = tx.Accept(ctx, "rt", 4, agentCommit, 3, agentCommit)
+				review, err = tx.Accept(ctx, "rt", 4, agentCommit, 3, agentCommit, nil)
 				return err
 			}); err != nil {
 				t.Fatal(err)
@@ -164,7 +164,7 @@ func TestAnAcceptRecordsWhatWasReviewedAndMovesTheTaskToAccepted(t *testing.T) {
 				t.Fatalf("task = %+v %v", task, err)
 			}
 			// An accepted task is neither accepted again nor refined.
-			if err := s.write(ctx, user, func(tx *Tx) error { _, err := tx.Accept(ctx, "rt", 5, agentCommit, 3, agentCommit); return err }); !errors.Is(err, ErrInvalidTransition) {
+			if err := s.write(ctx, user, func(tx *Tx) error { _, err := tx.Accept(ctx, "rt", 5, agentCommit, 3, agentCommit, nil); return err }); !errors.Is(err, ErrInvalidTransition) {
 				t.Fatalf("a second accept: %v", err)
 			}
 			execute(t, s, "UPDATE workspaces SET removed='now'")

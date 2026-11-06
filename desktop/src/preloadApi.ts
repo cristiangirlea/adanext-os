@@ -61,7 +61,7 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
     checkLog: (taskId, checkId) => invoke("checkLog", [taskId, checkId]),
     findings: (taskId) => invoke("findings", [taskId]),
     addFinding: (taskId, body) => invoke("addFinding", [taskId, body]),
-    accept: (taskId, revision, commit, generation) => invoke("accept", [taskId, revision, commit, generation]),
+    accept: (taskId, revision, commit, generation, secrets) => invoke("accept", [taskId, revision, commit, generation, secrets]),
     refine: (taskId, revision, request) => invoke("refine", [taskId, revision, request]),
   };
 }

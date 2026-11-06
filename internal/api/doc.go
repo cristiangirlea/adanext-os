@@ -143,4 +143,23 @@
 // its prompt, whose ids the answer lists in findings; a refused or interrupted
 // refine can be sent again. A task holds at most 200 findings (409
 // too_many_findings past that).
+//
+// Secret scan (#130). After Ada commits an attempt's changes it scans the
+// lines they add since the base for credentials (known key formats, secret
+// names given a literal, key files such as .env). Changes carries the scan of
+// its commit in "secrets" (null when the attempt was not scanned): each
+// finding's id, path, line (0 for the whole file) and rule, never the value;
+// files not scanned (binary, too_large), files past the listing cap
+// (unlisted), and failed when the scan could not read the changes. Findings
+// whose path and rule the project allow-listed are left out. An accept answers
+// each open finding in "secrets": [{"finding","kind","reason"}], kind test
+// (allow-listed with its reason, which is required) or real (the user rotates
+// it; export refuses the branch while it holds the secret). A finding left
+// unanswered is 409 secrets_unacknowledged with the open findings; an unknown
+// or repeated id, another kind or a test value without a reason is 400; a
+// scan that found more than it records is 409 too_many_secret_findings, and a
+// scan of another commit 409 secret_scan_stale (changes then shows it as
+// failed). A test value and a real secret of one path and rule are refused
+// together: one allow-list entry covers both. The answers are recorded with
+// the review.
 package api

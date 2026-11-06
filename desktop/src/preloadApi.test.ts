@@ -68,7 +68,7 @@ describe("preload api", () => {
     await api.checkLog("t1", "c1");
     await api.findings("t1");
     await api.addFinding("t1", "note");
-    await api.accept("t1", 3, "a".repeat(40), 1);
+    await api.accept("t1", 3, "a".repeat(40), 1, [{ finding: "s1", kind: "real" }]);
     await api.refine("t1", 3, policy);
     expect(fake.calls).toEqual([
       ["experience", []],
@@ -83,7 +83,7 @@ describe("preload api", () => {
       ["checkLog", ["t1", "c1"]],
       ["findings", ["t1"]],
       ["addFinding", ["t1", "note"]],
-      ["accept", ["t1", 3, "a".repeat(40), 1]],
+      ["accept", ["t1", 3, "a".repeat(40), 1, [{ finding: "s1", kind: "real" }]]],
       ["refine", ["t1", 3, policy]],
     ]);
     // The dialog's method takes nothing: whatever the page passes, no argument reaches main.

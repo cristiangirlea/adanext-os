@@ -158,6 +158,7 @@ function changeSet(fields: Partial<Changes> = {}): Changes {
     provider_changes: null,
     provider_flagged: false,
     checks: [],
+    secrets: null,
     ...fields,
   };
 }

@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App";
-import { AdaError, type Changes } from "./client/api";
+import { AdaError, type Changes, type SecretScan } from "./client/api";
 import { FakeClient, makeTask } from "./test/fakeClient";
 
 // The workspace of M4.4b through the App: the import flow, the work area, the review and the
@@ -139,6 +139,7 @@ function reviewable(client: FakeClient, changes: Partial<Changes> = {}): void {
     provider_changes: null,
     provider_flagged: false,
     checks: [],
+    secrets: null,
     ...changes,
   };
 }
@@ -160,8 +161,108 @@ describe("the review", () => {
     expect(within(screen.getByRole("list", { name: "Findings" })).getByText("rename the class")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Accept" }));
     await flush();
-    expect(client.args.accept).toEqual([["t1", 7, "c".repeat(40), 4]]);
+    expect(client.args.accept).toEqual([["t1", 7, "c".repeat(40), 4, []]]);
     expect(screen.getByText("Accepted. An accepted task is not refined.")).toBeTruthy();
+  });
+
+  it("asks for an answer to each possible secret before accept and sends the answers", async () => {
+    const client = new FakeClient();
+    const commit = "c".repeat(40);
+    reviewable(client, {
+      secrets: {
+        commit,
+        rules_version: "1",
+        findings: [
+          { id: "s1", path: "fixtures/keys.txt", line: 3, rule: "access-key-id" },
+          { id: "s2", path: "deploy/.env", line: 0, rule: "key-file" },
+        ],
+        findings_capped: false,
+        not_scanned: [{ path: "logo.png", reason: "binary" }],
+        unlisted: 0,
+        capped: false,
+        failed: false,
+      },
+    });
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("fix it"));
+    await flush();
+    const accept = () => screen.getByRole("button", { name: "Accept" }) as HTMLButtonElement;
+    expect(accept().disabled).toBe(true);
+    const list = screen.getByRole("group", { name: "Possible secrets" });
+    expect(within(list).getByText("fixtures/keys.txt")).toBeTruthy();
+    expect(within(list).getByText(":3")).toBeTruthy();
+    expect(within(list).getByText("deploy/.env")).toBeTruthy();
+    expect(within(list).getByText("logo.png")).toBeTruthy();
+    const first = screen.getByRole("group", { name: "What is fixtures/keys.txt:3?" });
+    fireEvent.click(within(first).getByLabelText("A test value"));
+    const second = screen.getByRole("group", { name: "What is deploy/.env?" });
+    fireEvent.click(within(second).getByLabelText("A real secret"));
+    expect(screen.getByText(/Rotate it with its provider/)).toBeTruthy();
+    expect(accept().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText(/Why it is a test value/), { target: { value: " parser fixture " } });
+    expect(accept().disabled).toBe(false);
+    fireEvent.click(accept());
+    await flush();
+    expect(client.args.accept).toEqual([
+      [
+        "t1",
+        7,
+        commit,
+        4,
+        [
+          { finding: "s1", kind: "test", reason: "parser fixture" },
+          { finding: "s2", kind: "real" },
+        ],
+      ],
+    ]);
+  });
+
+  it("marks hidden characters and non-UTF-8 bytes in a finding's path", async () => {
+    const client = new FakeClient();
+    reviewable(client, {
+      secrets: {
+        commit: "c".repeat(40),
+        rules_version: "1",
+        findings: [
+          { id: "s1", path: "keys\u202etxt.env", line: 1, rule: "env-secret" },
+          { id: "s2", path: "a\ufffd.txt", path_raw: "Yf8udHh0", line: 2, rule: "jwt" },
+        ],
+        findings_capped: false,
+        not_scanned: [],
+        unlisted: 0,
+        capped: false,
+        failed: false,
+      },
+    });
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("fix it"));
+    await flush();
+    const list = screen.getByRole("group", { name: "Possible secrets" });
+    expect(within(list).getByText("hidden characters")).toBeTruthy();
+    expect(within(list).getByText("not UTF-8")).toBeTruthy();
+  });
+
+  it("says when the changes were not scanned, or the scan failed or found too many to accept", async () => {
+    const base: SecretScan = { commit: "c".repeat(40), rules_version: "1", findings: [], findings_capped: false, not_scanned: [], unlisted: 0, capped: false, failed: false };
+    const cases: [SecretScan | null, string | RegExp, boolean][] = [
+      [null, "These changes were not scanned for secrets.", true],
+      [{ ...base, failed: true }, /could not read these changes/, true],
+      [{ ...base, findings_capped: true, findings: [{ id: "s1", path: "a", line: 1, rule: "jwt" }] }, /more possible secrets than Ada records/, false],
+      [base, "No possible secrets in the lines these changes add.", true],
+    ];
+    for (const [secrets, text, enabled] of cases) {
+      const client = new FakeClient();
+      reviewable(client, { secrets });
+      const { unmount } = render(<App client={client} />);
+      await flush();
+      fireEvent.click(screen.getByText("fix it"));
+      await flush();
+      expect(screen.getByText(text)).toBeTruthy();
+      expect((screen.getByRole("button", { name: "Accept" }) as HTMLButtonElement).disabled).toBe(!enabled);
+      unmount();
+    }
   });
 
   it("does not accept changes it has not read, or stale ones", async () => {

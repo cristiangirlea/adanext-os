@@ -112,7 +112,14 @@ fixtureTest("import, task, fake engine, checks, changes and accept through the w
 
     await page.getByRole("tab", { name: "Changes" }).click();
     await expect(readme).toBeVisible();
-    await page.getByRole("button", { name: "Accept", exact: true }).click();
+    // The fake key the agent added is reported where it is, without its value, and answered.
+    const accept = page.getByRole("button", { name: "Accept", exact: true });
+    await expect(page.getByText("fixtures/key.txt:1", { exact: true })).toBeVisible();
+    await expect(accept).toBeDisabled();
+    const answer = page.getByRole("group", { name: "What is fixtures/key.txt:1?" });
+    await answer.getByLabel("A test value").check();
+    await page.getByLabel(/Why it is a test value/).fill("a fake key for the end-to-end test");
+    await accept.click();
     await expect(row).toContainText("accepted");
     expect((await f.tasks()).find((t) => t.id === task.id)?.state).toBe("accepted");
 

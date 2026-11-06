@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 func main() {
@@ -22,11 +23,12 @@ func main() {
 	}
 }
 
-// edits are the agent's changes: a patch holding HTML, and a new file whose name holds a
-// right-to-left override, which the UI must mark.
+// edits are the agent's changes: a patch holding HTML, a new file whose name holds a
+// right-to-left override, which the UI must mark, and a fake access key the secret scan reports.
 var edits = map[string]string{
 	"README.md":             "# fixture\n\nEdited by the agent: <b>bold</b> <script>alert(1)</script>\n",
 	"notes/rtl\u202etxt.md": "named to look like a .txt file\n",
+	"fixtures/key.txt":      "key = \"AKIA" + strings.Repeat("Q", 16) + "\"\n",
 }
 
 func run() error {

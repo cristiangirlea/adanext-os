@@ -214,7 +214,7 @@ function requestId(body: unknown): string | undefined {
 }
 
 // The fields of a refusal's body that are handed back with it (ui's ErrorDetails).
-const detailKeys = ["blockers", "project", "tasks", "path", "provider_changes"];
+const detailKeys = ["blockers", "project", "tasks", "path", "provider_changes", "findings"];
 
 export function refusalDetails(body: unknown): Record<string, unknown> | undefined {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return undefined;
