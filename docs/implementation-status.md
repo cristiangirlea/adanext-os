@@ -1510,7 +1510,7 @@ Evidence, left for the supervisor:
   (M3.3's walk); a link or reparse point on its path refuses the check. The timeout is at most
   30 minutes and the output at most 16 MiB per check, with at most 16 checks per task; output
   beyond the cap is read and discarded, the log marked truncated, and the check keeps running.
-  Checks run in a fresh detached worktree at the tested commit, as the baseline does; the check worktree's path is built from ids and its admin directory recorded at creation, so M4.3's removal applies to it; after each check its worktree's tracked files must still match that commit, and a check that changes them does not bind it. Later checks are unaffected.
+  Checks run in a fresh detached worktree at the tested commit, as the baseline does; the check worktree's path is built from ids and its admin directory recorded at creation, so M4.3's removal applies to it, every directory on the way included (item 8 there); after each check its worktree's tracked files must still match that commit, and a check that changes them does not bind it. Later checks are unaffected.
   Ada commits the agent's result as its own commit ("Agent changes", Ada's author) on
   `ada/<task>` before any check runs, so a check result and a review each bind a commit and not
   a work tree that can still change. The agent had a shell as the user, so Ada trusts none of
@@ -1890,7 +1890,11 @@ Evidence, left for the supervisor:
      longer changes a link's
      target mode: it chmodded the path before removing it, which on Unix followed a symlink and
      made its target directory unreadable to others (seen in the Linux leg, fixed for check
-     worktrees too).
+     worktrees too). A check's worktree and admin directory follow the same rule (2026-11-06):
+     the project directory, `checks/`, `checks/<attempt>`, the clone and the clone's
+     `worktrees/` must be real directories, else removing it is a workspace mismatch that leaves
+     the link and the check's lease in place for a later sweep, and preparing a check there is
+     refused, the check recorded as not run.
   9. The refined attempt is prepared by `Workspaces.Continue`, not by a sync: no fetch, the clone
      config checked against Ada's recorded hash, the branch required at the earlier attempt's
      agent-changes commit and descending from the base commit, and nothing of the snapshot

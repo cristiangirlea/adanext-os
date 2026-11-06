@@ -294,3 +294,177 @@ func TestWorktreeCommandNamesTheCloneAsItsCommonDir(t *testing.T) {
 		t.Fatalf("GIT_COMMON_DIR set %d times, dir %s: %v", found, cmd.Dir, cmd.Env)
 	}
 }
+
+// checkRunPaths are a check's worktree and its admin directory under w.Root, as RemoveCheckWorktree builds them.
+var checkRunPaths = []string{"p/checks/a1/run1", "p/repo.git/worktrees/run1"}
+
+// linkBehind replaces the directory rel under w.Root (moved to rel-moved) by a
+// link to a new directory outside, which holds a marker wherever one of
+// targets, all under w.Root, would land behind the link. It returns the link
+// and the markers.
+func linkBehind(t *testing.T, w *Workspaces, rel string, targets []string) (string, []string) {
+	t.Helper()
+	outside := tempDir(t)
+	var markers []string
+	for _, target := range targets {
+		if rest, ok := strings.CutPrefix(target, rel+"/"); ok {
+			marker := filepath.Join(outside, filepath.FromSlash(rest), "marker.txt")
+			write(t, marker, "keep me\n")
+			markers = append(markers, marker)
+		}
+	}
+	link := filepath.Join(w.Root, filepath.FromSlash(rel))
+	if err := os.Rename(link, link+"-moved"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	makeLink(t, outside, link)
+	return link, markers
+}
+
+// keptLink fails unless link is still a link and every marker behind it is
+// still the only entry of its directory.
+func keptLink(t *testing.T, link string, markers []string) {
+	t.Helper()
+	if info, err := os.Lstat(link); err != nil || !isLink(link, info) {
+		t.Fatalf("the link was not left in place: %v", err)
+	}
+	for _, marker := range markers {
+		keptMarker(t, marker)
+		if entries, err := os.ReadDir(filepath.Dir(marker)); err != nil || len(entries) != 1 {
+			t.Fatalf("the directory behind the link holds %v: %v", entries, err)
+		}
+	}
+}
+
+func TestCheckWorktreeRemovalRefusesALinkedParentAndKeepsWhatIsBehindIt(t *testing.T) {
+	t.Parallel()
+	for _, linked := range []string{"p", "p/checks", "p/checks/a1", "p/repo.git", "p/repo.git/worktrees"} {
+		t.Run(linked, func(t *testing.T) {
+			t.Parallel()
+			w := newWorkspaces(t)
+			for _, rel := range checkRunPaths {
+				write(t, filepath.Join(w.Root, filepath.FromSlash(rel), "inner.txt"), "inner\n")
+			}
+			link, markers := linkBehind(t, w, linked, checkRunPaths)
+
+			var mm *MismatchError
+			if err := w.RemoveCheckWorktree("p", "a1", "run1", "run1"); !errors.As(err, &mm) {
+				t.Fatalf("removal through a linked %s: %v, want a mismatch", linked, err)
+			}
+			keptLink(t, link, markers)
+			// The side with no link on its way is removed all the same.
+			for _, rel := range checkRunPaths {
+				if !strings.HasPrefix(rel, linked+"/") {
+					if _, err := os.Lstat(filepath.Join(w.Root, filepath.FromSlash(rel))); !errors.Is(err, fs.ErrNotExist) {
+						t.Fatalf("%s, with no link on its way, remains: %v", rel, err)
+					}
+				}
+			}
+
+			// With the real directory back, the next try removes both.
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(link+"-moved", link); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.RemoveCheckWorktree("p", "a1", "run1", "run1"); err != nil {
+				t.Fatalf("removal once the link is gone: %v", err)
+			}
+			for _, rel := range append(checkRunPaths, "p/checks") {
+				if _, err := os.Lstat(filepath.Join(w.Root, filepath.FromSlash(rel))); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("%s remains: %v", rel, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckWorktreeRemovalRefusesAFileInPlaceOfAParent(t *testing.T) {
+	t.Parallel()
+	for _, parent := range []string{"p/checks", "p/repo.git/worktrees"} {
+		t.Run(parent, func(t *testing.T) {
+			t.Parallel()
+			w := newWorkspaces(t)
+			file := filepath.Join(w.Root, filepath.FromSlash(parent))
+			write(t, file, "keep me\n")
+			var mm *MismatchError
+			if err := w.RemoveCheckWorktree("p", "a1", "run1", "run1"); !errors.As(err, &mm) {
+				t.Fatalf("removal under a file %s: %v, want a mismatch", parent, err)
+			}
+			keptMarker(t, file)
+		})
+	}
+}
+
+func TestCheckWorktreeRemovalCleansAnEmptyChecksDirectory(t *testing.T) {
+	t.Parallel()
+	w := newWorkspaces(t)
+	checks := filepath.Join(w.Root, "p", "checks")
+	if err := os.MkdirAll(checks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RemoveCheckWorktree("p", "a1", "run1", "run1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(checks); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the empty checks directory remains: %v", err)
+	}
+}
+
+func TestPrepareCheckWorktreeRefusesALinkedParent(t *testing.T) {
+	t.Parallel()
+	for _, linked := range []string{"checks", "checks/a1", "repo.git/worktrees"} {
+		t.Run(linked, func(t *testing.T) {
+			t.Parallel()
+			dir := newRepo(t, nil)
+			w := newWorkspaces(t)
+			m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+			if m.Attempt != "a1" {
+				t.Fatalf("attempt %s, want a1", m.Attempt)
+			}
+			targets := []string{
+				m.Project + "/checks/" + m.Attempt + "/run1",
+				m.Project + "/repo.git/worktrees/run1",
+			}
+			link, markers := linkBehind(t, w, m.Project+"/"+linked, targets)
+
+			var mm *MismatchError
+			if _, _, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", m.Head, m.ConfigSHA256); !errors.As(err, &mm) {
+				t.Fatalf("PrepareCheckWorktree through a linked %s: %v, want a mismatch", linked, err)
+			}
+			keptLink(t, link, markers)
+		})
+	}
+}
+
+func TestPrepareCheckWorktreeRefusesALeftoverItCannotRemove(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory's mode does not stop removing its entries on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root removes entries of a read-only directory")
+	}
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	attemptDir := filepath.Join(w.Root, m.Project, "checks", m.Attempt)
+	leftover := filepath.Join(attemptDir, "run1")
+	write(t, filepath.Join(leftover, "left.txt"), "left\n")
+	if err := os.Chmod(attemptDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(attemptDir, 0o700) })
+
+	var mm *MismatchError
+	if _, _, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", m.Head, m.ConfigSHA256); err == nil || errors.As(err, &mm) {
+		t.Fatalf("PrepareCheckWorktree over a leftover it cannot remove: %v, want the removal's error", err)
+	}
+	if entries, err := os.ReadDir(leftover); err != nil || len(entries) != 0 {
+		t.Fatalf("the leftover holds %v, %v: want it emptied and no worktree added", entries, err)
+	}
+}

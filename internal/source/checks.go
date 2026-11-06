@@ -260,7 +260,11 @@ func (w *Workspaces) PrepareCheckWorktree(ctx context.Context, project, attempt,
 		return "", "", err
 	}
 	adminName := runID
-	_ = w.removeCheckWorktreeLocked(project, attempt, runID, adminName)
+	// A link on the way would take the new worktree outside Ada's state, and a
+	// leftover that stays would block it: either refuses the check.
+	if err := w.removeCheckWorktreeLocked(project, attempt, runID, adminName); err != nil {
+		return "", "", err
+	}
 
 	wt := w.CheckWorktreePath(project, attempt, runID)
 	if err := os.MkdirAll(filepath.Dir(wt), 0o700); err != nil {
@@ -339,8 +343,9 @@ func (w *Workspaces) CheckTreeUnchanged(ctx context.Context, project, attempt, r
 }
 
 // RemoveCheckWorktree removes a check's worktree built from IDs without
-// following any symlink or reparse point, and then removes its recorded admin
-// directory under the clone's worktrees/, never calling git worktree prune.
+// following any symlink or reparse point, in it or on the way to it, and then
+// removes its recorded admin directory under the clone's worktrees/, never
+// calling git worktree prune. A linked directory on the way is a mismatch.
 func (w *Workspaces) RemoveCheckWorktree(project, attempt, runID, adminName string) error {
 	for _, id := range []string{project, attempt, runID} {
 		if !safeName(id) {
@@ -357,14 +362,53 @@ func (w *Workspaces) RemoveCheckWorktree(project, attempt, runID, adminName stri
 	return w.removeCheckWorktreeLocked(project, attempt, runID, adminName)
 }
 
+// removeCheckWorktreeLocked removes the worktree and the admin directory each
+// only when every directory from the project's state directory down to it is
+// a real one: a link or reparse point there is a mismatch, left in place with
+// what lies behind it. A missing directory leaves nothing to remove.
 func (w *Workspaces) removeCheckWorktreeLocked(project, attempt, runID, adminName string) error {
+	dir := filepath.Join(w.Root, project)
+	if n, err := w.realDirs(dir); n == 0 {
+		return err
+	}
 	wt := w.CheckWorktreePath(project, attempt, runID)
-	wtErr := removeTreeNoFollow(wt)
-	_ = os.Remove(filepath.Dir(wt))
-	_ = os.Remove(filepath.Dir(filepath.Dir(wt)))
-	adminDir := filepath.Join(w.repo(project), "worktrees", adminName)
-	adminErr := removeTreeNoFollow(adminDir)
+	checks, attemptDir := filepath.Join(dir, "checks"), filepath.Dir(wt)
+	n, wtErr := w.realDirs(checks, attemptDir)
+	if n == 2 {
+		wtErr = removeTreeNoFollow(wt)
+		_ = os.Remove(attemptDir)
+	}
+	if n >= 1 {
+		_ = os.Remove(checks)
+	}
+	repo := w.repo(project)
+	admins := filepath.Join(repo, "worktrees")
+	n, adminErr := w.realDirs(repo, admins)
+	if n == 2 {
+		adminErr = removeTreeNoFollow(filepath.Join(admins, adminName))
+	}
 	return errors.Join(wtErr, adminErr)
+}
+
+// realDirs checks paths, each inside the one before, in order, and reports how
+// many of them, from the first, are real directories. It stops at the first
+// missing one, and one that is a link, a reparse point or not a directory is a
+// mismatch.
+func (w *Workspaces) realDirs(paths ...string) (int, error) {
+	for i, path := range paths {
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return i, nil
+		}
+		if err != nil {
+			return i, err
+		}
+		if !info.IsDir() || isLink(path, info) {
+			rel, _ := filepath.Rel(w.Root, path)
+			return i, mismatch("%s is not a real directory", filepath.ToSlash(rel))
+		}
+	}
+	return len(paths), nil
 }
 
 func removeTreeNoFollow(path string) error {
