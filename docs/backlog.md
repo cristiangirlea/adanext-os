@@ -534,7 +534,16 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   it hashed and publishes those same bytes, and `adad` hashes the artifact it is given and
   refuses one the manifest does not match, with the tests the decisions log, 2026-10-14, lists.
 - **M6 Resume intelligence:** evidence extraction, cited summaries, next-task proposals,
-  continuation.
+  continuation. Citations are checked in two steps (#131): the evidence id exists, and the
+  evidence supports the claim. Typed claims are compared with structured evidence in code (a
+  "checks passed" claim against a failed run is a contradiction); free-text claims go to an
+  optional local classifier (supports, contradicts, does not address), never a service billed
+  per call. A contradicted claim is not shown as a fact, and its evidence is shown with a note
+  that the summary disagreed; one the evidence does not address is shown as unsupported, beside
+  its evidence. Without the classifier, or when it fails, such a free-text claim reads "support
+  not checked", never "supported". The classifier's thresholds and model are versioned and stored
+  with each verdict, and a labelled set of claim and evidence pairs in the repository measures
+  it before it is turned on and again whenever the model or the thresholds change.
 - **M7 Review and integration:** review package, branch export, destination checks. Export scans
   every commit of the exported range for secrets (#130, the decisions log 2026-11-06), not only
   the tip: a finding that is not allow-listed refuses the export, a real secret that a later

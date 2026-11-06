@@ -2034,6 +2034,16 @@ Evidence, left for the supervisor:
      `<...>`, a filler of x or *), never because it contains such a marker.
   5. The export half waits for M7's export, which is not built: it is in M7's entry in the
      backlog. An attempt scanned before this change has no scan, and its review says so.
+- **2026-11-06, M6 checks that the cited evidence supports each claim (#131).** `docs/plan.md`
+  (section 3, "Resume summary") validates evidence ids so a summary cannot invent references,
+  and M6's completion evidence is "valid citations". An id that exists is not yet a claim that
+  holds: a summary can cite a real check run and say it passed when it failed. M6 adds a
+  second check per claim, recorded in its backlog entry: typed claims against structured
+  evidence in code first, then an optional local classifier for free-text claims, never a
+  service billed per call; without it a claim reads "support not checked". The classifier is a
+  second, optional model use beside the one section 3 allows ("use a model only to synthesize
+  the bounded packet"): it only labels a claim against the evidence it cites, and its label is
+  shown as a model's judgement, apart from observed facts. Nothing is built before M6 is sliced.
 
 ## Owner actions pending
 
