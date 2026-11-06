@@ -440,3 +440,31 @@ func TestPrepareCheckWorktreeRefusesALinkedParent(t *testing.T) {
 		})
 	}
 }
+
+func TestPrepareCheckWorktreeRefusesALeftoverItCannotRemove(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory's mode does not stop removing its entries on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root removes entries of a read-only directory")
+	}
+	t.Parallel()
+	dir := newRepo(t, nil)
+	w := newWorkspaces(t)
+	m := mustPrepare(t, w, dir, mustCapture(t, w.Inspector, dir), "1")
+	attemptDir := filepath.Join(w.Root, m.Project, "checks", m.Attempt)
+	leftover := filepath.Join(attemptDir, "run1")
+	write(t, filepath.Join(leftover, "left.txt"), "left\n")
+	if err := os.Chmod(attemptDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(attemptDir, 0o700) })
+
+	var mm *MismatchError
+	if _, _, err := w.PrepareCheckWorktree(context.Background(), m.Project, m.Attempt, "run1", m.Head, m.ConfigSHA256); err == nil || errors.As(err, &mm) {
+		t.Fatalf("PrepareCheckWorktree over a leftover it cannot remove: %v, want the removal's error", err)
+	}
+	if entries, err := os.ReadDir(leftover); err != nil || len(entries) != 0 {
+		t.Fatalf("the leftover holds %v, %v: want it emptied and no worktree added", entries, err)
+	}
+}
