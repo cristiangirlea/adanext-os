@@ -186,7 +186,7 @@ describe("the review routes through the bridge", () => {
       ["checks", ["t1"]],
       ["findings", ["t1"]],
       ["addFinding", ["t1", "the test is missing"]],
-      ["accept", ["t1", 4, commit, 2]],
+      ["accept", ["t1", 4, commit, 2, [{ finding: "s1", kind: "test", reason: "fixture" }, { finding: "s2", kind: "real" }]]],
       ["refine", ["t1", 4, policy]],
       ["refine", ["t1", 4, { ...policy, mode: "auto", timeout: "5m", max_turns: 3 }]],
     ];
@@ -204,7 +204,7 @@ describe("the review routes through the bridge", () => {
       "POST /v1/tasks/t1/refine",
     ]);
     expect(seen[6]!.body).toBe(JSON.stringify({ body: "the test is missing" }));
-    expect(seen[7]!.body).toBe(JSON.stringify({ commit, generation: 2 }));
+    expect(seen[7]!.body).toBe(JSON.stringify({ commit, generation: 2, secrets: [{ finding: "s1", kind: "test", reason: "fixture" }, { finding: "s2", kind: "real" }] }));
     expect(seen[7]!.headers["if-match"]).toBe('"4"');
     expect(seen[8]!.body).toBe(JSON.stringify(policy));
     expect(seen[8]!.headers["if-match"]).toBe('"4"');
@@ -222,8 +222,15 @@ describe("the review routes through the bridge", () => {
       ["checkLog", ["t1", "../c"]],
       ["addFinding", ["t1", ""]],
       ["addFinding", ["t1", "x".repeat(16385)]],
-      ["accept", ["t1", 4, "not-a-commit", 2]],
-      ["accept", ["t1", 4, "a".repeat(40), -1]],
+      ["accept", ["t1", 4, "not-a-commit", 2, []]],
+      ["accept", ["t1", 4, "a".repeat(40), -1, []]],
+      ["accept", ["t1", 4, "a".repeat(40), 2]],
+      ["accept", ["t1", 4, "a".repeat(40), 2, [{ finding: "s1", kind: "ignore" }]]],
+      ["accept", ["t1", 4, "a".repeat(40), 2, [{ finding: "s1", kind: "real", value: "x" }]]],
+      ["accept", ["t1", 4, "a".repeat(40), 2, [{ finding: "../s1", kind: "real" }]]],
+      ["accept", ["t1", 4, "a".repeat(40), 2, [{ finding: "s1", kind: "test", reason: "x".repeat(1025) }]]],
+      ["accept", ["t1", 4, "a".repeat(40), 2, [{ finding: "s1", kind: "test", reason: "a\u0000b" }]]],
+      ["accept", ["t1", 4, "a".repeat(40), 2, Array.from({ length: 1001 }, (_, i) => ({ finding: `s${i}`, kind: "real" }))]],
       ["refine", ["t1", 4, { ...policy, mode: "ask" }]],
       ["refine", ["t1", 4, { backend: "claude", model: "", effort: "", mode: "readonly" }]],
       ["refine", ["t1", 4, { ...policy, max_turns: 0 }]],

@@ -2008,6 +2008,32 @@ Evidence, left for the supervisor:
      unknown answer as `experience_unavailable`. The card draws nothing when the game is off, and
      an exercise's material only while it is unanswered, as the engine gives it.
   4. Ada's own growth card and her spoken lines are later slices of the same design.
+- **2026-11-06, a secret scan of the agent's changes (#130).** Nothing between an agent's edit
+  and an export looked for credentials it wrote: a key pasted into a fixture, a `.env` it
+  created. The owner chose on 2026-11-06: acknowledge at accept, block at export.
+  1. After Ada commits an attempt's changes, before its checks, `adad` scans the lines the
+     changes add since the imported-changes commit (the diff the review shows, through the same
+     git runner, with caps of 5000 files, 1 MiB per file and 32 MiB in all) with versioned rules:
+     fixed key formats, a secret-looking name given a literal, and key files by name (`.env`,
+     `id_rsa`, `*.pem` and the like). Migration 0011 stores each scan with its rules version.
+  2. A finding holds the path, line and rule, never the value. The issue also named a hash of
+     the match and a masked copy of the line; neither is kept. A plain hash of a short password
+     can be reversed, and the review's diff already shows the line, so a masked copy adds a
+     second store of the line's other text and nothing the reviewer lacks.
+  3. Binary files, files past the caps and a scan that could not read the changes are shown as
+     not scanned, never as clean. Past 1000 findings a scan stops recording, and accept is
+     refused (`too_many_secret_findings`): refine to remove them.
+  4. Accept answers each open finding: a test value joins the project's allow-list (path and
+     rule, with a required reason) and is not reported again; a real secret is recorded with the
+     review, and the user is told to rotate it, since the agent's CLI and its provider have seen
+     it. Ada never tries a key: that would send it somewhere. One allow-list entry covers every
+     finding of its path and rule, so a test value and a real secret of the same path and rule
+     are refused together. A path that is not UTF-8 is kept, and allow-listed, by its bytes.
+     A scan of another commit than the one reviewed refuses the accept (`secret_scan_stale`).
+     A value is passed over as a placeholder only when the whole of it is one (`${...}`,
+     `<...>`, a filler of x or *), never because it contains such a marker.
+  5. The export half waits for M7's export, which is not built: it is in M7's entry in the
+     backlog. An attempt scanned before this change has no scan, and its review says so.
 - **2026-11-06, M6 checks that the cited evidence supports each claim (#131).** `docs/plan.md`
   (section 3, "Resume summary") validates evidence ids so a summary cannot invent references,
   and M6's completion evidence is "valid citations". An id that exists is not yet a claim that

@@ -64,6 +64,7 @@ type Review struct {
 	Commit     string        `json:"commit"`
 	Generation int64         `json:"generation"`
 	Checks     []CheckResult `json:"checks"`
+	Secrets    []SecretAck   `json:"secrets"`
 	Created    string        `json:"created"`
 }
 
@@ -229,8 +230,9 @@ func (s *Store) Findings(ctx context.Context, userID, taskID string) ([]Finding,
 
 // Accept records the actor's or an owner's acceptance of the newest attempt at revision: commit
 // must be its agent-changes commit and tip, the branch's current commit; generation the
-// coordinator's. The check results recorded are those of that attempt, marked against tip.
-func (tx *Tx) Accept(ctx context.Context, taskID string, revision int64, commit string, generation int64, tip string) (Review, error) {
+// coordinator's. The check results recorded are those of that attempt, marked against tip. Each
+// open secret finding of the commit's scan needs one of acks; test values join the allow-list.
+func (tx *Tx) Accept(ctx context.Context, taskID string, revision int64, commit string, generation int64, tip string, acks []SecretAck) (Review, error) {
 	r, err := readReviewState(ctx, tx.tx, tx.userID, taskID)
 	if err != nil {
 		return Review{}, err
@@ -257,9 +259,17 @@ func (tx *Tx) Accept(ctx context.Context, taskID string, revision int64, commit 
 	if err != nil {
 		return Review{}, err
 	}
-	review := Review{ID: newReviewID("rev_"), Task: taskID, Attempt: n.ID, Reviewer: tx.userID, Decision: "accepted", Commit: commit, Generation: generation, Checks: checks, Created: now()}
-	if _, err := tx.tx.ExecContext(ctx, `INSERT INTO reviews(id,task,attempt,reviewer,decision,reviewed_commit,ownership_generation,checks_json,created) VALUES(?,?,?,?,?,?,?,?,?)`,
-		review.ID, review.Task, review.Attempt, review.Reviewer, review.Decision, review.Commit, review.Generation, string(data), review.Created); err != nil {
+	secrets, err := tx.answerSecrets(ctx, r.Project, taskID, n.ID, commit, acks)
+	if err != nil {
+		return Review{}, err
+	}
+	answered, err := json.Marshal(secrets)
+	if err != nil {
+		return Review{}, err
+	}
+	review := Review{ID: newReviewID("rev_"), Task: taskID, Attempt: n.ID, Reviewer: tx.userID, Decision: "accepted", Commit: commit, Generation: generation, Checks: checks, Secrets: secrets, Created: now()}
+	if _, err := tx.tx.ExecContext(ctx, `INSERT INTO reviews(id,task,attempt,reviewer,decision,reviewed_commit,ownership_generation,checks_json,secrets_json,created) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		review.ID, review.Task, review.Attempt, review.Reviewer, review.Decision, review.Commit, review.Generation, string(data), string(answered), review.Created); err != nil {
 		return Review{}, err
 	}
 	return review, transition(ctx, tx.tx, taskID, AwaitingReview, Accepted, revision)

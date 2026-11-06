@@ -192,7 +192,7 @@ describe("hidden characters", () => {
 describe("patches are bounded in the page", () => {
   it("renders a file's patch only once the file is opened", () => {
     const file = (n: number): ChangedFile => ({ path: `f${n}.txt`, status: "M", old_mode: "100644", new_mode: "100644", binary: false, added: 1, deleted: 0, patch: "@@ -1 +1 @@\n+x\n", patch_truncated: false, provider: false });
-    const changes: Changes = { task: "t1", attempt: "a1", base: "b".repeat(40), commit, tip: commit, stale: false, generation: 1, files: Array.from({ length: 30 }, (_, i) => file(i)), total: 30, files_truncated: false, bytes_truncated: false, total_capped: false, provider_changes: null, provider_flagged: false, checks: [] };
+    const changes: Changes = { task: "t1", attempt: "a1", base: "b".repeat(40), commit, tip: commit, stale: false, generation: 1, files: Array.from({ length: 30 }, (_, i) => file(i)), total: 30, files_truncated: false, bytes_truncated: false, total_capped: false, provider_changes: null, provider_flagged: false, checks: [], secrets: null };
     const { container } = render(<ChangesView changes={changes} />);
     expect(container.querySelectorAll(".patch-line")).toHaveLength(0);
     const first = container.querySelector("details.file-change") as HTMLDetailsElement;

@@ -342,6 +342,9 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT id,task,attempt,author,body,created FROM findings LIMIT 0",
 		"SELECT id,task,attempt,reviewer,decision,reviewed_commit,ownership_generation,checks_json,created FROM reviews LIMIT 0",
 		"SELECT id,task,attempt,ord,name,definition_hash,definition_json,tested_commit,bound_commit,state,exit_code,output_artifact,output_size,output_truncated,baseline_id,env_keys,duration_ms,started_at,ended_at FROM check_results LIMIT 0",
+		"SELECT attempt,scanned_commit,rules_version,scan_json,created FROM secret_scans LIMIT 0",
+		"SELECT project,path,path_raw,rule,reason,author,created FROM secret_allowlist LIMIT 0",
+		"SELECT secrets_json FROM reviews LIMIT 0",
 	} {
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {

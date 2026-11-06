@@ -13,6 +13,7 @@ import type {
   NewTask,
   Project,
   RefineRequest,
+  SecretAck,
   Refined,
   Snapshot,
   SnapshotSelection,
@@ -179,10 +180,10 @@ export class FakeClient implements AdaClient {
     this.findingList = [...this.findingList, finding];
     return finding;
   }
-  async accept(taskId: string, revision: number, commit: string, generation: number): Promise<Accepted> {
-    this.check("accept", taskId, revision, commit, generation);
+  async accept(taskId: string, revision: number, commit: string, generation: number, secrets: SecretAck[]): Promise<Accepted> {
+    this.check("accept", taskId, revision, commit, generation, secrets);
     const task = this.update(taskId, revision, "accepted");
-    return { task, review: { id: "r1", attempt: "a1", reviewer: "local", decision: "accepted", commit, generation, created: "" } };
+    return { task, review: { id: "r1", attempt: "a1", reviewer: "local", decision: "accepted", commit, generation, secrets, created: "" } };
   }
   async refine(taskId: string, revision: number, request: RefineRequest): Promise<Refined> {
     this.check("refine", taskId, revision, request);
