@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -319,5 +321,56 @@ func TestDesktopDetachmentRequiresBreakawayAndNeverFallsBackIntoTheJob(t *testin
 	launched, err = detachWith(nil, func(*exec.Cmd) error { return denied })
 	if launched || !errors.Is(err, denied) {
 		t.Fatalf("must refuse instead of serving inside the job: %v %v", launched, err)
+	}
+}
+
+// brokerCommand writes a marker when the broker starts it.
+func brokerCommand(t *testing.T) (*exec.Cmd, string) {
+	t.Helper()
+	wait, before := brokerWait, beforeBroker
+	t.Cleanup(func() { brokerWait, beforeBroker = wait, before })
+	marker := filepath.Join(t.TempDir(), "started")
+	cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), "/c", "echo started>"+marker)
+	cmd.Dir = detachDir()
+	return cmd, marker
+}
+
+func TestTheBrokersTimeCountsFromWhenItStarts(t *testing.T) {
+	cmd, marker := brokerCommand(t)
+	// No time is left until the seam has run: a limit counted from before it fails.
+	brokerWait = time.Nanosecond
+	beforeBroker = func() { brokerWait = 30 * time.Second }
+	if err := brokerDetached(cmd); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Lstat(marker); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the broker reported success and started nothing")
+		}
+	}
+}
+
+func TestABrokerOutOfTimeSaysSoInsteadOfAFailure(t *testing.T) {
+	cmd, _ := brokerCommand(t)
+	brokerWait = time.Nanosecond
+	err := brokerDetached(cmd)
+	if err == nil || !strings.Contains(err.Error(), "did not finish within 1ns") {
+		t.Fatalf("a broker out of time: %v, want an error naming the wait", err)
+	}
+}
+
+func TestABrokerThatRanAndFailedIsNotReportedAsOutOfTime(t *testing.T) {
+	cmd, marker := brokerCommand(t)
+	cmd.Dir = filepath.Join(t.TempDir(), "missing")
+	brokerWait = 30 * time.Second
+	err := brokerDetached(cmd)
+	if err == nil || !strings.Contains(err.Error(), "could not start adad") || strings.Contains(err.Error(), "within") {
+		t.Fatalf("a broker whose start was refused: %v, want a failure, not a timeout", err)
+	}
+	if _, err := os.Lstat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the command ran although its start was refused: %v", err)
 	}
 }

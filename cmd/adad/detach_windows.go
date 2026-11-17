@@ -64,6 +64,10 @@ func dropInheritedStdio() {
 // beforeBroker is a test seam that runs just before the broker starts; nil outside tests.
 var beforeBroker func()
 
+// brokerWait bounds the broker alone: a cold PowerShell with CIM can take 8 s, and the
+// desktop waits 15 s for adad in all.
+var brokerWait = 12 * time.Second
+
 // Win32_Process.Create does not inherit the caller's job. No elevation, service,
 // scheduled task or policy change is involved. Configuration is argv and the
 // owner's environment is passed in memory, never on argv or in a log/file.
@@ -87,18 +91,22 @@ if ($result.ReturnValue -ne 0) { exit 1 }
 	for i, unit := range units {
 		binary.LittleEndian.PutUint16(encoded[i*2:], unit)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
 	root := os.Getenv("SystemRoot")
 	if !filepath.IsAbs(root) {
 		return errors.New("SystemRoot must be absolute for the Windows process broker")
 	}
-	broker := exec.CommandContext(ctx, filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded))
-	broker.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	if beforeBroker != nil {
 		beforeBroker()
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), brokerWait)
+	defer cancel()
+	broker := exec.CommandContext(ctx, filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded))
+	broker.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	if err := broker.Run(); err != nil {
+		if ctx.Err() != nil {
+			// WMI may still finish a start it was already given.
+			return fmt.Errorf("Windows process broker did not finish within %s (adad may still start)", brokerWait)
+		}
 		return fmt.Errorf("Windows process broker could not start adad: %w", err)
 	}
 	return nil
