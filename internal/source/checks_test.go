@@ -385,17 +385,30 @@ func TestCheckWorktreeRemovalRefusesALinkedParentAndKeepsWhatIsBehindIt(t *testi
 
 func TestCheckWorktreeRemovalRefusesAFileInPlaceOfAParent(t *testing.T) {
 	t.Parallel()
-	for _, parent := range []string{"p/checks", "p/repo.git/worktrees"} {
+	for _, parent := range []string{"p", "p/checks", "p/checks/a1", "p/repo.git", "p/repo.git/worktrees"} {
 		t.Run(parent, func(t *testing.T) {
 			t.Parallel()
 			w := newWorkspaces(t)
 			file := filepath.Join(w.Root, filepath.FromSlash(parent))
+			var other []string
+			for _, rel := range checkRunPaths {
+				if !strings.HasPrefix(rel, parent+"/") {
+					other = append(other, rel)
+					write(t, filepath.Join(w.Root, filepath.FromSlash(rel), "inner.txt"), "inner\n")
+				}
+			}
 			write(t, file, "keep me\n")
 			var mm *MismatchError
 			if err := w.RemoveCheckWorktree("p", "a1", "run1", "run1"); !errors.As(err, &mm) {
 				t.Fatalf("removal under a file %s: %v, want a mismatch", parent, err)
 			}
 			keptMarker(t, file)
+			// The side with no file on its way is removed all the same.
+			for _, rel := range other {
+				if _, err := os.Lstat(filepath.Join(w.Root, filepath.FromSlash(rel))); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("%s, with no file on its way, remains: %v", rel, err)
+				}
+			}
 		})
 	}
 }
