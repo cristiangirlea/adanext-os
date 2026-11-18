@@ -324,15 +324,28 @@ func TestDesktopDetachmentRequiresBreakawayAndNeverFallsBackIntoTheJob(t *testin
 	}
 }
 
-// brokerCommand writes a marker when the broker starts it.
+// brokerCommand is this test binary run as TestHelperBrokerMarker, which writes the
+// marker; the broker hands it this process's environment.
 func brokerCommand(t *testing.T) (*exec.Cmd, string) {
 	t.Helper()
 	wait, before := brokerWait, beforeBroker
 	t.Cleanup(func() { brokerWait, beforeBroker = wait, before })
-	marker := filepath.Join(t.TempDir(), "started")
-	cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), "/c", "echo started>"+marker)
+	marker := filepath.Join(t.TempDir(), "a dir with spaces", "started")
+	if err := os.Mkdir(filepath.Dir(marker), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ADA_BROKER_MARKER", marker)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperBrokerMarker$")
 	cmd.Dir = detachDir()
 	return cmd, marker
+}
+
+func TestHelperBrokerMarker(t *testing.T) {
+	if marker := os.Getenv("ADA_BROKER_MARKER"); marker != "" {
+		if err := os.WriteFile(marker, []byte("started\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestTheBrokersTimeCountsFromWhenItStarts(t *testing.T) {
