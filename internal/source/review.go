@@ -555,23 +555,33 @@ func (w *Workspaces) RemoveWorktree(project, attempt string) error {
 		return fmt.Errorf("identifier %q or %q cannot name a worktree", project, attempt)
 	}
 	defer w.lock(project)()
-	dir := filepath.Join(w.Root, project)
-	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if !realDir(dir) {
-		return mismatch("the project's state directory is not a real directory")
-	}
-	parent := filepath.Dir(w.WorktreePath(project, attempt))
-	if _, err := os.Lstat(parent); err == nil {
-		if !realDir(parent) {
-			return mismatch("the worktrees directory is not a real directory")
+	notReal := func(err error, what string) error {
+		if errors.Is(err, errNotReal) {
+			return mismatch("%s is not a real directory", what)
 		}
-		if err := removeTreeNoFollow(w.WorktreePath(project, attempt)); err != nil {
+		return err
+	}
+	state, err := w.openState()
+	if state == nil {
+		return err
+	}
+	defer state.Close()
+	proj, err := w.enterReal(state, filepath.Join(w.Root, project))
+	if proj == nil {
+		return notReal(err, "the project's state directory")
+	}
+	defer proj.Close()
+	wt := w.WorktreePath(project, attempt)
+	parent, err := w.enterReal(proj, filepath.Dir(wt))
+	if err != nil {
+		return notReal(err, "the worktrees directory")
+	}
+	if parent != nil {
+		err := w.removeIn(parent, wt)
+		parent.Close()
+		if err != nil {
 			return err
 		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
 	}
 	if w.afterWorktreeRemoved != nil {
 		if err := w.afterWorktreeRemoved(); err != nil {
@@ -579,14 +589,17 @@ func (w *Workspaces) RemoveWorktree(project, attempt string) error {
 		}
 	}
 	repo := w.repo(project)
-	admins := filepath.Join(repo, "worktrees")
-	if _, err := os.Lstat(admins); errors.Is(err, fs.ErrNotExist) {
-		return nil
+	clone, err := w.enterReal(proj, repo)
+	if clone == nil {
+		return notReal(err, "the clone's worktrees directory")
 	}
-	if !realDir(repo) || !realDir(admins) {
-		return mismatch("the clone's worktrees directory is not a real directory")
+	defer clone.Close()
+	admins, err := w.enterReal(clone, filepath.Join(repo, "worktrees"))
+	if admins == nil {
+		return notReal(err, "the clone's worktrees directory")
 	}
-	return removeTreeNoFollow(w.adminDir(project, attempt))
+	defer admins.Close()
+	return w.removeIn(admins, w.adminDir(project, attempt))
 }
 
 // Continue gives a refined attempt its worktree on the task's existing branch ada/<task>, from
