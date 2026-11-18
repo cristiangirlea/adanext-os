@@ -135,7 +135,9 @@ records stay loadable, README and PLAN.md updated, tests first.
   the artifact writer surfaces and stops the task.
 - [x] **M2.4 The window can close.** Done as M2.4a queue (#64: #70, 2026-10-15, merge
   `5e03a28`), M2.4b UI and shell (done: #68, 2026-10-15, merge `a73fae4`) and M2.4c window
-  lifetime (#75 with #69: #76, 2026-10-16, merge `4ef4e5c`).
+  lifetime (#75 with #69: #76, 2026-10-16, merge `4ef4e5c`). The browser adapter's share of #4
+  and #5 (`EventSource`, the tests against both adapters) stays with M4b, as the decisions log,
+  2026-10-16, says.
   A minimal Electron shell (main and preload in `desktop/`, one
   React view of tasks and events in `ui/`, the app `adad` serves in M4b) that connects to `adad`,
   or starts it independently of its own process tree.
@@ -452,7 +454,7 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   AdaClient call until a scope needs it; nothing outside the existing methods), the live status),
   and the resize handle (mouse and keyboard, limits); an accessibility pass; no new dependency in
   `package.json`.
-- [x] **M4.4b The workspace UI** (#120: #123, 2026-10-28, into `main` with #126).
+- [x] **M4.4b The workspace UI** (#120: #123, 2026-10-29, into `main` with #126).
   Builds on M4.4a: its tokens, themes, motion rules, effect
   registry, palette and resize handle. The plan's practical layout (`docs/plan.md` section 3) in `ui/`,
   through `AdaClient` only. Left navigation: projects and active tasks. Main area: the task and
@@ -488,7 +490,7 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   Acceptance: both demonstrations recorded with the sign-in status before each; the Playwright
   flow green on the pull request's ubuntu-latest job (under xvfb) and on the windows-latest job
   of the push to main after M4.4b merges.
-  Not ticked: the opt-in demonstration through the app is merged (#124: #125, 2026-10-28, into
+  Not ticked: the opt-in demonstration through the app is merged (#124: #125, 2026-10-29, into
   `main` with #126); the demonstrations are not recorded yet (#124 open), and the Windows CI job
   on `main` is red (#127 open).
 
