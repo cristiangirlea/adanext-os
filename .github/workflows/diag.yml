@@ -1,0 +1,36 @@
+name: diag
+
+# Diagnostic only, never merged: measures the Windows process broker on a hosted runner.
+on:
+  push:
+    branches: [diag/windows-broker]
+
+jobs:
+  diag:
+    runs-on: windows-latest
+    env:
+      GOFLAGS: -p=4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: machine
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | Format-List
+          "cores: $env:NUMBER_OF_PROCESSORS"
+          "bare powershell 1: " + [int](Measure-Command { powershell.exe -NoProfile -NonInteractive -Command "exit 0" }).TotalMilliseconds + " ms"
+          "bare powershell 2: " + [int](Measure-Command { powershell.exe -NoProfile -NonInteractive -Command "exit 0" }).TotalMilliseconds + " ms"
+      - name: build the test binary first
+        shell: bash
+        run: go test -count=1 -run '^$' ./cmd/adad/
+      - name: broker diagnostics
+        shell: bash
+        env:
+          ADA_DIAG: "1"
+        run: go test -count=1 -v -timeout 40m -run '^TestDiagBroker$' ./cmd/adad/
+      - name: the two failing tests alone
+        if: always()
+        shell: bash
+        run: go test -count=1 -v -run 'TestBrokerPathReleases|TestDesktopJobWithoutBreakaway' ./cmd/adad/
