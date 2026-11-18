@@ -491,8 +491,8 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   flow green on the pull request's ubuntu-latest job (under xvfb) and on the windows-latest job
   of the push to main after M4.4b merges.
   Not ticked: the opt-in demonstration through the app is merged (#124: #125, 2026-10-29, into
-  `main` with #126); the demonstrations are not recorded yet (#124 open), and the Windows CI job
-  on `main` is red (#127 open).
+  `main` with #126); the demonstrations are not recorded yet (#124 open). The Windows CI
+  job on `main` passes again since #139 (#127, 2026-11-18, `763a797`).
 
 - [x] **M4.6 Secret scan of the agent's changes** (#130: #132, 2026-11-06).
   The decisions log, 2026-11-06. After

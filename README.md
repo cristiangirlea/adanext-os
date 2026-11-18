@@ -13,9 +13,8 @@ integrate.
 ## Status
 
 Milestones M1 (in the Harness repository) to M3 are merged, and so is the code of M4. M4 stays
-in progress until its demonstrations are recorded (#124) and the Windows CI job on `main` passes
-again (#127). M0 waits on two owner actions: branch protection for `main`, and which machine
-details and local paths leave the docs.
+in progress until its demonstrations are recorded (#124). M0 waits on two owner actions: branch
+protection for `main`, and which machine details and local paths leave the docs.
 
 With a development build, the Electron app in `desktop/` started from source, a person can import
 a project, start a task on the claude or codex CLI through the pinned engine, follow its activity,
