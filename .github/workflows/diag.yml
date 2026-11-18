@@ -1,6 +1,6 @@
 name: diag
 
-# Diagnostic only, never merged: measures the Windows process broker on a hosted runner.
+# Diagnostic only, never merged: runs the Go tests on a hosted Windows runner as the check does.
 on:
   push:
     branches: [diag/windows-broker]
@@ -20,12 +20,5 @@ jobs:
           go-version-file: go.mod
       - name: go vet and build, as the check does
         run: go vet ./... && go build ./...
-      - name: every package at once, as the check does, with the broker timed first in cmd/adad
-        env:
-          ADA_DIAG: "1"
-        run: go test -count=1 -v -timeout 40m ./... > full.log 2>&1; echo "exit=$?"; grep -E "^(ok|FAIL|---)|aaa_diag|=== (deny|nojob|allow)| ms  |brokerDetached|launcher|adad:" full.log | grep -v -E "^--- PASS" | cut -c1-220
-      - name: cmd/adad alone afterwards
-        if: always()
-        env:
-          ADA_DIAG: "1"
-        run: go test -count=1 -v -timeout 20m ./cmd/adad/ > alone.log 2>&1; echo "exit=$?"; grep -E "^(ok|FAIL|---)|aaa_diag|=== (deny|nojob|allow)| ms  |brokerDetached|launcher|adad:" alone.log | grep -v -E "^--- PASS" | cut -c1-220
+      - name: go test, every package at once, as the check does
+        run: go test -count=1 -v ./... > full.log 2>&1; code=$?; grep -E "^(ok|FAIL)|^--- FAIL|first PowerShell|Broker|DesktopJob|launcher|did not finish|could not start" full.log | cut -c1-220; exit $code
