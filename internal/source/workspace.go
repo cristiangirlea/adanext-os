@@ -87,6 +87,9 @@ type Workspaces struct {
 	AfterSync func(ctx context.Context, cloned bool)
 	// afterWorktreeRemoved is a test seam between RemoveWorktree's two steps, a crash there.
 	afterWorktreeRemoved func() error
+	// beforeEnter and afterOpen are test seams around a directory's open: after it is seen,
+	// and before what was opened is compared with it.
+	beforeEnter, afterOpen func(path string)
 }
 
 func (w *Workspaces) repo(project string) string {

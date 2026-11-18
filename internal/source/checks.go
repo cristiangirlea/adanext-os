@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -367,91 +368,179 @@ func (w *Workspaces) RemoveCheckWorktree(project, attempt, runID, adminName stri
 // a real one: a link or reparse point there is a mismatch, left in place with
 // what lies behind it. A missing directory leaves nothing to remove.
 func (w *Workspaces) removeCheckWorktreeLocked(project, attempt, runID, adminName string) error {
-	dir := filepath.Join(w.Root, project)
-	if n, err := w.realDirs(dir); n == 0 {
+	state, err := w.openState()
+	if state == nil {
 		return err
 	}
+	defer state.Close()
+	dir := filepath.Join(w.Root, project)
+	proj, err := w.enterDir(state, dir)
+	if proj == nil {
+		return err
+	}
+	defer proj.Close()
 	wt := w.CheckWorktreePath(project, attempt, runID)
 	checks, attemptDir := filepath.Join(dir, "checks"), filepath.Dir(wt)
-	n, wtErr := w.realDirs(checks, attemptDir)
-	if n == 2 {
-		wtErr = removeTreeNoFollow(wt)
-		_ = os.Remove(attemptDir)
-	}
-	if n >= 1 {
-		_ = os.Remove(checks)
-	}
+	wtErr := w.removeBelow(proj, []string{checks, attemptDir}, wt, true)
 	repo := w.repo(project)
-	admins := filepath.Join(repo, "worktrees")
-	n, adminErr := w.realDirs(repo, admins)
-	if n == 2 {
-		adminErr = removeTreeNoFollow(filepath.Join(admins, adminName))
-	}
+	adminErr := w.removeBelow(proj, []string{repo, filepath.Join(repo, "worktrees")}, filepath.Join(repo, "worktrees", adminName), false)
 	return errors.Join(wtErr, adminErr)
 }
 
-// realDirs checks paths, each inside the one before, in order, and reports how
-// many of them, from the first, are real directories. It stops at the first
-// missing one, and one that is a link, a reparse point or not a directory is a
-// mismatch.
-func (w *Workspaces) realDirs(paths ...string) (int, error) {
-	for i, path := range paths {
-		info, err := os.Lstat(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			return i, nil
-		}
-		if err != nil {
-			return i, err
-		}
-		if !info.IsDir() || isLink(path, info) {
-			rel, _ := filepath.Rel(w.Root, path)
-			return i, mismatch("%s is not a real directory", filepath.ToSlash(rel))
-		}
+// removeBelow enters dirs, each inside the one before, from base, and removes
+// target from the last. With prune it then removes the dirs it emptied, the
+// deepest first. It stops at a missing directory.
+func (w *Workspaces) removeBelow(base *os.Root, dirs []string, target string, prune bool) error {
+	if len(dirs) == 0 {
+		return w.removeIn(base, target)
 	}
-	return len(paths), nil
+	next, err := w.enterDir(base, dirs[0])
+	if next == nil {
+		return err
+	}
+	err = w.removeBelow(next, dirs[1:], target, prune)
+	next.Close()
+	if prune {
+		// Only an empty one goes.
+		_ = base.Remove(filepath.Base(dirs[0]))
+	}
+	return err
 }
 
-func removeTreeNoFollow(path string) error {
-	info, err := os.Lstat(path)
+// errNotReal is a path that is a link, a reparse point or not a directory, or
+// one that changed between being seen and being opened.
+var errNotReal = errors.New("not a real directory")
+
+// enterDir is enterReal with a mismatch that names the directory.
+func (w *Workspaces) enterDir(base *os.Root, path string) (*os.Root, error) {
+	root, err := w.enterReal(base, path)
+	if errors.Is(err, errNotReal) {
+		rel, _ := filepath.Rel(w.Root, path)
+		return nil, mismatch("%s is not a real directory", filepath.ToSlash(rel))
+	}
+	return root, err
+}
+
+// openState opens Ada's state directory, nil when there is none yet.
+func (w *Workspaces) openState() (*os.Root, error) {
+	state, err := os.OpenRoot(w.Root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return state, err
+}
+
+// enterReal opens path, an entry of the open directory base, only when it is a
+// real directory, and checks that what it opened is what it saw and that the
+// name still holds it: a link left at the name is refused. A missing one is nil.
+func (w *Workspaces) enterReal(base *os.Root, path string) (*os.Root, error) {
+	name := filepath.Base(path)
+	// Lstat reports a link or a junction as no directory.
+	info, err := base.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, errNotReal
+	}
+	if w.beforeEnter != nil {
+		w.beforeEnter(path)
+	}
+	same := func() bool {
+		now, err := base.Lstat(name)
+		return err == nil && now.IsDir() && os.SameFile(info, now)
+	}
+	for try := 0; ; try++ {
+		// Through the name, so anything but a directory is refused and never waited on.
+		root, err := base.OpenRoot(name + "/.")
+		var now os.FileInfo
+		if err == nil {
+			if w.afterOpen != nil {
+				w.afterOpen(path)
+			}
+			if now, err = root.Stat("."); err != nil {
+				root.Close()
+			}
+		}
+		if errors.Is(err, fs.ErrPermission) && try == 0 && same() {
+			// A directory it may not read or search cannot be opened to be checked first.
+			_ = base.Chmod(name, 0o700)
+			continue
+		}
+		if err != nil {
+			// A link that leaves base is refused by the open itself.
+			if !same() {
+				return nil, errNotReal
+			}
+			return nil, err
+		}
+		if !os.SameFile(info, now) || !same() {
+			root.Close()
+			return nil, errNotReal
+		}
+		return root, nil
+	}
+}
+
+// removeIn removes path, an entry of the open directory dir, without following
+// a link: a link goes as itself, and a directory is entered through dir.
+func (w *Workspaces) removeIn(dir *os.Root, path string) error {
+	name := filepath.Base(path)
+	info, err := dir.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if isLink(path, info) || !info.IsDir() {
-		// Chmod follows a link, so only a real file loses a read-only bit first.
-		if !isLink(path, info) && info.Mode().IsRegular() {
-			_ = os.Chmod(path, 0o600)
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if !info.IsDir() {
+		if err := dir.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		return nil
 	}
-	// A real directory, so chmod changes it alone: a read-only one must open and lose entries.
-	_ = os.Chmod(path, 0o700)
-	entries, err := os.ReadDir(path)
+	sub, err := w.enterReal(dir, path)
+	if errors.Is(err, errNotReal) {
+		return mismatch("%s changed while it was being removed", name)
+	}
+	if sub == nil {
+		return err
+	}
+	// Through the handle, so only this directory changes: a read-only one must lose entries.
+	_ = sub.Chmod(".", 0o700)
+	entries, err := readNames(sub)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
+		sub.Close()
 		return err
 	}
 	var firstErr error
 	for _, entry := range entries {
-		child := filepath.Join(path, entry.Name())
-		if err := removeTreeNoFollow(child); err != nil && firstErr == nil {
+		if err := w.removeIn(sub, filepath.Join(path, entry)); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
+	sub.Close()
 	if firstErr != nil {
 		return firstErr
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := dir.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
+}
+
+func readNames(dir *os.Root) ([]string, error) {
+	f, err := dir.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(-1)
+	slices.Sort(names)
+	return names, err
 }
 
 // ResolveWorkdirNoFollow resolves rel inside worktree using no-follow directory
