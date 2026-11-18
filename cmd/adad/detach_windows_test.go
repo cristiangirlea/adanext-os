@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -234,8 +235,30 @@ func waitProcessGone(pid int, created string, timeout time.Duration) error {
 	return nil
 }
 
+var firstPowerShell sync.Once
+
+// warmPowerShell starts PowerShell once, so a machine's slow first start does not count
+// against the broker's limit.
+func warmPowerShell(t *testing.T) {
+	t.Helper()
+	firstPowerShell.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		// The modules the broker's script loads.
+		script := "$null=Get-Service Winmgmt; $null=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly"
+		warm := exec.CommandContext(ctx, filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", script)
+		warm.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+		start := time.Now()
+		if out, err := warm.CombinedOutput(); err != nil {
+			t.Fatalf("the first PowerShell start: %v\n%s", err, out)
+		}
+		t.Logf("the first PowerShell start took %v", time.Since(start).Round(time.Millisecond))
+	})
+}
+
 // The broker can take seconds; the launcher's output must not wait for it.
 func TestBrokerPathReleasesTheLaunchersOutputBeforeTheBroker(t *testing.T) {
+	warmPowerShell(t)
 	dir := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -292,6 +315,7 @@ func TestBrokerPathReleasesTheLaunchersOutputBeforeTheBroker(t *testing.T) {
 }
 
 func TestDesktopJobWithoutBreakawayUsesTheOwnerProcessBroker(t *testing.T) {
+	warmPowerShell(t)
 	testDetachedCoordinator(t, jobDeniesBreakaway)
 }
 
@@ -328,6 +352,7 @@ func TestDesktopDetachmentRequiresBreakawayAndNeverFallsBackIntoTheJob(t *testin
 // marker; the broker hands it this process's environment.
 func brokerCommand(t *testing.T) (*exec.Cmd, string) {
 	t.Helper()
+	warmPowerShell(t)
 	wait, before := brokerWait, beforeBroker
 	t.Cleanup(func() { brokerWait, beforeBroker = wait, before })
 	marker := filepath.Join(t.TempDir(), "a dir with spaces", "started")
