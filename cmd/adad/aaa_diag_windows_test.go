@@ -29,6 +29,7 @@ $sw=[Diagnostics.Stopwatch]::StartNew()
 function say($m){ [Console]::Out.WriteLine(("{0,7} ms  {1}" -f $sw.ElapsedMilliseconds,$m)); [Console]::Out.Flush() }
 say ("powershell " + $PSVersionTable.PSVersion)
 say ("winmgmt " + (Get-Service Winmgmt).Status)
+say ("processes " + (Get-Process).Count + ", powershell " + @(Get-Process powershell -ErrorAction SilentlyContinue).Count + ", WmiPrvSE " + @(Get-Process WmiPrvSE -ErrorAction SilentlyContinue).Count)
 `
 
 const diagCIM = `$environment=[string[]]([Environment]::GetEnvironmentVariables('Process').GetEnumerator() | ForEach-Object { $_.Key+'='+$_.Value })
@@ -139,10 +140,8 @@ func TestDiagBroker(t *testing.T) {
 	}
 	out := filepath.Join(t.TempDir(), "diag.txt")
 	modes := []string{
-		"nojob-bare", "nojob-cim", "nojob-cim",
-		"deny-bare", "deny-cim", "deny-cim", "deny-cimnoenv", "deny-wmiclass",
-		"allow-cim", "nojob-wmiclass",
-		"nojob-real", "deny-real", "deny-realdrop",
+		"deny-cim", "deny-wmiclass", "deny-real", "nojob-cim",
+		"deny-cim", "deny-real", "deny-wmiclass", "nojob-bare",
 	}
 	for _, mode := range modes {
 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)

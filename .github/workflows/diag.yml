@@ -10,27 +10,22 @@ jobs:
     runs-on: windows-latest
     env:
       GOFLAGS: -p=4
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: machine
-        shell: pwsh
-        run: |
-          Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | Format-List
-          "cores: $env:NUMBER_OF_PROCESSORS"
-          "bare powershell 1: " + [int](Measure-Command { powershell.exe -NoProfile -NonInteractive -Command "exit 0" }).TotalMilliseconds + " ms"
-          "bare powershell 2: " + [int](Measure-Command { powershell.exe -NoProfile -NonInteractive -Command "exit 0" }).TotalMilliseconds + " ms"
-      - name: build the test binary first
-        shell: bash
-        run: go test -count=1 -run '^$' ./cmd/adad/
-      - name: broker diagnostics
-        shell: bash
+      - name: go vet and build, as the check does
+        run: go vet ./... && go build ./...
+      - name: every package at once, as the check does, with the broker timed first in cmd/adad
         env:
           ADA_DIAG: "1"
-        run: go test -count=1 -v -timeout 40m -run '^TestDiagBroker$' ./cmd/adad/
-      - name: the two failing tests alone
+        run: go test -count=1 -v -timeout 40m ./... > full.log 2>&1; echo "exit=$?"; grep -E "^(ok|FAIL|---)|aaa_diag|=== (deny|nojob|allow)| ms  |brokerDetached|launcher|adad:" full.log | grep -v -E "^--- PASS" | cut -c1-220
+      - name: cmd/adad alone afterwards
         if: always()
-        shell: bash
-        run: go test -count=1 -v -run 'TestBrokerPathReleases|TestDesktopJobWithoutBreakaway' ./cmd/adad/
+        env:
+          ADA_DIAG: "1"
+        run: go test -count=1 -v -timeout 20m ./cmd/adad/ > alone.log 2>&1; echo "exit=$?"; grep -E "^(ok|FAIL|---)|aaa_diag|=== (deny|nojob|allow)| ms  |brokerDetached|launcher|adad:" alone.log | grep -v -E "^--- PASS" | cut -c1-220
