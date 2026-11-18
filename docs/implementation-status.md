@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated 2026-10-26. Statuses: not started, in progress, implemented (code merged), verified
+Updated 2026-11-18. Statuses: not started, in progress, implemented (code merged), verified
 (evidence below names the revision, commands and results). The plan is `docs/plan.md`; the slices
 are in `docs/backlog.md`.
 
@@ -8,13 +8,14 @@ are in `docs/backlog.md`.
 |---|---|---|---|
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
-| M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); M2.1 verified | The open follow-up issues from the M2 reviews |
-| M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100 | M4 first local workflow |
-| M4 First local workflow | in progress | Slices in `docs/backlog.md`; M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) on `m4/checks` | M4.3 |
+| M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); follow-ups #82, #88, #94, #96, #101, #103, #107 and #111 (the last 2026-10-25); M2.1 verified | The open follow-up issues from the M2 reviews |
+| M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100 | Open: #83 (a repository in OneDrive with online-only metadata), #89 (artifact origins when content repeats) |
+| M4 First local workflow | in progress | Slices in `docs/backlog.md` (#109, #117); M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) #115; M4.3 (#118) #122, M4.4a (#119) #121, M4.4b (#120) #123 and M4.5's opt-in demonstration (#124) #125, into `main` with #126 (`b36259f`); M4.6 (#130) #132; the experience card (#128) #129; check worktree removal through a linked parent refused, #134 (`aa72d93`, 2026-11-18); M4.2 to M4.4b and M4.6 implemented, none of them verified | M4.5's demonstrations on Windows and Ubuntu (#124, open; owner action 13). The Windows CI job on `main` passes again at `763a797` (#127: #137 and #139, 2026-11-18). M4 stays in progress until the demonstrations are recorded |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
+| M4c Editor integration | not started | `docs/backlog.md` (#93); #91 and #92 open | After M4 (decisions log, 2026-10-18) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
-| M6 Resume intelligence | not started | | |
-| M7 Review and integration | not started | | |
+| M6 Resume intelligence | not started | The citation support check in `docs/backlog.md` (#133; #131 open) | |
+| M7 Review and integration | not started | The export's secret scan in `docs/backlog.md` (#130, decisions log, 2026-11-06) | |
 | M8 Recovery and routing | not started | | |
 | M9 Packaging and dogfood | not started | | |
 

@@ -133,7 +133,12 @@ records stay loadable, README and PLAN.md updated, tests first.
   `recovery_required`; it is never replayed. Acceptance: a fake engine speaking the protocol;
   cancel, engine crash, `adad` crash and restart, truncated stream, duplicate start; disk-full on
   the artifact writer surfaces and stops the task.
-- [ ] **M2.4 The window can close.** A minimal Electron shell (main and preload in `desktop/`, one
+- [x] **M2.4 The window can close.** Done as M2.4a queue (#64: #70, 2026-10-15, merge
+  `5e03a28`), M2.4b UI and shell (done: #68, 2026-10-15, merge `a73fae4`) and M2.4c window
+  lifetime (#75 with #69: #76, 2026-10-16, merge `4ef4e5c`). The browser adapter's share of #4
+  and #5 (`EventSource`, the tests against both adapters) stays with M4b, as the decisions log,
+  2026-10-16, says.
+  A minimal Electron shell (main and preload in `desktop/`, one
   React view of tasks and events in `ui/`, the app `adad` serves in M4b) that connects to `adad`,
   or starts it independently of its own process tree.
   Acceptance, with Playwright against a real `adad` and a fake engine: start a task, close the
@@ -307,7 +312,8 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   `requested`; a fixture repository with a project hook writing a marker is reported, and the
   result is recorded; without the opt-in no live run starts; each CLI's sign-in status is
   recorded before its run; the live runs are recorded.
-- [ ] **M4.2 Checks.** A task declares its check commands: argv lists, a working directory
+- [x] **M4.2 Checks** (#114, #108: #115, 2026-10-26).
+  A task declares its check commands: argv lists, a working directory
   inside the worktree, a timeout of at most 30 minutes, and output capped at 16 MiB per check;
   output beyond the cap is read and discarded, the log marked truncated, and the check keeps
   running. There are at most 16 checks per task. They are part of the task's revision and are never discovered from the repository. A check
@@ -361,7 +367,8 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   an agent commit is kept; an agent reset below the imported-changes commit goes to recovery;
   Stop and a restart during `verifying` end as stated; a non-member reading a check log gets
   404.
-- [ ] **M4.3 Changes and review.** `GET /v1/tasks/{id}/changes` returns the task's own changes,
+- [x] **M4.3 Changes and review** (#118: #122, 2026-10-28, into `main` with #126).
+  `GET /v1/tasks/{id}/changes` returns the task's own changes,
   the diff from the imported-changes commit to the agent-changes commit: the file list with
   each file's status and patch, binary files marked. It is capped at stated numbers (files,
   bytes per file, bytes in all), with truncation marked; members only (404 otherwise). It runs
@@ -396,7 +403,8 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   worktree, and the worktree itself replaced by a junction, all pointing at a directory with a
   marker: removal leaves the marker; another attempt's missing worktree keeps its admin
   directory; a crash between the removal steps finishes on the next try.
-- [ ] **M4.4a UI foundation.** The base the workspace UI is built on, in `ui/`, with no new
+- [x] **M4.4a UI foundation** (#119: #121, 2026-10-28, into `main` with #126).
+  The base the workspace UI is built on, in `ui/`, with no new
   dependency in `package.json`.
   Tokens. CSS custom properties in tiers: five background levels (bg, sidebar, surface, elevated,
   overlay); border and text in three strengths each; an accent with `-text`, `-dim` and `-fg`;
@@ -446,7 +454,8 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   AdaClient call until a scope needs it; nothing outside the existing methods), the live status),
   and the resize handle (mouse and keyboard, limits); an accessibility pass; no new dependency in
   `package.json`.
-- [ ] **M4.4b The workspace UI.** Builds on M4.4a: its tokens, themes, motion rules, effect
+- [x] **M4.4b The workspace UI** (#120: #123, 2026-10-29, into `main` with #126).
+  Builds on M4.4a: its tokens, themes, motion rules, effect
   registry, palette and resize handle. The plan's practical layout (`docs/plan.md` section 3) in `ui/`,
   through `AdaClient` only. Left navigation: projects and active tasks. Main area: the task and
   its activity, events rendered by kind instead of raw JSON. A resizable work area: Changes (a
@@ -481,8 +490,12 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   Acceptance: both demonstrations recorded with the sign-in status before each; the Playwright
   flow green on the pull request's ubuntu-latest job (under xvfb) and on the windows-latest job
   of the push to main after M4.4b merges.
+  Not ticked: the opt-in demonstration through the app is merged (#124: #125, 2026-10-29, into
+  `main` with #126); the demonstrations are not recorded yet (#124 open). The Windows CI
+  job on `main` passes again since #139 (#127, 2026-11-18, `763a797`).
 
-- [ ] **M4.6 Secret scan of the agent's changes** (#130). The decisions log, 2026-11-06. After
+- [x] **M4.6 Secret scan of the agent's changes** (#130: #132, 2026-11-06).
+  The decisions log, 2026-11-06. After
   the agent-changes commit, `adad` scans the lines the task's changes add (base to commit) for
   credentials and records findings without their values (migration 0011); changes carries the
   scan; accept answers each open finding as a test value (allow-listed with a reason) or a real

@@ -12,7 +12,16 @@ integrate.
 
 ## Status
 
-Early. Milestone M0 (baseline) is in progress. Nothing here is usable yet.
+Milestones M1 (in the Harness repository) to M3 are merged, and so is the code of M4. M4 stays
+in progress until its demonstrations are recorded (#124). M0 waits on two owner actions: branch
+protection for `main`, and which machine details and local paths leave the docs.
+
+With a development build, the Electron app in `desktop/` started from source, a person can import
+a project, start a task on the claude or codex CLI through the pinned engine, follow its activity,
+run the checks the task declares, read its changes and files, and review it: findings, refine or
+accept. Agents run locally only; the VMware virtual machine is milestone M5 and not built yet.
+Also not there yet: an installer or a release (M9), the web interface (M4b), and the later
+milestones.
 
 - `docs/plan.md`: the accepted plan.
 - `docs/implementation-status.md`: what is done, with evidence, and the decisions log.
