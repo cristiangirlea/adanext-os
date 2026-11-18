@@ -651,6 +651,56 @@ func TestCheckWorktreeAndAdminDirAreRemovedAndCrashFinishesOnNextTry(t *testing.
 	}
 }
 
+func TestALinkedCheckDirectoryRefusesTheCheckAndKeepsItsLeaseUntilTheLinkIsGone(t *testing.T) {
+	e, s, _, _, _ := workspaceExecutor(t, "happy")
+	e.cfg.CancelGrace = naturalExitGrace
+	outside := t.TempDir()
+	marker := filepath.Join(outside, "marker.txt")
+	writeFile(t, marker, "keep me\n")
+	link := filepath.Dir(e.cfg.Workspaces.CheckWorktreePath("p", "attempt", "run"))
+	e.beforeCheck = func(string) {
+		if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+			t.Error(err)
+		}
+		if runtime.GOOS == "windows" {
+			if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
+				t.Errorf("mklink /J: %v: %s", err, out)
+			}
+		} else if err := os.Symlink(outside, link); err != nil {
+			t.Error(err)
+		}
+	}
+	setTaskChecksForTest(t, s, []store.CheckDefinition{
+		{Name: "pass", Argv: checkHelperArgv("pass")},
+	})
+	e.LaunchAttempt("attempt")
+	task := waitTaskState(t, s, store.AwaitingReview)
+	results := task.Attempt.CheckResults()
+	if len(results) != 1 || results[0].State != store.CheckNotRun {
+		t.Fatalf("results = %+v, want one not run", results)
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 1 {
+		t.Fatalf("the directory behind the link holds %v: %v", entries, err)
+	}
+	// The baseline's worktree goes under the same linked directory, so its lease stays too.
+	leases, err := s.ListCheckWorktrees(context.Background(), "p")
+	kept := false
+	for _, l := range leases {
+		kept = kept || l.RunID == results[0].ID
+	}
+	if err != nil || !kept {
+		t.Fatalf("leases = %+v, %v, want the refused check's among them", leases, err)
+	}
+
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	e.sweepCheckWorktrees(context.Background(), "p")
+	if leases, err := s.ListCheckWorktrees(context.Background(), "p"); err != nil || len(leases) != 0 {
+		t.Fatalf("leases after the link is gone = %+v, %v", leases, err)
+	}
+}
+
 func TestCheckWorkdirLinkToOutsideIsRefused(t *testing.T) {
 	outside := t.TempDir()
 	base := t.TempDir()
