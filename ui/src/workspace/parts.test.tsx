@@ -279,10 +279,11 @@ describe("the activity", () => {
       { seq: 3, kind: "result", payload: { v: 1, type: "result", result: { status: "ok" } } },
       { seq: 4, kind: "executor_error", payload: { error: "preparing deadline exceeded" } },
       { seq: 5, kind: "cancel", payload: { reason: "coordinator stopped by the owner" } },
+      { seq: 6, kind: "check_cleanup_refused", payload: { run_id: "chk_1", reason: "p/checks/a is not a real directory" } },
     ];
     render(<Activity events={events} stream="connected" hasAttempt />);
     const items = within(screen.getByRole("list", { name: "Events" })).getAllByRole("listitem");
-    expect(items.map((i) => i.getAttribute("data-seq"))).toEqual(["1", "2", "3", "4", "5"]);
+    expect(items.map((i) => i.getAttribute("data-seq"))).toEqual(["1", "2", "3", "4", "5", "6"]);
     expect(items[0]!.textContent).toContain("I read <b>main.go</b>");
     expect(items[0]!.querySelector("b")).toBeNull();
     expect(items[0]!.textContent).not.toContain('"attempt_id"');
@@ -291,6 +292,9 @@ describe("the activity", () => {
     expect(items[2]!.getAttribute("data-tone")).toBe("good");
     expect(within(items[3]!).getByText("preparing deadline exceeded")).toBeTruthy();
     expect(within(items[4]!).getByText("coordinator stopped by the owner")).toBeTruthy();
+    expect(within(items[5]!).getByText("p/checks/a is not a real directory")).toBeTruthy();
+    expect(within(items[5]!).getByText("Check cleanup refused")).toBeTruthy();
+    expect(items[5]!.getAttribute("data-tone")).toBe("warn");
     expect(describeEvent({ seq: 9, kind: "something_new", payload: { a: 1 } }).text).toBe('{"a":1}');
   });
 });

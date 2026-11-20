@@ -651,7 +651,7 @@ func TestCheckWorktreeAndAdminDirAreRemovedAndCrashFinishesOnNextTry(t *testing.
 	}
 }
 
-func TestALinkedCheckDirectoryRefusesTheCheckAndKeepsItsLeaseUntilTheLinkIsGone(t *testing.T) {
+func TestALinkedCheckDirectoryRefusesTheCheckSaysSoOnceAndKeepsItsLeaseUntilTheLinkIsGone(t *testing.T) {
 	e, s, _, _, _ := workspaceExecutor(t, "happy")
 	e.cfg.CancelGrace = naturalExitGrace
 	outside := t.TempDir()
@@ -691,6 +691,42 @@ func TestALinkedCheckDirectoryRefusesTheCheckAndKeepsItsLeaseUntilTheLinkIsGone(
 	if err != nil || !kept {
 		t.Fatalf("leases = %+v, %v, want the refused check's among them", leases, err)
 	}
+	// Each refused lease says so once in the attempt's activity; a later sweep repeats nothing.
+	refusals := func() map[string]string {
+		t.Helper()
+		events, err := s.Events(context.Background(), "u", "attempt", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		for _, ev := range events {
+			if ev.Kind != "check_cleanup_refused" {
+				continue
+			}
+			var payload map[string]string
+			if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if _, twice := got[payload["run_id"]]; twice {
+				t.Fatalf("run %s refused twice: %s", payload["run_id"], ev.Payload)
+			}
+			got[payload["run_id"]] = payload["reason"]
+		}
+		return got
+	}
+	first := refusals()
+	if len(first) != len(leases) {
+		t.Fatalf("refusals %v for leases %+v", first, leases)
+	}
+	for _, l := range leases {
+		if reason, ok := first[l.RunID]; !ok || !strings.Contains(reason, "is not a real directory") {
+			t.Fatalf("lease %s refused with %q, %v", l.RunID, reason, ok)
+		}
+	}
+	e.sweepCheckWorktrees(context.Background(), "p")
+	if again := refusals(); len(again) != len(first) {
+		t.Fatalf("a second sweep recorded %v", again)
+	}
 
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
@@ -698,6 +734,9 @@ func TestALinkedCheckDirectoryRefusesTheCheckAndKeepsItsLeaseUntilTheLinkIsGone(
 	e.sweepCheckWorktrees(context.Background(), "p")
 	if leases, err := s.ListCheckWorktrees(context.Background(), "p"); err != nil || len(leases) != 0 {
 		t.Fatalf("leases after the link is gone = %+v, %v", leases, err)
+	}
+	if after := refusals(); len(after) != len(first) {
+		t.Fatalf("the sweep that removed them recorded %v", after)
 	}
 }
 

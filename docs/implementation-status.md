@@ -1895,7 +1895,10 @@ Evidence, left for the supervisor:
      the project directory, `checks/`, `checks/<attempt>`, the clone and the clone's
      `worktrees/` must be real directories, else removing it is a workspace mismatch that leaves
      the link and the check's lease in place for a later sweep, and preparing a check there is
-     refused, the check recorded as not run.
+     refused, the check recorded as not run. A refused removal is recorded (#143, 2026-11-20):
+     migration 0012 keeps its reason on the lease, and a new reason appends one
+     `check_cleanup_refused` event to the check's attempt, which the activity shows as a warning;
+     later sweeps with the same reason add nothing.
   9. The refined attempt is prepared by `Workspaces.Continue`, not by a sync: no fetch, the clone
      config checked against Ada's recorded hash, the branch required at the earlier attempt's
      agent-changes commit and descending from the base commit, and nothing of the snapshot

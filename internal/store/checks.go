@@ -557,6 +557,42 @@ func (s *Store) DeleteCheckWorktree(ctx context.Context, project, attempt, runID
 	return err
 }
 
+// maxRefusalReason caps the reason a refusal event keeps, far below an event's size limit.
+const maxRefusalReason = 4096
+
+// RecordCheckWorktreeRefusal keeps reason, why the lease's worktree could not
+// be removed, on the lease. When it differs from the reason kept before, it
+// appends a check_cleanup_refused event ({"run_id", "reason"}) to the lease's
+// attempt in the same transaction and reports true. A lease already gone
+// records nothing.
+func (s *Store) RecordCheckWorktreeRefusal(ctx context.Context, lease CheckWorktreeLease, reason string) (bool, error) {
+	if len(reason) > maxRefusalReason {
+		reason = strings.ToValidUTF8(reason[:maxRefusalReason], "")
+	}
+	payload, err := json.Marshal(map[string]string{"run_id": lease.RunID, "reason": reason})
+	if err != nil {
+		return false, err
+	}
+	appended := false
+	err = s.write(ctx, "", func(tx *Tx) error {
+		result, err := tx.tx.ExecContext(ctx, "UPDATE check_worktrees SET refused=? WHERE project=? AND attempt=? AND run_id=? AND refused<>?",
+			reason, lease.Project, lease.Attempt, lease.RunID, reason)
+		if err != nil {
+			return err
+		}
+		if n, err := result.RowsAffected(); err != nil || n == 0 {
+			return err
+		}
+		var seq int64
+		if err := tx.tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE attempt=?", lease.Attempt).Scan(&seq); err != nil {
+			return err
+		}
+		appended = true
+		return appendEvent(ctx, tx.tx, Event{Attempt: lease.Attempt, Seq: seq, Time: now(), Kind: "check_cleanup_refused", Payload: payload})
+	})
+	return appended && err == nil, err
+}
+
 func (s *Store) ListCheckWorktrees(ctx context.Context, project string) ([]CheckWorktreeLease, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT project,attempt,run_id,admin_name FROM check_worktrees WHERE (?='' OR project=?) ORDER BY created ASC", project, project)
 	if err != nil {

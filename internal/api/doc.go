@@ -35,7 +35,10 @@
 // fatal engine error, the `engine_notice` marked fatal is the cause and no
 // `executor_error` repeats it; `info` also when a descendant kept stderr open
 // after a clean exit; `recovery` ({"reason": ...}) when an attempt moves to
-// recovery_required. From the store: `recovery` with
+// recovery_required; `check_cleanup_refused` ({"run_id": ..., "reason": ...})
+// when a check's worktree could not be removed, once per reason, on the
+// attempt the check ran for, which may have ended (the removal is retried at
+// the next sweep and the event is not repeated). From the store: `recovery` with
 // old_generation and attempt_state for an attempt a restart abandoned, and
 // `cancel` ({"reason": ...}) for a recorded cancel or stop.
 //

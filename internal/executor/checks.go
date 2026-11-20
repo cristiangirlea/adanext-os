@@ -207,9 +207,22 @@ func (e *Executor) sweepCheckWorktrees(ctx context.Context, project string) {
 		return
 	}
 	for _, l := range leases {
-		if err := e.cfg.Workspaces.RemoveCheckWorktree(l.Project, l.Attempt, l.RunID, l.AdminName); err == nil {
-			_ = e.cfg.Store.DeleteCheckWorktree(ctx, l.Project, l.Attempt, l.RunID)
-		}
+		e.removeCheckWorktree(ctx, l)
+	}
+}
+
+// removeCheckWorktree removes a lease's worktree and then the lease. A refused
+// removal keeps the lease for the next sweep and is recorded in the lease's
+// attempt's activity, once per reason.
+func (e *Executor) removeCheckWorktree(ctx context.Context, l store.CheckWorktreeLease) {
+	ctx = context.WithoutCancel(ctx)
+	err := e.cfg.Workspaces.RemoveCheckWorktree(l.Project, l.Attempt, l.RunID, l.AdminName)
+	if err == nil {
+		_ = e.cfg.Store.DeleteCheckWorktree(ctx, l.Project, l.Attempt, l.RunID)
+		return
+	}
+	if appended, _ := e.cfg.Store.RecordCheckWorktreeRefusal(ctx, l, err.Error()); appended && e.cfg.Hub != nil {
+		e.cfg.Hub.Notify(l.Attempt)
 	}
 }
 
@@ -431,9 +444,7 @@ func (e *Executor) runSingleCheck(ctx context.Context, a store.Attempt, active *
 		adminName = prepAdmin
 	}
 	defer func() {
-		if err := e.cfg.Workspaces.RemoveCheckWorktree(project, a.ID, runID, adminName); err == nil {
-			_ = e.cfg.Store.DeleteCheckWorktree(ctx, project, a.ID, runID)
-		}
+		e.removeCheckWorktree(ctx, store.CheckWorktreeLease{Project: project, Attempt: a.ID, RunID: runID, AdminName: adminName})
 	}()
 	if err != nil {
 		return refuse("prepare check worktree: %v", err)

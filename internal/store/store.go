@@ -345,6 +345,7 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT attempt,scanned_commit,rules_version,scan_json,created FROM secret_scans LIMIT 0",
 		"SELECT project,path,path_raw,rule,reason,author,created FROM secret_allowlist LIMIT 0",
 		"SELECT secrets_json FROM reviews LIMIT 0",
+		"SELECT refused FROM check_worktrees LIMIT 0",
 	} {
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {

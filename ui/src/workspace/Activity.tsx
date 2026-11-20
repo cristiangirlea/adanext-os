@@ -55,6 +55,8 @@ export function describeEvent(event: AttemptEvent): Line {
       return { kind: event.kind, tone: "bad", label: "Ada stopped it", text: str(payload.error) || raw };
     case "recovery":
       return { kind: event.kind, tone: "warn", label: "Recovery needed", text: str(payload.reason) || raw, extra: raw };
+    case "check_cleanup_refused":
+      return { kind: event.kind, tone: "warn", label: "Check cleanup refused", text: str(payload.reason) || raw, extra: raw };
     case "cancel":
       return { kind: event.kind, tone: "warn", label: "Canceled", text: str(payload.reason) || raw };
     default:
