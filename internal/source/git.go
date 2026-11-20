@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/cristiangirlea/ada-os/internal/nowindow"
 )
 
 // Git is the git binary resolved once at start-up, with the scratch
@@ -166,6 +168,7 @@ func (g *Git) commandWith(ctx context.Context, config []string, gitDir, workTree
 		argv = append(argv, args[1:]...)
 	}
 	cmd := exec.CommandContext(ctx, g.Path, argv...)
+	nowindow.Set(cmd)
 	cmd.Env = g.env()
 	cmd.Dir = g.home
 	return cmd

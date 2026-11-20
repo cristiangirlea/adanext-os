@@ -190,3 +190,16 @@ func TestWindowsCloseTerminatesAndWaitsForJobProcesses(t *testing.T) {
 }
 
 func setsidSelf() error { return errors.New("no sessions on Windows") }
+
+func TestWindowsSupervisedProcessStartsSuspendedWithoutAConsoleWindow(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperFakeEngine$")
+	s, err := newProcessSupervisor(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	want := uint32(windows.CREATE_SUSPENDED | windows.CREATE_NO_WINDOW)
+	if got := cmd.SysProcAttr.CreationFlags; got != want {
+		t.Fatalf("creation flags = %#x, want %#x", got, want)
+	}
+}

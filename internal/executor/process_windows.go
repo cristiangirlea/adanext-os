@@ -10,6 +10,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cristiangirlea/ada-os/internal/nowindow"
 	"golang.org/x/sys/windows"
 )
 
@@ -57,6 +58,7 @@ func newProcessSupervisor(cmd *exec.Cmd) (*processSupervisor, error) {
 		return nil, err
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
+	nowindow.Set(cmd)
 	return &processSupervisor{job: job, threads: processThreads, resume: resumeThread}, nil
 }
 

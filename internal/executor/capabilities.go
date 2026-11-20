@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cristiangirlea/ada-os/internal/engine"
+	"github.com/cristiangirlea/ada-os/internal/nowindow"
 )
 
 // probeLifetime is how long a probe of the installed CLIs is reused.
@@ -93,6 +94,7 @@ func (e *Executor) hello(ctx context.Context, enginePath, dir string) (message, 
 		args = []string{"exec", "--protocol", "v1"}
 	}
 	cmd := exec.CommandContext(ctx, enginePath, args...)
+	nowindow.Set(cmd)
 	cmd.Dir = dir
 	cmd.Env = e.environment(dir)
 	cmd.WaitDelay = time.Second
@@ -143,6 +145,7 @@ func (e *Executor) cliVersion(ctx context.Context, path, dir string) (string, st
 	ctx, cancel := context.WithTimeout(ctx, e.versionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, e.versionArgs...)
+	nowindow.Set(cmd)
 	cmd.Dir = dir
 	cmd.Env = e.cliEnvironment()
 	cmd.WaitDelay = time.Second
