@@ -19,7 +19,7 @@ taking a slice, and don't reopen a recorded decision.
 | `internal/api/` | Versioned HTTP API and event subscriptions. |
 | `internal/store/` | SQLite state, schema migrations, and task records. |
 | `internal/ipc/` | Private local listener and singleton lock. |
-| `internal/nowindow/` | Starts a console program without a console window: adad runs detached on Windows, so every command it starts goes through `nowindow.Set` (a test keeps every spawn site doing so). |
+| `internal/nowindow/` | Marks a command to start without a console window (`nowindow.Set`): adad runs detached on Windows, so every command it starts sets `CREATE_NO_WINDOW` (a test scans `internal/` and `cmd/adad` for it). |
 | `internal/source/` | Reading a user's repository: the git runner, the layout, config and index read in Go, the mirror git directory, inspection with its blockers and findings (provider configuration among them), the capture a snapshot takes, and Ada's clone of each project with the attempts' worktrees and their manifests, a task's changes and files read through git, the secret scan of a change set, and a worktree's removal. |
 | `engine/engine.json` | The Harness revision Ada runs and its build's SHA-256 per platform, embedded into `adad` by `engine/pin.go`. Change it only in a slice that says why. |
 | `ui/` | The React and TypeScript app both shells load. It reaches `adad` only through `AdaClient` (`ui/src/client/api.ts`); the adapters under `ui/src/client/adapters/` are the only modules that may touch the bridge or the network. |

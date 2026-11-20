@@ -23,17 +23,14 @@ func TestHelperConsoleWindow(t *testing.T) {
 }
 
 // TestHelperDetachedParent stands in for adad: it has no console, and starts
-// the probe, through Set when ADA_NOWINDOW_SET is 1, passing on its output.
+// the probe through Set, passing on its output.
 func TestHelperDetachedParent(t *testing.T) {
 	if os.Getenv("ADA_NOWINDOW_HELPER") != "parent" {
 		t.Skip("helper process")
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperConsoleWindow$")
 	cmd.Env = append(os.Environ(), "ADA_NOWINDOW_HELPER=probe")
-	if os.Getenv("ADA_NOWINDOW_SET") == "1" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
-		Set(cmd)
-	}
+	Set(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("probe: %v\n", err)
@@ -42,15 +39,11 @@ func TestHelperDetachedParent(t *testing.T) {
 }
 
 // probeFromADetachedParent reports the console window the probe sees when a
-// console-less parent starts it.
-func probeFromADetachedParent(t *testing.T, set bool) string {
+// console-less parent starts it through Set.
+func probeFromADetachedParent(t *testing.T) string {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperDetachedParent$")
-	flag := "0"
-	if set {
-		flag = "1"
-	}
-	cmd.Env = append(os.Environ(), "ADA_NOWINDOW_HELPER=parent", "ADA_NOWINDOW_SET="+flag)
+	cmd.Env = append(os.Environ(), "ADA_NOWINDOW_HELPER=parent")
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP}
 	out, err := cmd.Output()
 	if err != nil {
@@ -66,7 +59,7 @@ func probeFromADetachedParent(t *testing.T, set bool) string {
 }
 
 func TestAChildOfAConsolelessParentStartedWithSetHasNoConsoleWindow(t *testing.T) {
-	if hwnd := probeFromADetachedParent(t, true); hwnd != "0" {
+	if hwnd := probeFromADetachedParent(t); hwnd != "0" {
 		t.Fatalf("console window = %s, want none", hwnd)
 	}
 }
@@ -78,5 +71,13 @@ func TestSetKeepsTheCreationFlagsAlreadySet(t *testing.T) {
 	want := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW)
 	if got := cmd.SysProcAttr.CreationFlags; got != want {
 		t.Fatalf("creation flags = %#x, want %#x", got, want)
+	}
+}
+
+func TestSetGivesACommandWithoutAttributesNoWindow(t *testing.T) {
+	cmd := exec.Command("unused")
+	Set(cmd)
+	if got := cmd.SysProcAttr.CreationFlags; got != windows.CREATE_NO_WINDOW {
+		t.Fatalf("creation flags = %#x, want %#x", got, uint32(windows.CREATE_NO_WINDOW))
 	}
 }
