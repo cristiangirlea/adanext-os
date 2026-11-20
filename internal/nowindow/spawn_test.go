@@ -73,15 +73,19 @@ func rootedAt(e ast.Expr, name string) bool {
 // word on its creation flags in body leaves CREATE_NO_WINDOW set: a call to
 // nowindow.Set or the executor's process supervisor (which calls Set), or a
 // SysProcAttr assignment naming the flag. Any other assignment to SysProcAttr
-// or its flags undoes it; `|=` keeps it. allowDetached accepts
-// DETACHED_PROCESS, which only adad's own relaunch may use.
+// or its flags undoes it; `|=` keeps it. The walk ends where name is given
+// another command. allowDetached accepts DETACHED_PROCESS, which only adad's
+// own relaunch may use.
 func hidden(body ast.Node, name string, from token.Pos, allowDetached bool) bool {
 	flags := []string{"CREATE_NO_WINDOW"}
 	if allowDetached {
 		flags = append(flags, "DETACHED_PROCESS")
 	}
-	state := false
+	state, done := false, false
 	ast.Inspect(body, func(n ast.Node) bool {
+		if done {
+			return false
+		}
 		if n == nil || n.Pos() < from {
 			return true
 		}
@@ -92,13 +96,22 @@ func hidden(body ast.Node, name string, from token.Pos, allowDetached bool) bool
 			}
 		case *ast.AssignStmt:
 			for i, lhs := range n.Lhs {
+				if isIdent(lhs, name) {
+					done = true
+					return false
+				}
 				if !rootedAt(lhs, name) {
 					continue
 				}
-				if n.Tok == token.OR_ASSIGN && state {
-					continue
+				switch n.Tok {
+				case token.OR_ASSIGN:
+					state = state || (i < len(n.Rhs) && names(n.Rhs[i], flags...))
+				case token.ASSIGN:
+					state = i < len(n.Rhs) && names(n.Rhs[i], flags...)
+				default:
+					// &^=, ^= and the rest can clear the flag.
+					state = false
 				}
-				state = i < len(n.Rhs) && names(n.Rhs[i], flags...)
 			}
 		}
 		return true
@@ -230,6 +243,9 @@ func TestTheSpawnGuardFindsEachFormOfAnUnhiddenCommand(t *testing.T) {
 		{"overwritten after set", "a.go", "func f() { cmd := exec.Command(\"git\"); nowindow.Set(cmd); cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED} }", 1},
 		{"flags overwritten after set", "a.go", "func f() { cmd := exec.Command(\"git\"); nowindow.Set(cmd); cmd.SysProcAttr.CreationFlags = windows.CREATE_SUSPENDED }", 1},
 		{"flags or-ed after set", "a.go", "func f() { cmd := exec.Command(\"git\"); nowindow.Set(cmd); cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED }", 0},
+		{"flag cleared after set", "a.go", "func f() { cmd := exec.Command(\"git\"); nowindow.Set(cmd); cmd.SysProcAttr.CreationFlags &^= windows.CREATE_NO_WINDOW }", 1},
+		{"name reused for a hidden command", "a.go", "func f() { cmd := exec.Command(\"git\", \"a\"); _ = cmd.Run(); cmd = exec.Command(\"git\", \"b\"); nowindow.Set(cmd); _ = cmd.Run() }", 1},
+		{"name reused, both hidden", "a.go", "func f() { cmd := exec.Command(\"git\", \"a\"); nowindow.Set(cmd); cmd = exec.Command(\"git\", \"b\"); nowindow.Set(cmd) }", 0},
 		{"set before an earlier make", "a.go", "func f() { var cmd *exec.Cmd; nowindow.Set(cmd); cmd = exec.Command(\"git\") }", 1},
 		{"var", "a.go", "func f() { var cmd = exec.Command(\"git\"); _ = cmd.Run() }", 1},
 		{"var with set", "a.go", "func f() { var cmd = exec.Command(\"git\"); nowindow.Set(cmd) }", 0},
