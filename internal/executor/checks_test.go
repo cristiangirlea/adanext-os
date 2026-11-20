@@ -723,10 +723,24 @@ func TestALinkedCheckDirectoryRefusesTheCheckSaysSoOnceAndKeepsItsLeaseUntilTheL
 			t.Fatalf("lease %s refused with %q, %v", l.RunID, reason, ok)
 		}
 	}
+	notifications := &notificationCounter{}
+	e.cfg.Hub = notifications
 	e.sweepCheckWorktrees(context.Background(), "p")
-	if again := refusals(); len(again) != len(first) {
-		t.Fatalf("a second sweep recorded %v", again)
+	if again := refusals(); len(again) != len(first) || notifications.count.Load() != 0 {
+		t.Fatalf("a second sweep recorded %v and notified %d times", again, notifications.count.Load())
 	}
+	// A refusal not recorded before wakes the attempt's subscribers once.
+	fresh := store.CheckWorktreeLease{Project: "p", Attempt: "attempt", RunID: "chk_fresh", AdminName: "chk_fresh"}
+	if err := s.RecordCheckWorktree(context.Background(), fresh); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		e.removeCheckWorktree(context.Background(), fresh)
+	}
+	if got := refusals(); len(got) != len(first)+1 || notifications.count.Load() != 1 {
+		t.Fatalf("a fresh refusal recorded %v and notified %d times", got, notifications.count.Load())
+	}
+	first = refusals()
 
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)

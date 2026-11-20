@@ -343,12 +343,12 @@ func TestARefusedCheckWorktreeRemovalIsRecordedOncePerReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	refuse(lease, "removed meanwhile", false)
-	// A long reason is cut so the event stays small.
+	// A long reason is cut so the event stays small, and never inside a character.
 	long := CheckWorktreeLease{Project: "p", Attempt: "a", RunID: "chk_2", AdminName: "chk_2"}
 	if err := s.RecordCheckWorktree(ctx, long); err != nil {
 		t.Fatal(err)
 	}
-	refuse(long, strings.Repeat("é", 5000), true)
+	refuse(long, strings.Repeat("€", 2000), true) // 4096 bytes end one byte into a three-byte rune
 
 	events, err := s.Events(ctx, "u", "a", 0)
 	if err != nil || len(events) != 3 {
@@ -365,7 +365,7 @@ func TestARefusedCheckWorktreeRemovalIsRecordedOncePerReason(t *testing.T) {
 	if err := json.Unmarshal(events[2].Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if r := payload["reason"]; len(r) > maxRefusalReason || !utf8.ValidString(r) || !strings.HasPrefix(r, "éé") {
+	if r := payload["reason"]; len(r) > maxRefusalReason || !utf8.ValidString(r) || r != strings.Repeat("€", maxRefusalReason/3) {
 		t.Fatalf("a long reason kept %d bytes, valid UTF-8 %v", len(r), utf8.ValidString(r))
 	}
 }
