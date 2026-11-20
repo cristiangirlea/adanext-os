@@ -177,7 +177,7 @@ func TestAVersionFourStoreMigratesForwardKeepingItsProjects(t *testing.T) {
 	}
 	defer upgraded.Close()
 	var version int
-	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 11 {
+	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 12 {
 		t.Fatalf("version %d: %v", version, err)
 	}
 	if _, err := upgraded.ProjectSource(ctx, "u", "p"); !errors.Is(err, ErrNoSource) {

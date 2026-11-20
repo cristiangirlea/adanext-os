@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestCheckDefinitionsValidateLimitsAndEnvironment(t *testing.T) {
@@ -311,6 +313,86 @@ func TestTaskChecksCanBeSetOnlyBeforeTheTaskStarts(t *testing.T) {
 		execute(t, s, "UPDATE tasks SET state='"+string(state)+"',revision=0 WHERE id='t1'")
 		if err := s.write(ctx, "alice", func(tx *Tx) error { return tx.SetTaskChecks(ctx, "t1", 0, defs) }); !errors.Is(err, ErrInvalidTransition) {
 			t.Errorf("checks set in %s: %v", state, err)
+		}
+	}
+}
+
+func TestARefusedCheckWorktreeRemovalIsRecordedOncePerReason(t *testing.T) {
+	s := openTestStore(t)
+	seed(t, s)
+	lease := CheckWorktreeLease{Project: "p", Attempt: "a", RunID: "chk_1", AdminName: "chk_1"}
+	if err := s.RecordCheckWorktree(ctx, lease); err != nil {
+		t.Fatal(err)
+	}
+	refuse := func(l CheckWorktreeLease, reason string, want bool) {
+		t.Helper()
+		if got, err := s.RecordCheckWorktreeRefusal(ctx, l, reason); err != nil || got != want {
+			t.Fatalf("RecordCheckWorktreeRefusal(%q) = %v, %v, want %v", reason, got, err, want)
+		}
+	}
+	refuse(lease, "p/checks/a is not a real directory", true)
+	refuse(lease, "p/checks/a is not a real directory", false) // the next sweep, the same reason
+	refuse(lease, "access is denied", true)
+
+	leases, err := s.ListCheckWorktrees(ctx, "p")
+	if err != nil || len(leases) != 1 || leases[0] != lease {
+		t.Fatalf("leases = %+v, %v, want the refused one kept", leases, err)
+	}
+	// A lease already gone records nothing.
+	if err := s.DeleteCheckWorktree(ctx, "p", "a", "chk_1"); err != nil {
+		t.Fatal(err)
+	}
+	refuse(lease, "removed meanwhile", false)
+	// A long reason is cut so the event stays small, and never inside a character.
+	long := CheckWorktreeLease{Project: "p", Attempt: "a", RunID: "chk_2", AdminName: "chk_2"}
+	if err := s.RecordCheckWorktree(ctx, long); err != nil {
+		t.Fatal(err)
+	}
+	refuse(long, strings.Repeat("€", 2000), true) // 4096 bytes end one byte into a three-byte rune
+
+	events, err := s.Events(ctx, "u", "a", 0)
+	if err != nil || len(events) != 3 {
+		t.Fatalf("events = %+v, %v, want three", events, err)
+	}
+	for i, want := range []string{"p/checks/a is not a real directory", "access is denied"} {
+		var payload map[string]string
+		if events[i].Kind != "check_cleanup_refused" || json.Unmarshal(events[i].Payload, &payload) != nil ||
+			payload["run_id"] != "chk_1" || payload["reason"] != want {
+			t.Fatalf("event %d = %s %s", i, events[i].Kind, events[i].Payload)
+		}
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(events[2].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if r := payload["reason"]; len(r) > maxRefusalReason || !utf8.ValidString(r) || r != strings.Repeat("€", maxRefusalReason/3) {
+		t.Fatalf("a long reason kept %d bytes, valid UTF-8 %v", len(r), utf8.ValidString(r))
+	}
+}
+
+func TestALeaseFromBeforeRefusalsWereKeptLoadsAndIsRecordedOnce(t *testing.T) {
+	s := openTestStore(t)
+	seed(t, s)
+	path := s.path
+	for _, q := range []string{"ALTER TABLE check_worktrees DROP COLUMN refused", "DELETE FROM schema_migrations WHERE version>=12", "PRAGMA user_version=11"} {
+		execute(t, s, q)
+	}
+	execute(t, s, `INSERT INTO check_worktrees(project,attempt,run_id,admin_name,created) VALUES ('p','a','chk_old','chk_old','then')`)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	old := CheckWorktreeLease{Project: "p", Attempt: "a", RunID: "chk_old", AdminName: "chk_old"}
+	if leases, err := upgraded.ListCheckWorktrees(ctx, "p"); err != nil || len(leases) != 1 || leases[0] != old {
+		t.Fatalf("leases after the upgrade = %+v, %v", leases, err)
+	}
+	for i, want := range []bool{true, false} {
+		if got, err := upgraded.RecordCheckWorktreeRefusal(ctx, old, "refused"); err != nil || got != want {
+			t.Fatalf("refusal %d = %v, %v, want %v", i, got, err, want)
 		}
 	}
 }
