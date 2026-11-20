@@ -15,6 +15,7 @@ import (
 
 	"github.com/cristiangirlea/ada-os/internal/api"
 	"github.com/cristiangirlea/ada-os/internal/engine"
+	"github.com/cristiangirlea/ada-os/internal/nowindow"
 )
 
 type experienceBuffer struct {
@@ -61,6 +62,7 @@ func (e *Executor) Experience(ctx context.Context) (api.Experience, error) {
 		home = filepath.Join(home, ".hrn")
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
+	nowindow.Set(cmd)
 	cmd.Path = path
 	cmd.WaitDelay = time.Second
 	cmd.Env = e.cliEnvironment()
