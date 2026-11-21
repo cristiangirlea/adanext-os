@@ -207,7 +207,7 @@ func TestReviewsFromBeforeScansReadAsAnsweringNothing(t *testing.T) {
 	reviewTask(t, s, Accepted, "ended_ok")
 	path := s.path
 	execute(t, s, `INSERT INTO reviews(id,task,attempt,reviewer,decision,reviewed_commit,ownership_generation,checks_json,secrets_json,created) VALUES ('rev_old','rt','ra','actor','accepted',?,3,'[]','[]','now')`, agentCommit)
-	for _, q := range []string{"ALTER TABLE check_worktrees DROP COLUMN refused", "DROP TABLE secret_allowlist", "DROP TABLE secret_scans", "ALTER TABLE reviews DROP COLUMN secrets_json", "DELETE FROM schema_migrations WHERE version>=11", "PRAGMA user_version=10"} {
+	for _, q := range []string{"DROP TABLE artifact_refs", "ALTER TABLE check_worktrees DROP COLUMN refused", "DROP TABLE secret_allowlist", "DROP TABLE secret_scans", "ALTER TABLE reviews DROP COLUMN secrets_json", "DELETE FROM schema_migrations WHERE version>=11", "PRAGMA user_version=10"} {
 		execute(t, s, q)
 	}
 	if err := s.Close(); err != nil {

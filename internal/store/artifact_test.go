@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -10,7 +11,7 @@ import (
 func TestArtifactMigrationFromEmptyReachesVersionThree(t *testing.T) {
 	s := openTestStore(t)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 12 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 13 {
 		t.Fatalf("version %d: %v", version, err)
 	}
 }
@@ -164,5 +165,117 @@ func TestArtifactReferencedReportsAnyCommittedReference(t *testing.T) {
 	}
 	if _, err := s.ArtifactReferenced(ctx, strings.Repeat("AB", 32)); !errors.Is(err, ErrInvalidArtifact) {
 		t.Fatalf("bad hash: %v", err)
+	}
+}
+
+func TestContentASnapshotStoredFirstIsReadThroughTheSnapshotAndEachAttemptThatStoredIt(t *testing.T) {
+	s := openTestStore(t)
+	users(t, s, "alice")
+	if err := importAs(t, s, "alice", "p1", "/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.write(ctx, "alice", func(tx *Tx) error { _, err := tx.RecordSnapshot(ctx, testSnapshot()); return err }); err != nil {
+		t.Fatal(err)
+	}
+	shared := testSnapshot().Staged
+	for _, origin := range []string{"attempt:one:event:3", "attempt:two:final", "attempt:one:final", "attempt:one:final"} {
+		if err := s.write(ctx, "u", func(tx *Tx) error { return tx.ReferenceArtifact(ctx, shared.Hash, shared.Size, origin) }); err != nil {
+			t.Fatalf("%s: %v", origin, err)
+		}
+	}
+	snap, err := s.Snapshot(ctx, "alice", "p1", "s1")
+	if err != nil || snap.Staged != shared {
+		t.Fatalf("the snapshot's staged patch: %+v %v", snap.Staged, err)
+	}
+	for _, attempt := range []string{"one", "two"} {
+		if size, err := s.ArtifactReference(ctx, attempt, shared.Hash); err != nil || size != shared.Size {
+			t.Fatalf("attempt %s: size %d, %v", attempt, size, err)
+		}
+	}
+	for _, attempt := range []string{"three", "on", "s1"} {
+		if _, err := s.ArtifactReference(ctx, attempt, shared.Hash); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("attempt %s that never stored it: %v", attempt, err)
+		}
+	}
+}
+
+func TestAnAttemptIdWithPatternCharactersMatchesOnlyItself(t *testing.T) {
+	s := openTestStore(t)
+	hash := strings.Repeat("ab", 32)
+	if err := s.write(ctx, "u", func(tx *Tx) error { return tx.ReferenceArtifact(ctx, hash, 12, "attempt:one:final") }); err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range []string{"o%e", "o_e", "%", "_ne"} {
+		if _, err := s.ArtifactReference(ctx, attempt, hash); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("attempt %q read another attempt's artifact: %v", attempt, err)
+		}
+	}
+	for _, attempt := range []string{"o%e", "o_e"} {
+		if err := s.write(ctx, "u", func(tx *Tx) error { return tx.ReferenceArtifact(ctx, hash, 12, "attempt:"+attempt+":final") }); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ArtifactReference(ctx, attempt, hash); err != nil {
+			t.Fatalf("attempt %q that stored it: %v", attempt, err)
+		}
+	}
+}
+
+func TestAReferenceThatDidNotCommitOrWasRefusedGrantsNothing(t *testing.T) {
+	s := openTestStore(t)
+	hash := strings.Repeat("ab", 32)
+	if err := s.write(ctx, "u", func(tx *Tx) error { return tx.ReferenceArtifact(ctx, hash, 12, "attempt:one:final") }); err != nil {
+		t.Fatal(err)
+	}
+	rollback := errors.New("roll back")
+	if err := s.write(ctx, "u", func(tx *Tx) error {
+		if err := tx.ReferenceArtifact(ctx, hash, 12, "attempt:three:final"); err != nil {
+			return err
+		}
+		return rollback
+	}); !errors.Is(err, rollback) {
+		t.Fatalf("rollback: %v", err)
+	}
+	// The refusal is swallowed and the transaction commits: the refused origin must not have been written.
+	if err := s.write(ctx, "u", func(tx *Tx) error {
+		if err := tx.ReferenceArtifact(ctx, hash, 13, "attempt:four:final"); !errors.Is(err, ErrArtifactConflict) {
+			return fmt.Errorf("a different size: %w", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range []string{"three", "four"} {
+		if _, err := s.ArtifactReference(ctx, attempt, hash); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("attempt %s whose reference did not commit: %v", attempt, err)
+		}
+	}
+}
+
+func TestAnArtifactStoredBeforeEveryOriginWasKeptStaysReadableByItsAttempt(t *testing.T) {
+	s := openTestStore(t)
+	path := s.path
+	hash := strings.Repeat("ab", 32)
+	for _, q := range []string{"DROP TABLE artifact_refs", "DELETE FROM schema_migrations WHERE version>=13", "PRAGMA user_version=12"} {
+		execute(t, s, q)
+	}
+	execute(t, s, "INSERT INTO artifacts(hash,size,origin,created) VALUES(?,?,?,?)", hash, 12, "attempt:old:final", "now")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	if size, err := upgraded.ArtifactReference(ctx, "old", hash); err != nil || size != 12 {
+		t.Fatalf("an artifact from before: size %d, %v", size, err)
+	}
+	if err := upgraded.write(ctx, "u", func(tx *Tx) error { return tx.ReferenceArtifact(ctx, hash, 12, "attempt:new:final") }); err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range []string{"old", "new"} {
+		if _, err := upgraded.ArtifactReference(ctx, attempt, hash); err != nil {
+			t.Fatalf("attempt %s after the upgrade: %v", attempt, err)
+		}
 	}
 }

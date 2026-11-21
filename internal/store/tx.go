@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 var (
@@ -68,22 +67,26 @@ func (tx *Tx) ReferenceArtifact(ctx context.Context, hash string, size int64, or
 	if storedSize != size {
 		return fmt.Errorf("%w: artifact %s has size %d, requested %d", ErrArtifactConflict, hash, storedSize, size)
 	}
-	return nil
+	_, err := tx.tx.ExecContext(ctx, "INSERT INTO artifact_refs(hash,origin) VALUES(?,?) ON CONFLICT DO NOTHING", hash, origin)
+	return err
 }
 
 // ArtifactReference resolves hash to the size its record holds when a record of
-// attemptID references it, that is when the row's origin is the one the executor
-// writes, attempt:<id>:<record>. The table keeps the first origin of a hash, so
-// content two attempts share resolves only for the attempt that stored it first.
-// A hash the table would refuse is both invalid and not found.
+// attemptID references it, that is when one of the hash's origins is one the
+// executor writes, attempt:<id>:<record>. Every origin that stored the content
+// counts, so content an attempt shares with a snapshot or another attempt resolves
+// for each. A hash the table would refuse is both invalid and not found.
 func (s *Store) ArtifactReference(ctx context.Context, attemptID, hash string) (int64, error) {
 	if !validArtifactHash(hash) {
 		return 0, fmt.Errorf("%w: %w: hash", ErrNotFound, ErrInvalidArtifact)
 	}
+	// Origins of this attempt sort from "attempt:<id>:" up to, not including, "attempt:<id>;"
+	// (';' follows ':'): a range the primary key seeks, with no pattern characters in the id.
+	low, high := "attempt:"+attemptID+":", "attempt:"+attemptID+";"
 	var size int64
-	var origin string
-	err := s.db.QueryRowContext(ctx, "SELECT size,origin FROM artifacts WHERE hash=?", hash).Scan(&size, &origin)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && !strings.HasPrefix(origin, "attempt:"+attemptID+":")) {
+	err := s.db.QueryRowContext(ctx, `SELECT a.size FROM artifacts a JOIN artifact_refs r ON r.hash=a.hash
+		WHERE a.hash=? AND r.origin>=? AND r.origin<? LIMIT 1`, hash, low, high).Scan(&size)
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("%w: artifact %s of attempt %s", ErrNotFound, hash, attemptID)
 	}
 	if err != nil {
