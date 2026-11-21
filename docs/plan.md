@@ -211,7 +211,7 @@ Each managed workspace has a versioned manifest binding project/task/attempt, so
 
 ### Resume summary
 
-Start with deterministic evidence extraction. Use a model only to synthesize the bounded packet. Do not add a vector database in v1.
+Start with deterministic evidence extraction. Use a model only to synthesize the bounded packet; the one other model use, an optional local classifier that labels a free-text claim against the evidence it cites, is recorded in `docs/implementation-status.md` (decisions log, 2026-11-06, #131). Do not add a vector database in v1.
 
 The summary answers:
 
