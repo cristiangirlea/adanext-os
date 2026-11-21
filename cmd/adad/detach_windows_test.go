@@ -412,3 +412,10 @@ func TestABrokerThatRanAndFailedIsNotReportedAsOutOfTime(t *testing.T) {
 		t.Fatalf("the command ran although its start was refused: %v", err)
 	}
 }
+
+func TestTheBrokersLimitOutlastsAColdPowerShellAndEndsBeforeTheDesktopStopsWaiting(t *testing.T) {
+	// A cold Windows PowerShell took 29.9 s on a busy runner; the desktop waits 75 s for the launcher.
+	if brokerWait != 60*time.Second {
+		t.Fatalf("brokerWait is %s, want 60 s", brokerWait)
+	}
+}
