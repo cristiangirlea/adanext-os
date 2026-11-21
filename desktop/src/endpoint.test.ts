@@ -62,7 +62,7 @@ async function peer(mode: string) {
 
 it("refuses a real wrong-key endpoint before HTTP and never spawns, including SSE", async () => {
   const fake = await peer("wrong");
-  const spawn = vi.fn(async () => {});
+  const spawn = vi.fn(async () => ({ exited: new Promise<never>(() => {}) }));
   try {
     await expect(findOrStart(fake.config, fake.socketPath, { probe: probeCoordinator, spawn, now: Date.now, sleep: async () => {} })).rejects.toThrow("endpoint authentication failed");
     await expect(call(fake.socketPath, { method: "POST", path: "/secret", body: { secret: "must not be sent" } })).rejects.toThrow("endpoint authentication failed");
@@ -88,7 +88,7 @@ it("refuses non-ASCII proof bytes as endpoint authentication failure", async () 
 for (const mode of ["silent", "trickle", "http-silent", "http-trickle"]) {
   it(`bounds a real ${mode} endpoint with an absolute probe deadline and never spawns`, async () => {
     const fake = await peer(mode);
-    const spawn = vi.fn(async () => {});
+    const spawn = vi.fn(async () => ({ exited: new Promise<never>(() => {}) }));
     const start = Date.now();
     try {
       await expect(findOrStart(fake.config, fake.socketPath, { probe: probeCoordinator, spawn, now: Date.now, sleep: async () => {} }, 200)).rejects.toThrow();

@@ -377,11 +377,17 @@ export function endpoint(config: CoordinatorConfig, platform = process.platform,
 
 export const detachedOptions = { detached: true, stdio: "ignore", windowsHide: true } as const;
 
-export function spawnCoordinator(binary: string, args: string[], createChild: typeof spawn = spawn): Promise<void> {
+// `at` is when the exit event arrived, on the lifecycle clock (Date.now).
+export interface LauncherExit { code: number | null; signal: NodeJS.Signals | null; at: number }
+// The process spawned with -detach starts the serving adad and exits; `exited` says how and when.
+export interface Launcher { exited: Promise<LauncherExit> }
+
+export function spawnCoordinator(binary: string, args: string[], createChild: typeof spawn = spawn): Promise<Launcher> {
   return new Promise((resolve, reject) => {
     const child = createChild(binary, args, detachedOptions);
+    const exited = new Promise<LauncherExit>((done) => child.once("exit", (code, signal) => done({ code, signal, at: Date.now() })));
     child.once("error", reject);
-    child.once("spawn", () => { child.unref(); resolve(); });
+    child.once("spawn", () => { child.unref(); resolve({ exited }); });
   });
 }
 
@@ -413,19 +419,37 @@ export function endpointPresent(socketPath: string, timeoutMs = 500): Promise<bo
 
 export interface LifecycleIO {
   probe(socketPath: string, timeoutMs: number): Promise<boolean>;
-  spawn(binary: string, args: string[]): Promise<void>;
+  spawn(binary: string, args: string[]): Promise<Launcher>;
   now(): number;
   sleep(ms: number): Promise<void>;
 }
 const lifecycleIO: LifecycleIO = { probe: probeCoordinator, spawn: spawnCoordinator, now: Date.now, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
 
+// The longest a launcher may take: on Windows inside a job that refuses breakaway it goes through
+// a PowerShell broker bounded at 60 s, whose cold start took 30 s on a busy machine.
+export const LAUNCH_WAIT_MS = 75_000;
+
 export async function findOrStart(config: CoordinatorConfig, socketPath: string, io = lifecycleIO, timeoutMs = 15_000): Promise<void> {
   bindEndpoint(socketPath, config.stateDir);
-  const deadline = io.now() + timeoutMs;
   if (await io.probe(socketPath, Math.min(500, timeoutMs))) return;
-  await io.spawn(config.binary, config.args);
+  const launchDeadline = io.now() + LAUNCH_WAIT_MS;
+  const launcher = await io.spawn(config.binary, config.args);
+  let exit: LauncherExit | undefined;
+  void launcher.exited.then((value) => { exit = value; });
+  // A detached coordinator's stderr is null; its start-up errors are in this log.
+  const log = `its start-up log is ${path.join(config.stateDir, "startup.log")}`;
+  // An endpoint that answers is ready, whatever the launcher is still doing. Until the launcher
+  // exits the wait is the launcher's bound; the serving adad gets timeoutMs from that exit.
+  let ended = false;
   let last: Error | undefined;
-  while (io.now() < deadline) {
+  for (;;) {
+    ended = exit !== undefined && exit.at <= launchDeadline;
+    if (ended && exit!.code !== 0) {
+      const how = exit!.signal ? `signal ${exit!.signal}` : `exit code ${exit!.code}`;
+      throw new Error(`adad's launcher failed (${how}); ${log}`);
+    }
+    const deadline = ended ? exit!.at + timeoutMs : launchDeadline;
+    if (io.now() >= deadline) break;
     // The coordinator we launched may still be starting: a slow answer is not ready yet, not a failure.
     if (await io.probe(socketPath, Math.min(500, deadline - io.now())).catch((error) => {
       if ((error as NodeJS.ErrnoException).code === "ETIMEDOUT") { last = error as Error; return false; }
@@ -433,8 +457,7 @@ export async function findOrStart(config: CoordinatorConfig, socketPath: string,
     })) return;
     await io.sleep(Math.min(100, Math.max(0, deadline - io.now())));
   }
-  // A detached coordinator's stderr is null; its start-up errors are in this log.
-  const log = `its start-up log is ${path.join(config.stateDir, "startup.log")}`;
+  if (!ended) throw new Error(`timed out waiting for adad's launcher to finish; ${log}`);
   if (last) throw new Error(`timed out waiting for adad to start: the endpoint accepted connections but did not answer; ${log}`, { cause: last });
   throw new Error(`timed out waiting for adad to start; ${log}`);
 }

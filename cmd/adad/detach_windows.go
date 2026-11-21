@@ -64,9 +64,9 @@ func dropInheritedStdio() {
 // beforeBroker is a test seam that runs just before the broker starts; nil outside tests.
 var beforeBroker func()
 
-// brokerWait bounds the broker alone: a cold PowerShell with CIM can take 8 s, and the
-// desktop waits 15 s for adad in all.
-var brokerWait = 12 * time.Second
+// brokerWait bounds the broker alone: a cold PowerShell with CIM took 30 s on a busy machine,
+// and the desktop waits up to 75 s for this launcher to exit.
+var brokerWait = 60 * time.Second
 
 // Win32_Process.Create does not inherit the caller's job. No elevation, service,
 // scheduled task or policy change is involved. Configuration is argv and the
