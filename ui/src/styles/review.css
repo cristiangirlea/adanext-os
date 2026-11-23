@@ -171,3 +171,21 @@
   padding: 0;
   border: 0;
 }
+
+/* The accounts dialog: the import sheet with two tables and the code shown once. */
+.accounts .import-head h2 {
+  margin-right: auto;
+}
+.accounts-table td {
+  vertical-align: middle;
+}
+.row-actions button {
+  margin: 0 var(--space-1) var(--space-1) 0;
+}
+.enroll-code {
+  font-size: var(--text-lg);
+  user-select: all;
+}
+.confirm {
+  border-left-color: var(--danger);
+}

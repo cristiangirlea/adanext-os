@@ -36,7 +36,8 @@ button:disabled {
 button[aria-busy="true"] {
   cursor: progress;
 }
-button.quit {
+button.quit,
+button.danger {
   background: transparent;
   color: var(--danger);
   border-color: var(--danger);

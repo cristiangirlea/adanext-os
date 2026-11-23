@@ -1,6 +1,12 @@
 import type {
   AdaClient,
   Accepted,
+  Account,
+  AccountChange,
+  AccountSession,
+  CreatedAccount,
+  EnrollmentCode,
+  NewAccount,
   Capabilities,
   Changes,
   CheckLog,
@@ -48,6 +54,10 @@ export class FakeClient implements AdaClient {
   checkResults: Record<string, CheckResult[]> = {};
   logs: Record<string, CheckLog> = {};
   findingList: Finding[] = [];
+  accountList: Account[] = [makeAccount({ id: "local", name: "owner", owner: true, credentials: 1, sessions: 1 })];
+  sessionList: AccountSession[] = [];
+  // The code each issue, create or recover hands out, in turn.
+  codes = 0;
 
   constructor(tasks: Task[] = []) {
     this.tasks = tasks;
@@ -193,6 +203,65 @@ export class FakeClient implements AdaClient {
     return { ...task, attempt_id: attempt.id, findings: this.findingList.map((f) => f.id) };
   }
 
+  async listAccounts(): Promise<Account[]> {
+    this.check("listAccounts");
+    return this.accountList;
+  }
+  async createAccount(input: NewAccount): Promise<CreatedAccount> {
+    this.check("createAccount", input);
+    const account = makeAccount({ id: `u${this.accountList.length + 1}`, name: input.name, password_allowed: input.password_allowed });
+    this.accountList = [...this.accountList, account];
+    return { account, ...this.code() };
+  }
+  async updateAccount(id: string, change: AccountChange): Promise<Account> {
+    this.check("updateAccount", id, change);
+    const account = { ...this.account(id), ...change };
+    // As adad does, disabling ends the account's sessions.
+    if (change.disabled) this.endSessions(id);
+    this.accountList = this.accountList.map((a) => (a.id === id ? { ...account, sessions: change.disabled ? 0 : account.sessions } : a));
+    return this.account(id);
+  }
+  async removeAccount(id: string): Promise<void> {
+    this.check("removeAccount", id);
+    this.account(id);
+    this.endSessions(id);
+    this.accountList = this.accountList.filter((a) => a.id !== id);
+  }
+  async issueEnrollmentCode(id: string): Promise<EnrollmentCode> {
+    this.check("issueEnrollmentCode", id);
+    this.account(id);
+    return this.code();
+  }
+  async recoverAccount(id: string): Promise<EnrollmentCode> {
+    this.check("recoverAccount", id);
+    this.endSessions(id);
+    this.accountList = this.accountList.map((a) => (a.id === id ? { ...a, sessions: 0 } : a));
+    return this.code();
+  }
+  async listSessions(): Promise<AccountSession[]> {
+    this.check("listSessions");
+    return this.sessionList;
+  }
+  async revokeSession(id: string): Promise<void> {
+    this.check("revokeSession", id);
+    const session = this.sessionList.find((s) => s.id === id);
+    if (!session) throw new AdaError("not_found", 404, "no such session");
+    this.sessionList = this.sessionList.filter((s) => s.id !== id);
+    this.accountList = this.accountList.map((a) => (a.id === session.account ? { ...a, sessions: a.sessions - 1 } : a));
+  }
+  private account(id: string): Account {
+    const account = this.accountList.find((a) => a.id === id);
+    if (!account) throw new AdaError("not_found", 404, "no such account");
+    return account;
+  }
+  private endSessions(account: string): void {
+    this.sessionList = this.sessionList.filter((s) => s.account !== account);
+  }
+  private code(): EnrollmentCode {
+    this.codes++;
+    return { code: `ABCDE12345FGHJK6789${this.codes % 10}`, expires: "2026-11-24T10:00:00Z" };
+  }
+
   private find(id: string): Task {
     const task = this.tasks.find((t) => t.id === id);
     if (!task) throw new Error(`fake: no task ${id}`);
@@ -220,6 +289,10 @@ export function makeTask(fields: Partial<Task> & { id: string }): Task {
     attempt: null,
     ...fields,
   };
+}
+
+export function makeAccount(fields: Partial<Account> & { id: string }): Account {
+  return { name: fields.id, owner: false, disabled: false, password_allowed: false, credentials: 0, sessions: 0, created: "2026-11-01T00:00:00Z", ...fields };
 }
 
 // The pinned engine's matrix, cut down to what the UI reads: claude and codex, each with

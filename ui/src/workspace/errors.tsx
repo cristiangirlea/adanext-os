@@ -12,6 +12,11 @@ const described: Record<string, string> = {
   bad_response: "the coordinator answered with something the shell could not read",
   folder_expired: "the folder choice has expired; choose the folder again",
   path_refused: "a folder can only be chosen in the desktop's own dialog",
+  account_in_use: "this account has history in Ada (project membership, tasks, snapshots, attempts, findings or reviews), so it cannot be removed; disable it instead, which keeps its history and stops it signing in",
+  owner_account: "the owner account cannot be disabled or removed; if you cannot sign in with it, recover it",
+  local_only: "accounts are managed only in the Ada desktop app on this computer",
+  name_taken: "another account already has this name",
+  code_shown: "an enrollment code is shown only once; issue a new code",
 };
 
 export function shown(error: unknown): Shown {

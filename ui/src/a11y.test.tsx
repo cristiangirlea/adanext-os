@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App";
-import { FakeClient, makeTask } from "./test/fakeClient";
+import { FakeClient, makeAccount, makeTask } from "./test/fakeClient";
 import { AdaError } from "./client/api";
 
 // The accessibility pass of M4.4a: every control has a name and a role, the keyboard reaches
@@ -99,6 +99,32 @@ describe("accessibility", () => {
     await flush();
     check();
     expect(screen.getByRole("dialog", { name: "Import a repository" })).toBeTruthy();
+  });
+
+  it("names every control of the accounts view, its confirmation and its code", async () => {
+    const client = new FakeClient();
+    client.accountList = [makeAccount({ id: "local", name: "owner", owner: true }), makeAccount({ id: "u2", name: "sam" })];
+    client.sessionList = [{ id: "s1", account: "u2", created: "2026-11-20T08:00:00Z", last_used: "2026-11-20T09:00:00Z", address: "192.0.2.4" }];
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+    await flush();
+    await flush();
+    const check = () => {
+      const unnamed = Array.from(document.querySelectorAll(controls + ', [role="group"], input[type="checkbox"]')).filter((el) => nameOf(el) === "");
+      expect(unnamed.map((el) => el.outerHTML.slice(0, 100))).toEqual([]);
+    };
+    check();
+    expect(screen.getByRole("dialog", { name: "Accounts" })).toBeTruthy();
+    // Each table's columns have headers; the row buttons say whose account they act on.
+    expect(screen.getAllByRole("columnheader").map((h) => h.textContent)).toContain("Actions");
+    fireEvent.click(screen.getByRole("button", { name: "Remove sam" }));
+    check();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "New code for sam" }));
+    await flush();
+    await flush();
+    check();
   });
 
   it("lets the keyboard select a task in the navigation", async () => {

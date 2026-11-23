@@ -4,6 +4,7 @@ import { setMotion, useMotionOn } from "./motion/effects";
 import { BusyButton } from "./motion/parts";
 import { CommandPalette, type QuickAction } from "./palette/CommandPalette";
 import { ResizeHandle } from "./resize/ResizeHandle";
+import { Accounts } from "./settings/Accounts";
 import { currentTheme, setTheme, themeNames, themes, type Theme } from "./theme/theme";
 import { PathText } from "./text/Marked";
 import { Activity } from "./workspace/Activity";
@@ -50,6 +51,7 @@ export function App({ client }: { client: AdaClient }) {
   const [matrix, setMatrix] = useState<Capabilities | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
   const [importing, setImporting] = useState(false);
+  const [accounts, setAccounts] = useState(false);
   const [formProject, setFormProject] = useState("");
   // Counts the "New task" openings: each opens a fresh form with its first field focused.
   const [formOpened, setFormOpened] = useState(0);
@@ -256,6 +258,7 @@ export function App({ client }: { client: AdaClient }) {
   const actions: QuickAction[] = [
     { id: "import", label: "Import a repository", run: () => setImporting(true) },
     { id: "new-task", label: "Create a task", run: () => newTask() },
+    { id: "accounts", label: "Manage accounts and sessions", run: () => setAccounts(true) },
     { id: "theme", label: `Switch to the ${themeNames[otherTheme].toLowerCase()} theme`, run: () => chooseTheme(otherTheme) },
     { id: "motion", label: motionOn ? "Turn motion off" : "Turn motion on", run: () => setMotion(!motionOn) },
   ];
@@ -266,7 +269,7 @@ export function App({ client }: { client: AdaClient }) {
   return (
     <div className="ada" style={{ "--tasks-width": `${width}px`, "--work-width": `${work}px` } as CSSProperties}>
       <div className="tasks-pane">
-        <Nav tasks={tasks} loaded={loaded} names={names} selectedId={selectedId} onSelect={select} onImport={() => setImporting(true)} onNewTask={newTask} />
+        <Nav tasks={tasks} loaded={loaded} names={names} selectedId={selectedId} onSelect={select} onImport={() => setImporting(true)} onNewTask={newTask} onAccounts={() => setAccounts(true)} />
         <ResizeHandle
           side="e"
           size={{ width, height: 0 }}
@@ -416,6 +419,7 @@ export function App({ client }: { client: AdaClient }) {
           }}
         />
       )}
+      {accounts && <Accounts client={client} onClose={() => setAccounts(false)} />}
       <CommandPalette client={client} actions={actions} onSelectTask={select} />
     </div>
   );
