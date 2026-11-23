@@ -527,7 +527,8 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   not the checkout. Taking the result as a branch arrives with M7's branch export. It never
   edits the checkout itself. Tests: the adapter with Vitest, and the extension against a real
   `adad` and the fake engine in VS Code's extension test host (xvfb on Linux CI, one worker).
-  JetBrains follows later as its own slice (#92), a Kotlin client of the same API.
+  JetBrains follows later as its own slice (#92), a Kotlin client of the same API. Reaching a
+  server from an editor is an editor slice after M4d (decisions log, 2026-11-23).
 - **M4b Web access:** the TLS listener and its setting, local accounts and sessions, per-user
   project visibility and permission routing, credential profiles whose selection fails closed and
   an execution boundary that keeps other profiles and `adad`'s secrets out of a task's reach, the
@@ -541,6 +542,21 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   claim, the only launch path (#7), the token, renewal and challenge reconciliation (#8), the
   owner account's stop (#9), membership removal and artifact reads (#3), and the `EventSource`
   side of `cursor_ahead` (#4).
+- **M4d Headless server (#147):** after M4b, on its listener, accounts and sessions (decisions
+  log, 2026-11-23). Slices: the execution boundary first (engine, CLIs, checks and descendants;
+  only the provider process holds the login; `adad` refuses tasks where the host cannot provide
+  it); the owner's channel as an `adad` subcommand over the socket, run by SSH as the service
+  account, taking every desktop-channel operation of M4b; the Linux package and systemd unit
+  (brought forward from M9); public mode behind an access proxy the owner controls (forwarded
+  headers trusted only from the proxy, passkeys only, rate limits, the external hostname as the
+  relying party ID); remote imports from server-side roots, no public previews; the desktop's
+  server mode (a window on the server's origin with no preload bridge, "Leave" instead of Quit).
+  Direct public mode waits for its own decision. Evidence, a gate of its own: on a local Linux
+  VM or a Linux machine the owner runs, install and start at boot, an account created over SSH,
+  passkey login and a task from a browser on another network and from a phone's browser, the
+  desktop in server mode on Windows and Linux (macOS at the real-Mac gate), a second user with
+  their own provider sign-in, account creation refused through the owner's HTTPS session,
+  reconnect, and a reboot without replaying an abandoned attempt.
 - **M5 VMware execution:** Packer template, guest service, isolated network, guest login, previews,
   recovery. Images carry the compatibility manifest of #10, naming the source commit and the
   built artifact's SHA-256; the `adanext-images` build inspects the binaries inside the artifact
@@ -569,5 +585,6 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   an export refused when an earlier commit holds the secret and the tip does not; the rebuilt
   branch exports; a rebuild of an exported branch refused.
 - **M8 Recovery and routing:** the fault matrix, model policies, quota handling.
-- **M9 Packaging and dogfood:** installers, the web form as a service, a download page on
+- **M9 Packaging and dogfood:** installers, the web form as a service (its Linux package and
+  systemd unit come with M4d), a download page on
   adanext.si, diagnostics, accessibility, one improvement to Ada made through Ada.
