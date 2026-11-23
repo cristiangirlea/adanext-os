@@ -509,6 +509,159 @@ run beside M4.3, since it touches only `ui/`; M4.4b comes after both. M4.5 comes
   value written to the allow-list; binary and oversized files reported as not scanned; the
   Playwright flow answers a fake key before it accepts.
 
+## M4b Web access
+
+Nine slices (decisions log, 2026-11-23, M4b in nine slices). M4b.1 first: it is a spike that ends
+in an owner decision, and only M4b.6 and M4b.9 wait for that decision. The slices that change the
+schema (M4b.2, M4b.5, M4b.6, M4b.7, M4b.8) run one at a time. M4b.3 follows M4b.2; M4b.4 may start
+beside M4b.3, since it touches only `ui/`, and finishes after it; M4b.5 follows M4b.3; M4b.6
+follows M4b.5 and the owner's choice; M4b.7 follows M4b.5; M4b.8 follows M4b.3; M4b.9 is last. The
+TLS listener serves only the routes on its list: M4b.3 starts it with sign-in to Ada, the user's
+own account, reading what the user's memberships allow (with a new membership-filtered project
+list), and the capability matrix (`GET /v1/capabilities`); the experience card's route stays
+local, since it reads the coordinator's own ledger. M4b.5 adds, for the owner account, the task
+writes (creating a task, setting its checks, marking it ready, starting, cancelling, refining), a
+project's snapshot (`POST /v1/projects/{id}/snapshots`), findings and acceptance under #3's rules
+(any member records a finding; the result's actor or a project owner accepts), and permission
+decisions; M4b.6 adds the same for other users once the chosen boundary is active, and the
+provider sign-in relay's routes; M4b.7 adds the chooser. Routes that take a host path stay on the
+local pipe or socket for good. Each slice that adds a route to the network list, or an
+owner-channel route, tests it through an HTTPS session: allowed where its slice says, refused
+otherwise, the owner-channel routes refused even to the owner's session. Every operation the
+decisions give to the owner's desktop channel is a `/v1` route served only on the local pipe or
+socket, so the desktop's settings and M4d's `adad` subcommand are both its clients and no slice
+assumes a desktop on the coordinator's host (decisions log, 2026-11-23, #147).
+
+- [ ] **M4b.1 The execution boundary, a spike.** No product code. On the owner's Windows PC and on
+  Ubuntu (macOS when a Mac is available), find how `adad`, running as the owner without
+  administrator rights, can start a task (the engine, its CLIs, checks and their descendants)
+  so that nothing it starts can read another credential profile, `adad`'s state, its pipe or
+  socket and token, or the TLS and DNS keys, while the provider process alone holds its own
+  profile's login. Candidates: a separate OS account per credential profile (what starting a
+  process as it needs on each OS: a stored credential, a helper, a service or administrator
+  rights); an OS sandbox (Windows AppContainer or restricted tokens, Linux namespaces, the
+  macOS sandbox); and M5's VM executor. Probes run under scratch accounts the owner creates;
+  creating OS accounts and changing security settings are the owner's steps, never Ada's or an
+  agent's. Done when the decisions log records, per OS and per candidate, what it needs, what it
+  blocks (checks and descendants included, a check reading its own actor's login among them)
+  and what it costs to install, with a recommendation and whether M4b.6 should be split in two
+  (the boundary, then the sign-in relay), and the owner has chosen (owner action 15).
+- [ ] **M4b.2 Accounts, credentials and sessions.** A forward migration for credentials (passkeys,
+  and an Argon2id password where the owner enables it for an account), sessions stored as
+  SHA-256 hashes, enrollment codes, and a disabled flag on accounts, all as #6 specifies; a
+  pinned WebAuthn library chosen by the dependency rule and recorded. The API's actor comes from
+  the session cookie on a network listener and from the pipe or socket's ownership locally, as
+  now. Owner-channel routes, local listener only: create, disable and remove an account, issue an
+  enrollment code, recover an account (a new credential, throttling cleared), list and revoke any
+  session. Network routes: login, enrollment with a code, logout, the user's own sessions and
+  credentials. Throttling in memory, bounded, as #6 says. Owns `internal/store` (the migration,
+  accounts and sessions), `internal/api` (authentication and these routes) and the desktop's
+  account settings. Tests: #6's, except those that need the TLS listener (M4b.3): rotation,
+  every session of an account ended by a credential change or a disable, with their open
+  streams closed; idle and absolute expiry and both throttles on a fake clock;
+  enrollment codes single use and expiring; the stored hash and token never equal to their
+  inputs; the owner's first credential added to the existing owner account, whose projects and
+  tasks stay visible; this slice's owner-channel routes refused through a network session, a
+  freshly authenticated owner's included.
+- [ ] **M4b.3 The TLS listener, from files.** The network listener as a setting, off by default,
+  set through the owner's channel: one interface address, and a certificate and key from files in
+  `adad`'s configuration directory, owner-only, checked (the key matches, the chain parses, not
+  expired). Missing or mismatched files leave the listener off with the reason shown to the
+  owner; never plain HTTP, never a self-signed fallback. `GetCertificate` reads an atomic pointer
+  swapped after the same checks, and the pair on disk is replaced through a pointer file renamed
+  into place, as #8 specifies, so M4b.8 only adds issuance. On this listener: the session
+  authentication of M4b.2; `Host` equal to the configured name; mutations only with the exact
+  configured `Origin` and a JSON content type; no CORS headers; without a session, only login,
+  enrollment with a code and static assets; the shared UI served with a content security policy
+  and `frame-ancestors 'none'`. The network list as above; host-path routes refused on it. Owns
+  `cmd/adad` (the listener and its setting), `internal/api` (the middleware and the list) and the
+  desktop's listener settings, where the owner sets it up and sees why it is off. Tests: #6's
+  `Host`, `Origin` (missing, `null`, foreign, the preview host's) and content type checks; every
+  other route refused without a session; with a session, a start, a refinement and a host-path
+  import refused; #8's missing, mismatched and expired files and handshakes refused after
+  expiry; a connection open across a swap keeping its certificate while new ones get the new
+  pair; a restart at each step of a replacement ending on a complete pair; the project list
+  showing a member's project that has no task yet, and no other user's; `GET /v1/experience`
+  refused on the network.
+- [ ] **M4b.4 The browser UI.** The HTTPS `AdaClient` adapter (same-origin `fetch` with the session
+  cookie, `EventSource` for events with #4's `cursor_ahead` handling), and the pages the browser
+  needs: login with a passkey (or a password where enabled), enrollment with a code, the user's
+  sessions and credentials, and "Leave" (#9), which signs out and stops nothing; the project
+  navigation reads M4b.3's project list, and the browser shows no experience card. Owns `ui/`.
+  Tests: no module outside the adapters touches `window.ada` or `fetch`; the component tests run
+  against both adapters with one fake `adad`; `cursor_ahead` reopening from 0 without
+  `Last-Event-ID`; Playwright from two browser contexts against a real `adad` on M4b.3's TLS
+  listener with a test certificate and two seeded users with their own projects, each signed in
+  as its own account and seeing only its own projects, an empty one included; opening a browser
+  workspace making no experience request.
+- [ ] **M4b.5 Membership, permission decisions and the owner's stop.** The `permission_decisions`
+  migration and the scheduler gate in the claim, `POST /v1/attempts/{id}/decision` with its
+  idempotency key, all as #7 specifies; membership added and removed through the owner's channel,
+  a removal denying that user's pending decisions and cancelling their attempts in one
+  transaction, and the last owner's removal refused (#3); a role change ending every session of
+  that account (#6); the stop refused to everyone but the owner account, which first sees the
+  count of other users' running and queued work and confirms, with the reason on their tasks
+  (#9); the task writes and decisions added to the network list for the owner account. In
+  `ui/`: the attempt actor's pending decisions with allow and deny (deny for project owners), the
+  stop's count and confirmation before anything stops (today the desktop stops first and shows
+  counts after), and the desktop's membership administration. Owns `internal/store`,
+  `internal/executor` (the claim), `internal/api` and those `ui/` and desktop files. Tests: #7's
+  decision tests; #3's removal tests, the existing artifact read check (M4.2) exercised through
+  the new removal route; a role change ending the account's sessions on two browsers with their
+  streams closed; #9's stop tests; a decision seen and answered by its actor in one session and
+  invisible in another user's; through an HTTPS session, the owner account taking a snapshot,
+  creating a task on it, marking it ready, starting it and recording a finding, and another user
+  refused each.
+- [ ] **M4b.6 Credential profiles and the relayed sign-in.** After M4b.1's decision and M4b.5.
+  Each user's credential profile under `adad`'s state, selected by the attempt's actor and failing
+  closed (no profile, or a sign-in the CLI reports invalid, refuses the start with no fallback);
+  the launcher's environment built per actor from #58's list with that profile's
+  `CLAUDE_CONFIG_DIR` and `CODEX_HOME`; the boundary the owner chose in M4b.1 applied to the
+  engine, its CLIs, checks and descendants; the sign-in relay for the providers owner action 10
+  names, as #7 specifies, loopback-only providers not offered in the browser, with its page in
+  `ui/` (the verification link and code shown to the session that started the job, and code entry
+  where the provider gives one); the task writes, decisions and the relay's routes added to the
+  network list for other users. If the owner chose M5's VM executor, a working M5 executor comes
+  before this slice and before M4b.9. Owns `internal/executor`, `internal/store` (profiles and
+  sign-in jobs), `internal/api` and the sign-in page. Tests: #7's relay tests; a missing or
+  invalid profile refusing the start; a second user's start refused on a host where the chosen
+  boundary is not active, and through an HTTPS session a second user creating, readying and
+  starting a task once it is; and, with scratch credentials and keys under the chosen boundary,
+  only the provider process able to read its own profile's login, while the engine, a check and
+  the descendants of each read neither that login nor another profile, `adad`'s state, its pipe or
+  socket and token, the TLS key or the DNS token.
+- [ ] **M4b.7 Import roots and the server-side chooser.** Roots granted per user through the
+  owner's channel and kept in the store (a forward migration), so they survive a restart;
+  browsing below a root, inspecting the chosen directory by root id and relative path before
+  import (blockers, provider configuration, the untracked files the snapshot may take), and
+  importing it, with M3's import blockers;
+  no git-URL import, in the browser or through `/v1`; the browser's import page and the desktop's
+  page for granting roots. Owns `internal/store`, `internal/api`, `internal/source` (the walk
+  below a root), `ui/` and the desktop settings. Tests: #5's chooser tests; grants surviving a
+  restart; through the owner's HTTPS session, a directory with an untracked file inspected and
+  imported through the chooser, then its snapshot taken with that file, a task created on it,
+  readied and started.
+- [ ] **M4b.8 `home.adanext.si` and the DNS-01 client.** The Cloudflare token file (owner-only,
+  refused when others can read it, never logged), the ACME client against a fake ACME server in
+  tests, renewal on #8's schedule with its notices to the owner, the durable challenge intents and
+  their cleanup and reconciliation (a forward migration), the desktop's page for replacing the
+  token, the notices on the desktop and in the owner's web session (carried on the owner's
+  own-account response, which an open page reads again every minute without refreshing the
+  session's idle time), and the setup page's note on local DNS for resolvers that drop private
+  answers. Owns `cmd/adad`, `internal/store`, `internal/api` (the own-account response), those
+  desktop pages and the notice in `ui/`. Tests: #8's issuance, renewal, notification, token-file
+  and challenge cleanup and reconciliation tests (its file, swap and expiry tests are M4b.3's),
+  with a failure's notice reaching an owner HTTPS session with no attempt open, as well as the
+  desktop, and an unattended owner page still expiring after 8 idle hours on a fake clock.
+- [ ] **M4b.9 The fifth lane.** The M4b evidence of the decisions log, 2026-10-13, against a
+  Windows coordinator host (an Ubuntu host joins when lane 4's host exists): a browser on a
+  second computer reaching `https://home.adanext.si`, a separate account, the provider sign-in
+  completed from that computer for each relayed provider (#7), that user's own project and task
+  on their own sign-in, a decision answered by that user and invisible to the other, and
+  reconnection after a dropped connection; recorded in the status file with the revision, the
+  commands and their results. The second computer and its user's provider sign-ins are the
+  owner's to provide.
+
 ## Later milestones
 
 Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
@@ -529,19 +682,7 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   `adad` and the fake engine in VS Code's extension test host (xvfb on Linux CI, one worker).
   JetBrains follows later as its own slice (#92), a Kotlin client of the same API. Reaching a
   server from an editor is an editor slice after M4d (decisions log, 2026-11-23).
-- **M4b Web access:** the TLS listener and its setting, local accounts and sessions, per-user
-  project visibility and permission routing, credential profiles whose selection fails closed and
-  an execution boundary that keeps other profiles and `adad`'s secrets out of a task's reach, the
-  relayed provider sign-in, `home.adanext.si` with a certificate from files, then the DNS-01
-  client. Evidence: Playwright from a second browser context, and a real run from a second
-  computer over HTTPS (own account, project, task and provider sign-in, a permission prompt
-  answered there, reconnect), the fifth lane of the v1 gate (decisions log, 2026-10-13). Also
-  the tests the decisions log, 2026-10-14, gives for the browser boundary (#5: the import-root
-  chooser as the only browser import, no git-URL import, and the per-request preview check),
-  sessions (#6), the sign-in relay and the `permission_decisions` gate on the scheduler's
-  claim, the only launch path (#7), the token, renewal and challenge reconciliation (#8), the
-  owner account's stop (#9), membership removal and artifact reads (#3), and the `EventSource`
-  side of `cursor_ahead` (#4).
+- **M4b Web access:** broken into slices; see "M4b Web access" above.
 - **M4d Headless server (#147):** after M4b, on its listener, accounts and sessions (decisions
   log, 2026-11-23). Slices: the execution boundary first (engine, CLIs, checks and descendants;
   only the provider process holds the login; `adad` refuses tasks where the host cannot provide
@@ -561,7 +702,10 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
   recovery. Images carry the compatibility manifest of #10, naming the source commit and the
   built artifact's SHA-256; the `adanext-images` build inspects the binaries inside the artifact
   it hashed and publishes those same bytes, and `adad` hashes the artifact it is given and
-  refuses one the manifest does not match, with the tests the decisions log, 2026-10-14, lists.
+  refuses one the manifest does not match, with the tests the decisions log, 2026-10-14, lists. The
+  browser's preview host and its per-request check (#5) come here with previews, from M4b
+  (decisions log, 2026-11-23, M4b in nine slices), with #5's preview tests, the
+  `preview.home.adanext.si` record and the certificate naming it.
 - **M6 Resume intelligence:** evidence extraction, cited summaries, next-task proposals,
   continuation. Citations are checked in two steps (#131): the evidence id exists, and the evidence
   supports the claim. Typed claims are compared with structured evidence in code (a "checks passed"

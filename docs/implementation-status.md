@@ -11,7 +11,7 @@ are in `docs/backlog.md`.
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); follow-ups #82, #88, #94, #96, #101, #103, #107 and #111 (the last 2026-10-25); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100; content several owners stored is read through each attempt that stored it, migration 0013 (#89, 2026-11-21) | Open: #83 (a repository in OneDrive with online-only metadata) |
 | M4 First local workflow | in progress | Slices in `docs/backlog.md` (#109, #117); M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) #115; M4.3 (#118) #122, M4.4a (#119) #121, M4.4b (#120) #123 and M4.5's opt-in demonstration (#124) #125, into `main` with #126 (`b36259f`); M4.6 (#130) #132; the experience card (#128) #129; check worktree removal through a linked parent refused, #134 (`aa72d93`, 2026-11-18); adad's children start without a console window on Windows, so a closed console no longer ends a git call (#145, 2026-11-20); the desktop waits for adad's launcher, so a cold Windows PowerShell broker no longer outlasts it (#138, 2026-11-21); M4.2 to M4.4b and M4.6 implemented, none of them verified | M4.5's demonstrations on Windows and Ubuntu (#124, open; owner action 13). The Windows CI job on `main` passes again at `763a797` (#127: #137 and #139, 2026-11-18). M4 stays in progress until the demonstrations are recorded |
-| M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
+| M4b Web access | not started | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23) | After M4; M4b.1 first, the execution boundary spike (owner action 15); evidence from a second computer (decisions log, 2026-10-13) |
 | M4c Editor integration | not started | `docs/backlog.md` (#93); #91 and #92 open | After M4 (decisions log, 2026-10-18) |
 | M4d Headless server | not started | `docs/backlog.md` (#147) | After M4b; behind an access proxy first; its own gate (decisions log, 2026-11-23) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -2149,6 +2149,28 @@ Evidence, left for the supervisor:
   can still do without a desktop, and what a task can reach on a host nobody watches; it lands
   best as one milestone on M4b's foundations rather than as options scattered through M4b.
 
+- **2026-11-23, M4b in nine slices.** M4b is `docs/backlog.md`'s M4b.1 the execution boundary (a
+  spike), M4b.2 accounts, credentials and sessions, M4b.3 the TLS listener from files, M4b.4 the
+  browser UI, M4b.5 membership, permission decisions and the owner's stop, M4b.6 credential
+  profiles and the relayed sign-in, M4b.7 import roots and the server-side chooser, M4b.8
+  `home.adanext.si` and the DNS-01 client, and M4b.9 the fifth lane. The decisions of 2026-10-13
+  and 2026-10-14 (#3 to #9) are its specification; this entry only orders them and records three
+  points. First, the boundary goes first: the 2026-10-13 profile entry requires an execution
+  boundary before a second user runs anything, and the 2026-10-20 entry extends it to checks, but
+  which mechanism is open (a separate OS account per profile, an OS sandbox, or M5's VM executor),
+  and on a Windows host each candidate may need administrator rights, a stored credential or a
+  security setting, none of which Ada or an agent changes on the owner's computer. M4b.1 measures
+  that without product code and ends in the owner's choice (owner action 15); only M4b.6 and the
+  evidence wait for it, and the other slices proceed. Second, previews: the 2026-10-20 entry (M4
+  in five slices) moved desktop previews to M5, so M4b would build a preview host with nothing to
+  serve. The browser's preview host and its per-request check move to M5 with previews; #5's
+  preview tests, the preview record and its certificate name move with them. Third, the owner's
+  channel: every operation #5, #6 and #8 give to the desktop is a `/v1` route served only on the
+  local pipe or socket, whose ownership is the owner's identity, so the desktop's settings and
+  M4d's `adad` subcommand are both its clients (2026-11-23, #147). Reason: the boundary is the one
+  point that can change what M4b can promise a second user, so it is settled before the slices
+  that depend on it are built.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
@@ -2169,7 +2191,7 @@ Evidence, left for the supervisor:
 7. For M4b: a Cloudflare API token with `Zone > DNS > Edit` on `adanext.si` alone, kept in
    `adad`'s configuration and never in a repository, and two DNS-only records on the same
    private address: `home.adanext.si` and `preview.home.adanext.si` (the preview host, decisions
-   log, 2026-10-14, #5).
+   log, 2026-10-14, #5; the preview record is needed only with M5, decisions log, 2026-11-23).
 8. Now that the repository is public: say which machine details and local paths leave
    `docs/plan.md` (section 8's availability snapshot) and this file (the VMware host table).
    Suggested: the provider sign-in states and the local paths go; the hardware stays.
@@ -2197,3 +2219,7 @@ Evidence, left for the supervisor:
 14. ~~Confirm the proposal of 2026-11-23 (#147): `adad` as a headless server on a Linux VM or
     VPS~~ (confirmed by the owner, 2026-11-23, with the choices in the decisions log: M4d after
     M4b, behind an access proxy first, a gate of its own, a local VM or Linux machine first).
+15. For M4b (decisions log, 2026-11-23, M4b in nine slices): after M4b.1 records its findings,
+    choose the execution boundary for a second user's tasks (a separate OS account per credential
+    profile, an OS sandbox, or waiting for M5's VM executor). Creating OS accounts or changing
+    security settings for it is the owner's step.
