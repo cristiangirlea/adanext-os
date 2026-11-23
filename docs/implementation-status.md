@@ -2066,6 +2066,87 @@ Evidence, left for the supervisor:
   serving adad count from the launcher's exit. The broker's limit is 60 s. Of the issue's
   options this keeps PowerShell and the process-starting path as they are; a desktop retry
   would add a second launch, and calling WMI through COM would add Windows-only code there.
+- **2026-11-23, `adad` as a headless server on a Linux VM or VPS (#147): a proposal awaiting the
+  owner.** The owner wants `adad` to run on its own on a Linux machine, a local VM or a rented
+  server, and be used from anywhere: the desktop app on Windows, Linux or macOS, a browser, and a
+  phone's browser (Electron does not run on phones; the web form does). M4b, not started,
+  specifies much of a server: one API on a TLS listener, local accounts, passkey sessions,
+  per-user credential profiles and the relayed sign-in (2026-10-13; #5 to #9). It assumes the
+  owner's own network and a desktop on the coordinator's host: import-root grants, account
+  creation and recovery, token rotation and certificate repair are desktop operations. A server
+  has a public listener, no desktop on its host, and desktops that reach an `adad` they did not
+  start. The proposal:
+  - **A milestone after M4b**, M4d Headless server, on M4b's listener, accounts and sessions with
+    no second scheme. It brings forward from M9 the Linux service packaging (a package and a
+    systemd unit); M9 keeps installers and the rest. It builds no image: M5's guest image is a
+    different thing, and a server image, if wanted, is M9's. M5 to M8 are unchanged.
+  - **Start.** The same `adad` binary under a systemd unit, as its own OS account, with its state
+    directory, the pinned engine (`linux/amd64` and `linux/arm64` are already in
+    `engine/engine.json`) and the credential profiles on that machine; started at boot, restarted
+    on failure, and left stopped when the owner stops it.
+  - **The owner's channel is the socket, over SSH.** Access to the socket is the coordinator
+    owner's identity (#6), so the socket stays owner-only and nothing else is given it: on a
+    server the owner reaches it by SSH as the service account (an `adad` subcommand run under
+    that account), and every desktop-channel operation of M4b moves there: account creation,
+    enrollment codes, account recovery, import-root grants, token rotation, certificate repair.
+    It works when HTTPS does not, and none of it moves to the network.
+  - **A public listener.** The network listener stays a setting, off by default, with an explicit
+    public mode. Either directly: a name under the owner's domain with a public address and #8's
+    DNS-01 certificate renewed by `adad`, passkeys only (the password fallback refused in public
+    mode), login and enrollment rate-limited per address and per account. Or only behind an access
+    proxy the owner controls: `adad` listens where only the proxy can reach it, trusts forwarded
+    headers only from the proxy's address, keeps its own authentication, and stays in public mode
+    so the password fallback stays off; the proxy terminates the public TLS, renews its own
+    certificate, refuses public handshakes when it has no valid one, and is repaired through its
+    own administration, not over public HTTPS. In both, the configured external hostname is the
+    passkey relying party ID and the exact configured external HTTPS origin, port included, is
+    the one verified; the listener answers only login, enrollment and static assets without a
+    session (#6); and for a certificate `adad` manages, #8's fail-closed renewal and repair
+    through the owner's channel hold.
+  - **The execution boundary before the first task.** A check runs the repository's code on the
+    host, outside any backend sandbox and with network (M4.2), so a separate OS account per
+    credential profile is not enough on its own: a check in that account could read that
+    profile's login. Before a server runs any task, the owner's included, a boundary is shown by
+    test for the engine, its CLIs, checks and their descendants: only the provider process
+    receives the login it needs, and nothing a task starts can read the owner's socket, `adad`'s
+    state, the TLS and DNS keys, or any credential profile. Where the host cannot provide it,
+    `adad` refuses to start tasks. The mechanism is M4d's first slice; the VMware executor of M5
+    does not run on a typical VPS, and a KVM executor stays the plan's later QEMU adapter.
+  - **Sign-in.** #7 holds unchanged: device codes and authorization codes the user copies into
+    Ada. A provider whose CLI offers only a loopback callback is not available on a headless
+    server until a flow is shown, per CLI version, to deliver the callback and to bind the
+    intended user's own plan in that user's profile.
+  - **Imports and previews.** A folder on a client computer is not on the server: remote imports
+    use #5's server-side import roots, granted through the owner's channel, and the client's
+    folder picker is not offered. Previews are not served on a public listener in M4d; the
+    preview process never listens on a public interface.
+  - **Desktops and editors that reach a server.** The desktop gains a setting naming a server. In
+    that mode it opens the server's own origin in a window with no preload bridge and no access
+    to the local pipe or its token: the window performs the passkey login, carries the session
+    cookie and opens a same-origin event stream like any browser (#5), and `adad` validates the
+    session and enforces #6's configured host, exact origin and JSON content type on every
+    mutation. "Quit Ada and stop work" is not offered there:
+    the window offers "Leave", and the owner stops a server through the owner's channel.
+    M4c's editor clients stay local in M4d; reaching a server from an editor is an editor slice
+    after M4d, added to M4c's backlog entry if this is confirmed.
+  - **Messaging is outside M4d.** A chat or messaging integration, such as the personal agent and
+    its channel plugins (`adanext-ada`, `adanext-channels`), would reach `adad` as an ordinary
+    account through the API once it has an identity scoped for that, never through the socket.
+  - **Evidence.** A real run on a Linux VM or server the owner provides: install; start at boot;
+    an account created over SSH; passkey login and a task from a browser on another network and
+    from a phone's browser; the desktop in server mode on Windows and Linux, and on macOS at the
+    real-Mac gate; a second user with their own provider sign-in; account creation succeeding
+    through the owner's channel and refused through the same owner's HTTPS session; reconnection
+    after a dropped connection; and after a reboot, the coordinator serving without replaying an
+    abandoned attempt. Testing starts on a local VM or a Linux
+    machine the owner already runs, which costs nothing; a rented server is the owner's to
+    provide.
+  Choices left to the owner (owner action 14): whether M4d follows M4b as proposed; whether a
+  public listener is exposed directly or only behind an access proxy; whether M4d's evidence
+  becomes a sixth lane of the v1 gate or a gate of its own; and which machine the evidence runs
+  on. Reason: what a server needs beyond M4b is who can reach the coordinator, what the owner can
+  still do without a desktop, and what a task can reach on a host nobody watches; it lands best as
+  one milestone on M4b's foundations rather than as options scattered through M4b.
 
 ## Owner actions pending
 
@@ -2112,3 +2193,7 @@ Evidence, left for the supervisor:
     auth status` or `codex login status`) must show a plan sign-in, not an API key, and its
     settings no `apiKeyHelper` or key in `env`; `scripts/live-demo.sh` checks both through
     `cmd/ada-live -preflight-only` and refuses otherwise. The command is in the M4.5 section above.
+14. Confirm, change or reject the proposal of 2026-11-23 in the decisions log (#147): `adad` as a
+    headless server on a Linux VM or VPS, as milestone M4d after M4b. Say whether M4d follows
+    M4b, whether a public listener is exposed directly or only behind an access proxy, whether its
+    evidence joins the v1 gate as a sixth lane, and which machine the evidence runs on.
