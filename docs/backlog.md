@@ -546,7 +546,7 @@ assumes a desktop on the coordinator's host (decisions log, 2026-11-23, #147).
   blocks (checks and descendants included, a check reading its own actor's login among them)
   and what it costs to install, with a recommendation and whether M4b.6 should be split in two
   (the boundary, then the sign-in relay), and the owner has chosen (owner action 15).
-- [ ] **M4b.2 Accounts, credentials and sessions.** A forward migration for credentials (passkeys,
+- [x] **M4b.2 Accounts, credentials and sessions** (#154: #155, 2026-11-24). A forward migration for credentials (passkeys,
   and an Argon2id password where the owner enables it for an account), sessions stored as
   SHA-256 hashes, enrollment codes, and a disabled flag on accounts, all as #6 specifies; a
   pinned WebAuthn library chosen by the dependency rule and recorded. The API's actor comes from
