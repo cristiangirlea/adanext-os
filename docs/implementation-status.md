@@ -127,6 +127,11 @@ Chosen on 2026-10-11 as the newest stable release published at least 14 days ear
 | electron-builder | 26.15.3 (the `latest` tag; 26.17.0 is on a side tag) |
 | @types/node | 22.20.4 |
 | modernc.org/sqlite | v1.59.0, added to `go.mod` in M2 when first imported (v1.60.x is younger than 14 days) |
+| github.com/go-webauthn/webauthn | v0.18.2 (2026-09-19), added in M4b.2 for passkeys |
+| golang.org/x/crypto | v0.58.0 (2026-10-09; v0.59.0 was 12 days old), added in M4b.2 for Argon2id |
+| golang.org/x/sys | v0.49.0 (2026-10-06), raised from v0.48.0 in M4b.2 because x/crypto v0.58.0 requires it |
+| github.com/fxamacker/cbor/v2 | v2.9.4 (2026-09-14), brought by webauthn; the tests' software authenticator imports it |
+| Indirect through webauthn | github.com/go-webauthn/x v0.3.1 (2026-09-10), github.com/golang-jwt/jwt/v5 v5.3.1 (2026-01-28), github.com/google/go-tpm v0.9.8 (2025-12-29), github.com/go-viper/mapstructure/v2 v2.5.0 (2026-01-12), github.com/tinylib/msgp v1.6.4 (2026-03-16), github.com/philhofer/fwd v1.2.0 (2024-09-16), github.com/x448/float16 v0.8.4 (2020-01-17) |
 
 ### CI
 

@@ -1305,3 +1305,45 @@ func ownerOnlyDir(t *testing.T) string {
 	}
 	return dir
 }
+
+func TestTheCoordinatorServesTheOwnerChannelsAccountRoutesToTheLocalOwner(t *testing.T) {
+	dir := ownerOnlyDir(t)
+	name := testEndpointName(t)
+	helper := startHelper(t, dir, name)
+	defer func() {
+		helper.Process.Kill()
+		helper.Wait()
+	}()
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return ipc.Dial(ctx, ipc.Config{StateDir: dir, Name: name})
+	}}}
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequest("POST", "http://ipc/v1/accounts", strings.NewReader(`{"name":"Vera","password_allowed":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Idempotency-Key", "create-vera")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 201 || !strings.Contains(string(body), `"code":"`) {
+		t.Fatalf("create an account: %d %s", resp.StatusCode, body)
+	}
+	resp, err = client.Get("http://ipc/v1/accounts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accounts []struct {
+		ID    string `json:"id"`
+		Name  string `json:"name"`
+		Owner bool   `json:"owner"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&accounts)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 || len(accounts) != 2 || accounts[0].ID != "local" || !accounts[0].Owner || accounts[1].Name != "Vera" || accounts[1].Owner {
+		t.Fatalf("accounts: %d %+v %v", resp.StatusCode, accounts, err)
+	}
+}

@@ -141,7 +141,7 @@ func TestRepeatedMemberCancelsOfALaunchingAttemptRecordOneEvent(t *testing.T) {
 func TestCancelQueuedNeedsTheRevisionAndMembership(t *testing.T) {
 	s := openTestStore(t)
 	seedQueue(t, s)
-	execute(t, s, `INSERT INTO users VALUES ('v', 'other', 'created')`)
+	execute(t, s, `INSERT INTO users(id,name,created) VALUES ('v', 'other', 'created')`)
 	err := s.write(ctx, "v", func(tx *Tx) error {
 		_, err := tx.CancelQueued(ctx, "t", 2, "withdrawn by v")
 		return err
@@ -164,7 +164,7 @@ func TestCancelQueuedNeedsTheRevisionAndMembership(t *testing.T) {
 
 func seedSecondUserAndTasks(t *testing.T, s *Store) {
 	t.Helper()
-	execute(t, s, `INSERT INTO users VALUES ('v', 'other', 'created')`)
+	execute(t, s, `INSERT INTO users(id,name,created) VALUES ('v', 'other', 'created')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('p', 'v', 'member', 'added')`)
 	execute(t, s, `INSERT INTO projects VALUES ('q', 'other project', '/other', '2026-10-11T00:00:00Z')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('q', 'u', 'owner', 'added')`)

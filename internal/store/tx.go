@@ -123,6 +123,9 @@ func validArtifactHash(hash string) bool {
 }
 
 func (s *Store) write(ctx context.Context, userID string, fn func(*Tx) error) error {
+	if s.beforeWrite != nil {
+		s.beforeWrite()
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -133,3 +136,7 @@ func (s *Store) write(ctx context.Context, userID string, fn func(*Tx) error) er
 	}
 	return tx.Commit()
 }
+
+// OnWrite sets a test seam called as each write is about to begin its transaction, before it
+// waits for the write lock. Set it only while no write runs.
+func (s *Store) OnWrite(fn func()) { s.beforeWrite = fn }

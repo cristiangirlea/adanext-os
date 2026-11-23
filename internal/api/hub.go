@@ -22,6 +22,9 @@ type Hub struct {
 	WriteDeadline     time.Duration
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
+	// Sessions closes the event streams of deleted network sessions; both channels share it.
+	Sessions SessionStreams
+	limits   throttle // sign-in failures, which the owner's recovery clears
 }
 
 func NewHub() *Hub {
@@ -233,4 +236,54 @@ func (h *Hub) SubscriberCount() int {
 		n += len(sub)
 	}
 	return n
+}
+
+// SessionStreams tracks the open event streams of each network session, so deleting
+// sessions ends their streams at once.
+type SessionStreams struct {
+	mu      sync.Mutex
+	streams map[string]map[chan struct{}]struct{}
+}
+
+// register returns a channel closed when the session is closed, and the release of it.
+func (r *SessionStreams) register(sessionID string) (<-chan struct{}, func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.streams == nil {
+		r.streams = make(map[string]map[chan struct{}]struct{})
+	}
+	if r.streams[sessionID] == nil {
+		r.streams[sessionID] = make(map[chan struct{}]struct{})
+	}
+	ch := make(chan struct{})
+	r.streams[sessionID][ch] = struct{}{}
+	return ch, func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if _, open := r.streams[sessionID][ch]; open {
+			delete(r.streams[sessionID], ch)
+			if len(r.streams[sessionID]) == 0 {
+				delete(r.streams, sessionID)
+			}
+		}
+	}
+}
+
+// Close ends every open stream of the sessions.
+func (r *SessionStreams) Close(sessionIDs ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range sessionIDs {
+		for ch := range r.streams[id] {
+			close(ch)
+		}
+		delete(r.streams, id)
+	}
+}
+
+// Open counts the open streams of a session.
+func (r *SessionStreams) Open(sessionID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.streams[sessionID])
 }

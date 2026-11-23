@@ -35,8 +35,9 @@ var (
 )
 
 type Store struct {
-	db   *sql.DB
-	path string
+	db          *sql.DB
+	path        string
+	beforeWrite func() // test seam, see OnWrite
 }
 
 // Open requires a file database in an existing directory. It refuses databases
@@ -347,6 +348,10 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT secrets_json FROM reviews LIMIT 0",
 		"SELECT refused FROM check_worktrees LIMIT 0",
 		"SELECT hash,origin FROM artifact_refs LIMIT 0",
+		"SELECT disabled,password_allowed,webauthn_handle FROM users LIMIT 0",
+		"SELECT id,user,kind,name,credential_id,public_key,sign_count,aaguid,flags,transports,password_hash,created,last_used FROM credentials LIMIT 0",
+		"SELECT id,token_hash,user,credential,created,last_used,address FROM sessions LIMIT 0",
+		"SELECT code_hash,user,created,expires,used FROM enrollment_codes LIMIT 0",
 	} {
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {

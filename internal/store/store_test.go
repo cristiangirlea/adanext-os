@@ -55,7 +55,7 @@ func execute(t *testing.T, s *Store, query string, args ...any) {
 
 func seed(t *testing.T, s *Store) {
 	t.Helper()
-	execute(t, s, `INSERT INTO users VALUES ('u', 'user', 'created')`)
+	execute(t, s, `INSERT INTO users(id,name,created) VALUES ('u', 'user', 'created')`)
 	execute(t, s, `INSERT INTO projects VALUES ('p', 'project', '/source', '2026-10-11T00:00:00Z')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('p', 'u', 'owner', 'added')`)
 	execute(t, s, `INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated) VALUES ('t', 'p', 'u', 'objective', 'criteria', 'draft', 0, 'created', 'updated')`)
@@ -174,7 +174,7 @@ func TestConcurrentOpenersApplyTheInitialMigrationOnce(t *testing.T) {
 			}
 			defer s.Close()
 			var version int
-			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 13 {
+			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 14 {
 				t.Errorf("version: %d %v", version, err)
 			}
 		}()
@@ -187,7 +187,7 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 13 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 14 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	path := s.path
@@ -237,14 +237,15 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 		"migrations/0011_secrets.sql":             &fstest.MapFile{Data: mustMigration(t, "migrations/0011_secrets.sql")},
 		"migrations/0012_check_cleanup.sql":       &fstest.MapFile{Data: mustMigration(t, "migrations/0012_check_cleanup.sql")},
 		"migrations/0013_artifact_refs.sql":       &fstest.MapFile{Data: mustMigration(t, "migrations/0013_artifact_refs.sql")},
-		"migrations/0014_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
-		"migrations/0015_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
+		"migrations/0014_accounts.sql":            &fstest.MapFile{Data: mustMigration(t, "migrations/0014_accounts.sql")},
+		"migrations/0015_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
+		"migrations/0016_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
 	}
 	if err := s.migrate(ctx, migrations); err == nil {
 		t.Fatal("bad migration succeeded")
 	}
 	var version, count int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 14 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 15 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	if err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='rolled_back'").Scan(&count); err != nil || count != 0 {
@@ -252,13 +253,13 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 	}
 	execute(t, s, "INSERT INTO committed VALUES(1)")
 	var recorded int
-	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 14 {
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 15 {
 		t.Fatalf("migration records: %d %v", recorded, err)
 	}
 }
 
 func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
-	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5", "migrations/0004_execution.sql": "74a497b8e4f143e143e0d32f99cd763a157ba1742c2b5929d363e50e17f140be", "migrations/0005_import.sql": "8d41f95ae741b9af1e052297892d0a785abae629d7959f5882002f650b5ad49c", "migrations/0006_workspaces.sql": "e64a38b34b8af8311a7859f632641a94185f4c34a4d3540a844bc378a0e6c2a1", "migrations/0007_drift.sql": "cf35501a79cf73c3c734802ed34be4b00b72ba6825a287fb4aa5bb4033846171", "migrations/0008_capabilities.sql": "2f999a7e21581bb2f6eabc588652a94445d88f5489cdd1bf78150f80ab050807", "migrations/0009_checks.sql": "1a7c2154c4bb81cf909c9606637c35346b9e6f94e50fab3a13bfd564828d66bf", "migrations/0010_review.sql": "f9f7bea38cfca4237a5afdfb147237990f58031a269991aa4978b6d93c456289", "migrations/0011_secrets.sql": "ac8327ac2c9db047c8a9d69a400d94d7c07e22445e0c0f19a42bed0740bac237", "migrations/0012_check_cleanup.sql": "ee509ef87b576d5637a1f1a72aea23625c4db9510b58ea634fe1a97554982e44", "migrations/0013_artifact_refs.sql": "7ffa94d51aa1e66884418c5b49a0a858d8a3e9bc8a03a71247727f5178a375e7"}
+	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5", "migrations/0004_execution.sql": "74a497b8e4f143e143e0d32f99cd763a157ba1742c2b5929d363e50e17f140be", "migrations/0005_import.sql": "8d41f95ae741b9af1e052297892d0a785abae629d7959f5882002f650b5ad49c", "migrations/0006_workspaces.sql": "e64a38b34b8af8311a7859f632641a94185f4c34a4d3540a844bc378a0e6c2a1", "migrations/0007_drift.sql": "cf35501a79cf73c3c734802ed34be4b00b72ba6825a287fb4aa5bb4033846171", "migrations/0008_capabilities.sql": "2f999a7e21581bb2f6eabc588652a94445d88f5489cdd1bf78150f80ab050807", "migrations/0009_checks.sql": "1a7c2154c4bb81cf909c9606637c35346b9e6f94e50fab3a13bfd564828d66bf", "migrations/0010_review.sql": "f9f7bea38cfca4237a5afdfb147237990f58031a269991aa4978b6d93c456289", "migrations/0011_secrets.sql": "ac8327ac2c9db047c8a9d69a400d94d7c07e22445e0c0f19a42bed0740bac237", "migrations/0012_check_cleanup.sql": "ee509ef87b576d5637a1f1a72aea23625c4db9510b58ea634fe1a97554982e44", "migrations/0013_artifact_refs.sql": "7ffa94d51aa1e66884418c5b49a0a858d8a3e9bc8a03a71247727f5178a375e7", "migrations/0014_accounts.sql": "32c8d7edbf7e68491524c48a896e6918189a3ad12d132ddd19011187dcb46437"}
 	files, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -389,7 +390,7 @@ func TestConcurrentTransitionsAcrossStoresHaveExactlyOneWinner(t *testing.T) {
 
 func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	s := openTestStore(t)
-	execute(t, s, "INSERT INTO users VALUES('u','user','created')")
+	execute(t, s, "INSERT INTO users(id,name,created) VALUES('u','user','created')")
 	var calls int
 	fn := func(tx *Tx) ([]byte, error) {
 		calls++
@@ -436,7 +437,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 
 func TestConcurrentIdempotencyAcrossStoresExecutesOnce(t *testing.T) {
 	s := openTestStore(t)
-	execute(t, s, "INSERT INTO users VALUES('u','user','created')")
+	execute(t, s, "INSERT INTO users(id,name,created) VALUES('u','user','created')")
 	other, err := Open(ctx, s.path)
 	if err != nil {
 		t.Fatal(err)
