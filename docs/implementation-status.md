@@ -9,7 +9,7 @@ are in `docs/backlog.md`.
 | M0 Baseline | in progress | this repository: #1, #12, #13, #14 merged | Owner actions 6 and 8 |
 | M1 Execution protocol | implemented | Harness issue #49 (closed): #50 to #53, `main` at `8dd2659` | Windows CI leg on Harness `main`, then verified |
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); follow-ups #82, #88, #94, #96, #101, #103, #107 and #111 (the last 2026-10-25); M2.1 verified | The open follow-up issues from the M2 reviews |
-| M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100 | Open: #83 (a repository in OneDrive with online-only metadata), #89 (artifact origins when content repeats) |
+| M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100; content several owners stored is read through each attempt that stored it, migration 0013 (#89, 2026-11-21) | Open: #83 (a repository in OneDrive with online-only metadata) |
 | M4 First local workflow | in progress | Slices in `docs/backlog.md` (#109, #117); M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) #115; M4.3 (#118) #122, M4.4a (#119) #121, M4.4b (#120) #123 and M4.5's opt-in demonstration (#124) #125, into `main` with #126 (`b36259f`); M4.6 (#130) #132; the experience card (#128) #129; check worktree removal through a linked parent refused, #134 (`aa72d93`, 2026-11-18); adad's children start without a console window on Windows, so a closed console no longer ends a git call (#145, 2026-11-20); the desktop waits for adad's launcher, so a cold Windows PowerShell broker no longer outlasts it (#138, 2026-11-21); M4.2 to M4.4b and M4.6 implemented, none of them verified | M4.5's demonstrations on Windows and Ubuntu (#124, open; owner action 13). The Windows CI job on `main` passes again at `763a797` (#127: #137 and #139, 2026-11-18). M4 stays in progress until the demonstrations are recorded |
 | M4b Web access | not started | | After M4; evidence from a second computer (decisions log, 2026-10-13) |
 | M4c Editor integration | not started | `docs/backlog.md` (#93); #91 and #92 open | After M4 (decisions log, 2026-10-18) |
@@ -384,7 +384,7 @@ original's work tree byte for byte; every original file is hashed before and aft
 
 Not verified: Windows file symlinks (junctions cover Windows), macOS, a real patch over 64 MiB.
 Later: opening each path component through its parent's handle (M3.3), import authorization for
-more users (M4b), artifact origins when content repeats (#89).
+more users (M4b). Artifact origins when content repeats: done (#89, 2026-11-21).
 
 ### M3.3 managed clone and task workspaces (2026-10-19, #95, PR #97)
 
