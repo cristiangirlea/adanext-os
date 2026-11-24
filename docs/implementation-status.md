@@ -11,7 +11,7 @@ are in `docs/backlog.md`.
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); follow-ups #82, #88, #94, #96, #101, #103, #107 and #111 (the last 2026-10-25); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100; content several owners stored is read through each attempt that stored it, migration 0013 (#89, 2026-11-21) | Open: #83 (a repository in OneDrive with online-only metadata) |
 | M4 First local workflow | in progress | Slices in `docs/backlog.md` (#109, #117); M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) #115; M4.3 (#118) #122, M4.4a (#119) #121, M4.4b (#120) #123 and M4.5's opt-in demonstration (#124) #125, into `main` with #126 (`b36259f`); M4.6 (#130) #132; the experience card (#128) #129; check worktree removal through a linked parent refused, #134 (`aa72d93`, 2026-11-18); adad's children start without a console window on Windows, so a closed console no longer ends a git call (#145, 2026-11-20); the desktop waits for adad's launcher, so a cold Windows PowerShell broker no longer outlasts it (#138, 2026-11-21); M4.2 to M4.4b and M4.6 implemented, none of them verified | M4.5's demonstrations on Windows and Ubuntu (#124, open; owner action 13). The Windows CI job on `main` passes again at `763a797` (#127: #137 and #139, 2026-11-18). M4 stays in progress until the demonstrations are recorded |
-| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155) | M4b.1, the execution boundary spike, waits for the owner's scratch accounts (owner action 15); evidence from a second computer (decisions log, 2026-10-13) |
+| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155); M4b.1's boundary chosen by the owner, an OS account per user (decisions log, 2026-11-24) | M4b.1's account and Linux probes wait for the owner's scratch accounts and a Linux machine (owner action 16); evidence from a second computer (decisions log, 2026-10-13) |
 | M4c Editor integration | not started | `docs/backlog.md` (#93); #91 and #92 open | After M4 (decisions log, 2026-10-18) |
 | M4d Headless server | not started | `docs/backlog.md` (#147) | After M4b; behind an access proxy first; its own gate (decisions log, 2026-11-23) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -2200,6 +2200,68 @@ Evidence, left for the supervisor:
   response nor the throttle's timing may tell which accounts exist or how their passwords are
   stored.
 
+- **2026-11-24, M4b.1: the owner chose the execution boundary (#156).** M4b.1's desk research
+  found that the boundary the 2026-11-23 entry asks for (#147: "only the provider process
+  receives the login it needs") cannot be met by any candidate. `hrn` starts the provider CLI,
+  and the CLI runs the model's shell and file tools as its own children. No OS identity or
+  sandbox around the CLI lets the CLI read its login while its children cannot. Only a CLI's own
+  sandbox can narrow that, and not on native Windows. The owner answered on 2026-11-24:
+  - **The guarantee, amended:** nothing a task starts can read another user's login, `adad`'s
+    state, its pipe or socket and token, or the TLS and DNS keys. A user's own tasks (the agent's
+    tools and checks included) may read that user's own login. This replaces the 2026-11-23
+    entry's requirement on the boundary: the quoted sentence, the claim that an OS account per
+    credential profile is "not enough on its own", and "or any credential profile", which now
+    reads "another user's". The same promise changes in M4b.6's tests and M4d's first slice.
+  - **The mechanism:** a separate OS account per user, which runs the engine, the CLIs and the
+    checks of that user's tasks. The owner's own tasks move to an account of their own (for
+    example `ada-owner`), not the owner's login. Otherwise a hostile repository in the owner's
+    task could read every other user's profile. Two points stay open (owner action 16): whether a
+    user with several credential profiles gets an account per profile, and whether the CLI gets an
+    account of its own through a broker.
+  - **On Windows:** the unelevated `adad` starts tasks with `CreateProcessWithLogonW`, which
+    needs no privilege. Each account's password is kept DPAPI-encrypted under the owner's login.
+    No service is installed. Creating the accounts stays the owner's step.
+
+  The Windows probes that need no setup (W0, W6, W7) ran on the owner's Windows 11 PC
+  (10.0.26200) the same day, with a scratch kit kept outside the repository.
+  - **W0:** the Secondary Logon service that `CreateProcessWithLogonW` uses is present (demand
+    start, LocalSystem). The stand-in ran unelevated, at Medium integrity, with Administrators
+    for deny only.
+  - **The setup:** a stand-in `adad` with fake state protected as `adad` protects its own (a
+    protected DACL with the owner alone), an owner-only pipe and two fake profiles.
+  - **The battery:** it opened each file and closed it without reading, and opened the owner's
+    real `.claude` and `.codex` folders only as directories. It ran unconfined as a control, then
+    in an AppContainer (W6) and under a restricted token at Low integrity (W7). Each run was
+    inside a kill-on-close job, with a grandchild through a shell and a detached one.
+  - **What both sandboxes kept out:** the fake state, the other profile, the pipe, the stand-in
+    process and the owner's credential vault. Closing the job ended every descendant, and a
+    breakaway from the job was refused.
+  - **Why neither is a boundary:** both break the tools a task needs. Under W6, `node` and
+    `claude` were not found (`codex` was not on the path even unconfined, so neither run tested
+    it). Under W7, `git status` failed on the owner's `.gitconfig`.
+  - **Escape channels:** unconfined, a task created a scheduled task that runs as the owner, and
+    a WMI-created process that ran outside the job. So the account, not the job, is the boundary,
+    and cancelling must not rely on the job alone. Under W7, both attempts failed before they
+    reached the service: `schtasks` failed, and PowerShell could not start. A native COM caller
+    was not tried, so W7's escape channels are untested, not refused.
+  - **Loopback:** W6 could not reach a loopback listener of the stand-in, but W7 could. A second
+    OS account is expected to reach loopback ports too (W1 will confirm it). So every listener of
+    `adad` must authenticate each connection: the pipe does, and the TLS listener must (M4b.3).
+  - **Cleanup:** everything the probes created on the system was deleted, and checked
+    afterwards. That covers an AppContainer profile, the scratch state and profile folders, access
+    entries and a Low label on them, one scheduled task and one marker file. The kit and its
+    results are kept outside the repository.
+
+  M4b.1 stays open. Still to come:
+  - the account probes W1 to W5, once the owner has created two standard scratch accounts and
+    their password files (owner action 16)
+  - the Linux probes L0 to L5 on a machine the owner names
+  - the owner's remaining questions (owner action 16)
+
+  Reason: an identity boundary is the only candidate that closes every ambient channel at once,
+  needs no driver or service on Windows, and is what M4d's server needs anyway. The narrower
+  guarantee says what any candidate can actually show by test.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
@@ -2248,7 +2310,30 @@ Evidence, left for the supervisor:
 14. ~~Confirm the proposal of 2026-11-23 (#147): `adad` as a headless server on a Linux VM or
     VPS~~ (confirmed by the owner, 2026-11-23, with the choices in the decisions log: M4d after
     M4b, behind an access proxy first, a gate of its own, a local VM or Linux machine first).
-15. For M4b (decisions log, 2026-11-23, M4b in nine slices): after M4b.1 records its findings,
+15. ~~For M4b (decisions log, 2026-11-23, M4b in nine slices): after M4b.1 records its findings,
     choose the execution boundary for a second user's tasks (a separate OS account per credential
     profile, an OS sandbox, or waiting for M5's VM executor). Creating OS accounts or changing
-    security settings for it is the owner's step.
+    security settings for it is the owner's step.~~ (chosen by the owner, 2026-11-24: a separate
+    OS account per user, the owner's own tasks included; decisions log, M4b.1: the owner chose the
+    execution boundary).
+16. For M4b.1's remaining probes (#156). Each is the owner's step; no password ever passes
+    through an agent:
+    - **Windows:** two local standard accounts, `ada-probe-a` and `ada-probe-b`, created elevated
+      once and not in Administrators. For each, a password file the owner writes, DPAPI-encrypted
+      under the owner's login
+      (`Read-Host -AsSecureString | ConvertFrom-SecureString | Set-Content <file>`).
+    - **Linux:** a machine for the probes (the local VM planned for M4d; say which). On it, as
+      root: two system users with no password, plus the one sudoers drop-in and the one polkit
+      rule the spike supplies. Only for the optional bwrap probe: the bwrap AppArmor profile.
+    - **For the live probes only:** both CLIs signed in inside `ada-probe-a` on the owner's plan,
+      on Windows and on the Linux machine.
+    - **macOS, if a Mac is available:** two hidden standard accounts and one sudoers drop-in.
+    - **Answers to the remaining questions:**
+      - Is a second user's outbound network unrestricted in M4b?
+      - One account per user (or per credential profile), or two with a CLI broker?
+      - Where do the CLIs live for the accounts, and does Ada pin their versions?
+      - On Linux, a polkit rule or a sudoers drop-in?
+      - Is a Mac available?
+      - Should the accounts be hidden from the Windows sign-in screen?
+    - **Afterwards:** the scratch accounts, their profile folders and the password files are
+      removed again.
