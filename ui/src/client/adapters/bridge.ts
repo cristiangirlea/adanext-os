@@ -47,5 +47,13 @@ export function createBridgeClient(): AdaClient {
     addFinding: async (taskId, body) => unwrap(await bridge().addFinding(taskId, body)),
     accept: async (taskId, revision, commit, generation, secrets) => unwrap(await bridge().accept(taskId, revision, commit, generation, secrets)),
     refine: async (taskId, revision, request) => unwrap(await bridge().refine(taskId, revision, request)),
+    listAccounts: async () => unwrap(await bridge().listAccounts()),
+    createAccount: async (input) => unwrap(await bridge().createAccount(input)),
+    updateAccount: async (id, change) => unwrap(await bridge().updateAccount(id, change)),
+    removeAccount: async (id) => { unwrap(await bridge().removeAccount(id)); },
+    issueEnrollmentCode: async (id) => unwrap(await bridge().issueEnrollmentCode(id)),
+    recoverAccount: async (id) => unwrap(await bridge().recoverAccount(id)),
+    listSessions: async () => unwrap(await bridge().listSessions()),
+    revokeSession: async (id) => { unwrap(await bridge().revokeSession(id)); },
   };
 }

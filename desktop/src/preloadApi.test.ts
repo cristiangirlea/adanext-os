@@ -91,6 +91,29 @@ describe("preload api", () => {
     expect(fake.calls.at(-1)).toEqual(["chooseFolder", []]);
   });
 
+  it("forwards each account method under its own name with its typed arguments", async () => {
+    const fake = ipc();
+    const api = createApi(fake, "doc");
+    await api.listAccounts();
+    await api.createAccount({ name: "sam", password_allowed: true });
+    await api.updateAccount("u2", { disabled: true });
+    await api.removeAccount("u2");
+    await api.issueEnrollmentCode("u2");
+    await api.recoverAccount("local");
+    await api.listSessions();
+    await api.revokeSession("s1");
+    expect(fake.calls).toEqual([
+      ["listAccounts", []],
+      ["createAccount", [{ name: "sam", password_allowed: true }]],
+      ["updateAccount", ["u2", { disabled: true }]],
+      ["removeAccount", ["u2"]],
+      ["issueEnrollmentCode", ["u2"]],
+      ["recoverAccount", ["local"]],
+      ["listSessions", []],
+      ["revokeSession", ["s1"]],
+    ]);
+  });
+
   it("leaves no listener behind a refused subscription", async () => {
     const fake = ipc({ subscribe: { ok: false, error: { code: "coordinator_unreachable", status: 0, message: "no socket" } } });
     const received: StreamMessage[] = [];

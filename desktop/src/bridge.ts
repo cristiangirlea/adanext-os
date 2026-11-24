@@ -66,6 +66,8 @@ const maxCommitPath = 4096;
 const maxSelected = 1000;
 const maxSecretAcks = 1000;
 const maxSecretReason = 1 << 10;
+// adad takes an account name of 1 to 64 printable characters.
+const maxAccountName = 64;
 
 function refused(code: string, message: string): BridgeResult<never> {
   return { ok: false, error: { code, status: 0, message } };
@@ -145,6 +147,26 @@ function isSecretAcks(value: unknown): boolean {
         (a.kind === "test" || a.kind === "real") &&
         (a.reason === undefined || (typeof a.reason === "string" && a.reason.length <= maxSecretReason && !a.reason.includes("\u0000"))),
     )
+  );
+}
+// adad checks a name's characters and uniqueness; the bridge only its shape.
+function isNewAccount(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["name", "password_allowed"]) &&
+    typeof value.name === "string" &&
+    value.name !== "" &&
+    [...value.name].length <= maxAccountName &&
+    typeof value.password_allowed === "boolean"
+  );
+}
+function isAccountChange(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length > 0 &&
+    hasKeys(value, [], ["disabled", "password_allowed"]) &&
+    (value.disabled === undefined || typeof value.disabled === "boolean") &&
+    (value.password_allowed === undefined || typeof value.password_allowed === "boolean")
   );
 }
 // A path inside a commit, as the files route takes it: never a host path, which it cannot reach.
@@ -373,6 +395,31 @@ export function createBridge(options: BridgeOptions): Bridge {
         case "refine":
           if (args.length !== 3 || !isId(args[0]) || !isRevision(args[1]) || !isRefine(args[2])) return bad();
           return forward({ method: "POST", path: `/v1/tasks/${args[0]}/refine`, revision: args[1], body: args[2], idempotent: true });
+        case "listAccounts":
+          if (args.length !== 0) return bad();
+          return forward({ method: "GET", path: "/v1/accounts" });
+        case "createAccount":
+          if (args.length !== 1 || !isNewAccount(args[0])) return bad();
+          return forward({ method: "POST", path: "/v1/accounts", body: args[0], idempotent: true });
+        case "updateAccount":
+          if (args.length !== 2 || !isId(args[0]) || !isAccountChange(args[1])) return bad();
+          return forward({ method: "PATCH", path: `/v1/accounts/${args[0]}`, body: args[1], idempotent: true });
+        case "removeAccount":
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          return forward({ method: "DELETE", path: `/v1/accounts/${args[0]}`, idempotent: true, emptyOk: true });
+        case "issueEnrollmentCode":
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          return forward({ method: "POST", path: `/v1/accounts/${args[0]}/enrollment-codes`, idempotent: true });
+        case "recoverAccount":
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          return forward({ method: "POST", path: `/v1/accounts/${args[0]}/recover`, idempotent: true });
+        case "listSessions":
+          if (args.length !== 0) return bad();
+          // Not paginated: every live session of every account.
+          return forward({ method: "GET", path: "/v1/sessions", limit: listingLimit });
+        case "revokeSession":
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          return forward({ method: "DELETE", path: `/v1/sessions/${args[0]}`, idempotent: true, emptyOk: true });
         case "listTasks":
           if (args.length !== 0) return bad();
           return forward({ method: "GET", path: "/v1/tasks", limit: listingLimit });

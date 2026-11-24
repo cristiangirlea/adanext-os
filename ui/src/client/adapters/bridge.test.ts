@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { AdaError, type BridgeApi, type StreamMessage, type Task } from "../api";
+import { AdaError, type Account, type BridgeApi, type StreamMessage, type Task } from "../api";
 import { createBridgeClient } from "./bridge";
 
+const account: Account = { id: "u1", name: "sam", owner: false, disabled: false, password_allowed: false, credentials: 0, sessions: 0, created: "" };
 const task: Task = { id: "t1", project: "p", created_by: "local", objective: "o", criteria: "", state: "draft", revision: 0, created: "", updated: "", attempt: null };
 
 function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
@@ -30,6 +31,14 @@ function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
     addFinding: async () => ({ ok: false, error: { code: "bad_request", status: 400, message: "" } }),
     accept: async () => ({ ok: false, error: { code: "stale_review", status: 409, message: "" } }),
     refine: async () => ({ ok: false, error: { code: "provider_configuration_changed", status: 409, message: "", details: { provider_changes: { changes: [], truncated: false } } } }),
+    listAccounts: async () => ({ ok: true, value: [account] }),
+    createAccount: async () => ({ ok: true, value: { account, code: "c", expires: "e" } }),
+    updateAccount: async () => ({ ok: true, value: { ...account, disabled: true } }),
+    removeAccount: async () => ({ ok: false, error: { code: "account_in_use", status: 409, message: "in use" } }),
+    issueEnrollmentCode: async () => ({ ok: true, value: { code: "c2", expires: "e2" } }),
+    recoverAccount: async () => ({ ok: false, error: { code: "local_only", status: 403, message: "local only" } }),
+    listSessions: async () => ({ ok: true, value: [{ id: "s1", account: "u1", created: "", last_used: "", address: "192.0.2.4" }] }),
+    revokeSession: async () => ({ ok: true, value: null }),
     ...overrides,
   };
 }
@@ -93,8 +102,39 @@ describe("bridge adapter", () => {
     expect(await createBridgeClient().chooseFolder()).toBeNull();
   });
 
+  it("forwards the account methods with their arguments and hands back their values and refusals", async () => {
+    const seen: [string, unknown[]][] = [];
+    const record = <T>(name: string, value: T) => async (...args: unknown[]) => {
+      seen.push([name, args]);
+      return value;
+    };
+    install(
+      fakeBridge({
+        updateAccount: record("updateAccount", { ok: true as const, value: { ...account, password_allowed: true } }),
+        createAccount: record("createAccount", { ok: true as const, value: { account, code: "c", expires: "e" } }),
+      }),
+    );
+    const client = createBridgeClient();
+    expect(await client.listAccounts()).toEqual([account]);
+    expect(await client.createAccount({ name: "sam", password_allowed: true })).toEqual({ account, code: "c", expires: "e" });
+    expect((await client.updateAccount("u1", { password_allowed: true })).password_allowed).toBe(true);
+    expect(seen).toEqual([
+      ["createAccount", [{ name: "sam", password_allowed: true }]],
+      ["updateAccount", ["u1", { password_allowed: true }]],
+    ]);
+    expect(await client.issueEnrollmentCode("u1")).toEqual({ code: "c2", expires: "e2" });
+    expect((await client.listSessions())[0]?.address).toBe("192.0.2.4");
+    expect(await client.revokeSession("s1")).toBeUndefined();
+    const inUse = await client.removeAccount("u1").catch((e: unknown) => e);
+    expect(inUse).toBeInstanceOf(AdaError);
+    expect((inUse as AdaError).code).toBe("account_in_use");
+    expect((inUse as AdaError).status).toBe(409);
+    expect(((await client.recoverAccount("u1").catch((e: unknown) => e)) as AdaError).code).toBe("local_only");
+  });
+
   it("reports a missing bridge as bridge_unavailable", async () => {
     const error = await createBridgeClient().listTasks().catch((e: unknown) => e);
     expect((error as AdaError).code).toBe("bridge_unavailable");
+    expect(((await createBridgeClient().listAccounts().catch((e: unknown) => e)) as AdaError).code).toBe("bridge_unavailable");
   });
 });

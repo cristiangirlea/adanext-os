@@ -18,7 +18,7 @@ var (
 func reviewTask(t *testing.T, s *Store, state State, attemptState string) {
 	t.Helper()
 	for _, u := range []string{"owner", "actor", "creator", "reviewer", "outsider"} {
-		execute(t, s, "INSERT INTO users VALUES (?, ?, 'created')", u, u)
+		execute(t, s, "INSERT INTO users(id,name,created) VALUES (?, ?, 'created')", u, u)
 	}
 	execute(t, s, `INSERT INTO projects VALUES ('rp', 'project', '/source', 'created')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('rp', 'owner', 'owner', 'added')`)

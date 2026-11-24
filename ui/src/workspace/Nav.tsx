@@ -15,6 +15,7 @@ export function Nav({
   onSelect,
   onImport,
   onNewTask,
+  onAccounts,
 }: {
   tasks: Task[];
   loaded: boolean;
@@ -23,6 +24,7 @@ export function Nav({
   onSelect: (id: string) => void;
   onImport: () => void;
   onNewTask: (project?: string) => void;
+  onAccounts: () => void;
 }) {
   const projects: string[] = [];
   for (const task of tasks) if (!projects.includes(task.project)) projects.push(task.project);
@@ -37,6 +39,9 @@ export function Nav({
         </button>
         <button type="button" className="quiet" onClick={() => onNewTask()}>
           New task
+        </button>
+        <button type="button" className="quiet" onClick={onAccounts}>
+          Accounts
         </button>
       </div>
       {!loaded ? (

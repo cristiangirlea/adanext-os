@@ -354,6 +354,44 @@ export type StreamMessage =
   | { type: "reset"; last_sequence: number }
   | { type: "status"; status: "connected" | "reconnecting" | "unreachable"; code?: string };
 
+// The owner's account management (M4b.2). adad serves these on the local channel only, to the
+// owner: the desktop reaches them, the browser never does (the network channel answers local_only).
+export interface Account {
+  id: string;
+  name: string;
+  owner: boolean;
+  disabled: boolean;
+  password_allowed: boolean;
+  // How many credentials and live sessions the account holds.
+  credentials: number;
+  sessions: number;
+  created: string;
+}
+export interface NewAccount {
+  name: string;
+  password_allowed: boolean;
+}
+export interface AccountChange {
+  disabled?: boolean;
+  password_allowed?: boolean;
+}
+// A single-use enrollment code, shown once; it expires 24 hours after issue.
+export interface EnrollmentCode {
+  code: string;
+  expires: string;
+}
+export interface CreatedAccount extends EnrollmentCode {
+  account: Account;
+}
+// A signed-in browser: never its token, only the id shown to the owner.
+export interface AccountSession {
+  id: string;
+  account: string;
+  created: string;
+  last_used: string;
+  address: string;
+}
+
 // The body of every refused request: adad's error code and message.
 export interface ErrorBody {
   error: string;
@@ -390,6 +428,11 @@ export type ErrorCode =
   | "too_many_streams"
   | "shutting_down"
   | "queue_full"
+  | "account_in_use"
+  | "owner_account"
+  | "local_only"
+  | "name_taken"
+  | "code_shown"
   | "coordinator_unreachable"
   | "bridge_unavailable"
   | "malformed_call"
@@ -447,6 +490,14 @@ export interface AdaClient {
   addFinding(taskId: string, body: string): Promise<Finding>;
   accept(taskId: string, revision: number, commit: string, generation: number, secrets: SecretAck[]): Promise<Accepted>;
   refine(taskId: string, revision: number, request: RefineRequest): Promise<Refined>;
+  listAccounts(): Promise<Account[]>;
+  createAccount(input: NewAccount): Promise<CreatedAccount>;
+  updateAccount(id: string, change: AccountChange): Promise<Account>;
+  removeAccount(id: string): Promise<void>;
+  issueEnrollmentCode(id: string): Promise<EnrollmentCode>;
+  recoverAccount(id: string): Promise<EnrollmentCode>;
+  listSessions(): Promise<AccountSession[]>;
+  revokeSession(id: string): Promise<void>;
 }
 
 // The preload bridge's shape, the `ada` global the desktop's preload exposes: the same methods,
@@ -480,4 +531,12 @@ export interface BridgeApi {
   addFinding(taskId: string, body: string): Promise<BridgeResult<Finding>>;
   accept(taskId: string, revision: number, commit: string, generation: number, secrets: SecretAck[]): Promise<BridgeResult<Accepted>>;
   refine(taskId: string, revision: number, request: RefineRequest): Promise<BridgeResult<Refined>>;
+  listAccounts(): Promise<BridgeResult<Account[]>>;
+  createAccount(input: NewAccount): Promise<BridgeResult<CreatedAccount>>;
+  updateAccount(id: string, change: AccountChange): Promise<BridgeResult<Account>>;
+  removeAccount(id: string): Promise<BridgeResult<null>>;
+  issueEnrollmentCode(id: string): Promise<BridgeResult<EnrollmentCode>>;
+  recoverAccount(id: string): Promise<BridgeResult<EnrollmentCode>>;
+  listSessions(): Promise<BridgeResult<AccountSession[]>>;
+  revokeSession(id: string): Promise<BridgeResult<null>>;
 }

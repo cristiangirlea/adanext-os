@@ -11,7 +11,7 @@ are in `docs/backlog.md`.
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); follow-ups #82, #88, #94, #96, #101, #103, #107 and #111 (the last 2026-10-25); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100; content several owners stored is read through each attempt that stored it, migration 0013 (#89, 2026-11-21) | Open: #83 (a repository in OneDrive with online-only metadata) |
 | M4 First local workflow | in progress | Slices in `docs/backlog.md` (#109, #117); M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) #115; M4.3 (#118) #122, M4.4a (#119) #121, M4.4b (#120) #123 and M4.5's opt-in demonstration (#124) #125, into `main` with #126 (`b36259f`); M4.6 (#130) #132; the experience card (#128) #129; check worktree removal through a linked parent refused, #134 (`aa72d93`, 2026-11-18); adad's children start without a console window on Windows, so a closed console no longer ends a git call (#145, 2026-11-20); the desktop waits for adad's launcher, so a cold Windows PowerShell broker no longer outlasts it (#138, 2026-11-21); M4.2 to M4.4b and M4.6 implemented, none of them verified | M4.5's demonstrations on Windows and Ubuntu (#124, open; owner action 13). The Windows CI job on `main` passes again at `763a797` (#127: #137 and #139, 2026-11-18). M4 stays in progress until the demonstrations are recorded |
-| M4b Web access | not started | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23) | After M4; M4b.1 first, the execution boundary spike (owner action 15); evidence from a second computer (decisions log, 2026-10-13) |
+| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155) | M4b.1, the execution boundary spike, waits for the owner's scratch accounts (owner action 15); evidence from a second computer (decisions log, 2026-10-13) |
 | M4c Editor integration | not started | `docs/backlog.md` (#93); #91 and #92 open | After M4 (decisions log, 2026-10-18) |
 | M4d Headless server | not started | `docs/backlog.md` (#147) | After M4b; behind an access proxy first; its own gate (decisions log, 2026-11-23) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -127,6 +127,11 @@ Chosen on 2026-10-11 as the newest stable release published at least 14 days ear
 | electron-builder | 26.15.3 (the `latest` tag; 26.17.0 is on a side tag) |
 | @types/node | 22.20.4 |
 | modernc.org/sqlite | v1.59.0, added to `go.mod` in M2 when first imported (v1.60.x is younger than 14 days) |
+| github.com/go-webauthn/webauthn | v0.18.2 (2026-09-19), added in M4b.2 for passkeys |
+| golang.org/x/crypto | v0.58.0 (2026-10-09; v0.59.0 was 12 days old), added in M4b.2 for Argon2id |
+| golang.org/x/sys | v0.49.0 (2026-10-06), raised from v0.48.0 in M4b.2 because x/crypto v0.58.0 requires it |
+| github.com/fxamacker/cbor/v2 | v2.9.4 (2026-09-14), brought by webauthn; the tests' software authenticator imports it |
+| Indirect through webauthn | github.com/go-webauthn/x v0.3.1 (2026-09-10), github.com/golang-jwt/jwt/v5 v5.3.1 (2026-01-28), github.com/google/go-tpm v0.9.8 (2025-12-29), github.com/go-viper/mapstructure/v2 v2.5.0 (2026-01-12), github.com/tinylib/msgp v1.6.4 (2026-03-16), github.com/philhofer/fwd v1.2.0 (2024-09-16), github.com/x448/float16 v0.8.4 (2020-01-17) |
 
 ### CI
 
@@ -2171,6 +2176,30 @@ Evidence, left for the supervisor:
   point that can change what M4b can promise a second user, so it is settled before the slices
   that depend on it are built.
 
+- **2026-11-23, M4b.2's credential defaults and library (#154).** The owner confirmed #6's
+  defaults (owner action 9, "yes, confirm the defaults"): passkeys first; a password, Argon2id and
+  at least 12 characters, only where the owner enables it for an account; sessions ending after 8
+  idle hours or 7 days. The WebAuthn library is `github.com/go-webauthn/webauthn` v0.18.2, the
+  newest stable release at least 14 days old (dependency pins above); `golang.org/x/crypto`
+  v0.58.0 raises `golang.org/x/sys` to v0.49.0. Where #6 is silent, M4b.2 settles four points.
+  - An account with history (memberships, tasks, snapshots, attempts, findings, reviews or
+    secret-allowlist entries) cannot be removed, only disabled, so its records stay attributed.
+    The owner account can be neither disabled nor removed.
+  - An enrollment code is never stored in plain text, not even in the idempotency cache. A
+    replayed request for one answers `code_shown`, and the owner issues a new code.
+  - A disabled account's codes are refused until the owner enables it again. Turning a password
+    off keeps the stored hash but refuses password logins.
+  - Password checks take the same time whatever they meet: each holds its hashing slot until a
+    deadline set when it is admitted, one hash at the current parameters later (measured once,
+    before the first login, and then fixed), and a failure counts at that deadline, a disconnected
+    client's included; only the network channel's shutdown ends the wait sooner. Every sign-in
+    check (a password, a passkey assertion, an enrollment code, through to its commit) is admitted
+    against the throttles before it runs and counts as a failure while it runs, so a second
+    attempt overlapping one that may reach the limit waits as if it had failed.
+  Reason: removal must not orphan another user's history, a code is a credential, and neither a
+  response nor the throttle's timing may tell which accounts exist or how their passwords are
+  stored.
+
 ## Owner actions pending
 
 1. ~~Create the repository~~ (done by the owner, 2026-10-11).
@@ -2195,9 +2224,9 @@ Evidence, left for the supervisor:
 8. Now that the repository is public: say which machine details and local paths leave
    `docs/plan.md` (section 8's availability snapshot) and this file (the VMware host table).
    Suggested: the provider sign-in states and the local paths go; the hardware stays.
-9. Confirm the M4b credential defaults (decisions log, 2026-10-14, #6): passkeys first, a
+9. ~~Confirm the M4b credential defaults (decisions log, 2026-10-14, #6): passkeys first, a
    password only where the owner enables it per account, sessions idle 8 hours and absolute 7
-   days.
+   days~~ (confirmed by the owner, 2026-11-23; decisions log, M4b.2's credential defaults).
 10. Confirm which providers M4b relays first (decisions log, 2026-10-14, #7). Suggested: Codex
     and Claude, the two plans in use, each relayed only if its CLI offers a sign-in without a
     loopback callback when M4b starts; the others desktop-only.

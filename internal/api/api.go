@@ -28,6 +28,7 @@ import (
 type Authenticator func(*http.Request) (string, error)
 
 var (
+	errSessionEnded      = errors.New("session ended")
 	errEngineUnavailable = errors.New("engine unavailable")
 	errQueueFull         = errors.New("queue full")
 	errShuttingDown      = errors.New("shutting down")
@@ -50,10 +51,12 @@ type handler struct {
 	exec              Execution
 	readPage          func(context.Context, string, string, int64, int, int, func(store.Event) int) ([]store.Event, error)
 	readLast          func(context.Context, string, string) (int64, error)
+	attemptProject    func(context.Context, string, string) (string, error) // Test seam for the events route's membership lookup.
 	admission         *Admission
 	beforeStopHandoff func()      // Test seam between the stop's commit and the executor handoff.
 	capturing         atomic.Bool // Held by the one snapshot capturing and storing at a time.
 	refineMu          sync.Mutex  // One refine releases earlier work at a time.
+	net               *network    // the network channel's sign-in state; nil on the local channel
 }
 
 // AttemptRunner is the narrow API-to-executor notification boundary.
@@ -151,6 +154,8 @@ type Execution struct {
 	// Branches reads the tip of a task's branch in Ada's clone; *source.Workspaces satisfies it.
 	// nil leaves every tip unknown, so every check result reads invalidated.
 	Branches BranchReader
+	// Clock is when accounts and enrollment codes are issued; nil means time.Now.
+	Clock func() time.Time
 	// Review reads changes and files and releases an ended attempt's worktree for a refine;
 	// *source.Workspaces satisfies it. nil answers those routes engine_unavailable.
 	Review Reviewer
@@ -176,7 +181,7 @@ func (h *handler) taskAtTip(task store.Task) taskJSON {
 	return taskValue(task)
 }
 
-func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
+func newHandler(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) *handler {
 	if hub != nil && hub.BudgetBytes > 0 && hub.BudgetBytes < pageBytes {
 		panic(fmt.Sprintf("api: a budget of %d bytes is below one page (%d)", hub.BudgetBytes, pageBytes))
 	}
@@ -188,6 +193,12 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	if h.admission == nil {
 		h.admission = &Admission{}
 	}
+	return h
+}
+
+// New serves the local channel: the actor is the pipe or socket's owner, as auth says.
+func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
+	h := newHandler(s, hub, auth, execution...)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/tasks", h.create)
 	mux.HandleFunc("GET /v1/tasks", h.list)
@@ -215,6 +226,9 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 	mux.HandleFunc("GET /v1/attempts/{id}/artifacts/{hash}", h.artifact)
 	mux.HandleFunc("GET /v1/checks/{id}/log", h.checkLog)
 	mux.HandleFunc("GET /v1/tasks/{task}/checks/{id}/log", h.checkLog)
+	for pattern, route := range h.ownerRoutes() {
+		mux.HandleFunc(pattern, route)
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var allowed []string
 		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
@@ -231,12 +245,16 @@ func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) h
 		}
 		writeError(w, http.StatusNotFound, "not_found")
 	})
+	return withRequestID(mux)
+}
+
+func withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, err := newID()
 		if err != nil {
 			id = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
-		mux.ServeHTTP(&requestWriter{ResponseWriter: w, id: id}, r)
+		next.ServeHTTP(&requestWriter{ResponseWriter: w, id: id}, r)
 	})
 }
 
@@ -270,7 +288,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "experience_unavailable": "experience unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "experience_unavailable": "experience unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit", "unauthenticated": "sign in first", "local_only": "only the owner's desktop can do this", "owner_account": "the owner's account can be neither disabled nor removed", "account_in_use": "the account has history; disable it instead", "last_credential": "the account's last credential cannot be removed", "name_taken": "an account has this name", "throttled": "too many failed attempts; try again later", "login_failed": "sign-in failed", "credential_invalid": "the credential was refused", "code_invalid": "the enrollment code is unknown, used or expired", "ceremony_invalid": "the passkey ceremony is unknown or expired", "password_invalid": "a password needs at least 12 characters and at most 1,024 bytes", "password_not_allowed": "the account does not allow a password", "code_shown": "the code was shown once; issue a new one"}[code]
 	if status == 500 {
 		writeInternalError(w, errors.New("unspecified internal error"))
 		return
@@ -321,6 +339,20 @@ func storeError(w http.ResponseWriter, err error) {
 		writeError(w, 409, "snapshot_required")
 	case errors.Is(err, errUnbornBase):
 		writeError(w, 409, "unborn_base")
+	case errors.Is(err, store.ErrNameTaken):
+		writeError(w, 409, "name_taken")
+	case errors.Is(err, store.ErrAccountInUse):
+		writeError(w, 409, "account_in_use")
+	case errors.Is(err, store.ErrLastCredential):
+		writeError(w, 409, "last_credential")
+	case errors.Is(err, store.ErrCodeInvalid):
+		writeError(w, 400, "code_invalid")
+	case errors.Is(err, store.ErrPasswordNotAllowed):
+		writeError(w, 403, "password_not_allowed")
+	case errors.Is(err, store.ErrSessionEnded):
+		writeError(w, 401, "unauthenticated")
+	case errors.Is(err, store.ErrHandleMismatch):
+		writeError(w, 400, "credential_invalid")
 	default:
 		writeInternalError(w, err)
 	}
@@ -476,6 +508,10 @@ func writeCached(w http.ResponseWriter, cached []byte) bool {
 	if err := json.Unmarshal(cached, &result); err != nil {
 		writeInternalError(w, err)
 		return false
+	}
+	if result.Status == http.StatusNoContent {
+		w.WriteHeader(result.Status)
+		return true
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(result.Status)
@@ -1133,9 +1169,124 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A network session's request ends when the session is deleted or found expired; its
+	// context ends with it, so no wait for budget or read outlasts the session.
+	streamCtx := r.Context()
+	var ended <-chan struct{}
+	// check reads the session again: false once it has ended, an error when the store failed.
+	check := func() (bool, error) { return true, nil }
+	rc := http.NewResponseController(w)
+	var guard sync.Mutex
+	writing, finished := false, false
+	if sess, ok := sessionFrom(r.Context()); ok && h.net != nil {
+		var release func()
+		ended, release = h.hub.Sessions.register(sess.ID)
+		defer release()
+		var cancel context.CancelFunc
+		streamCtx, cancel = context.WithCancel(r.Context())
+		defer cancel()
+		defer func() {
+			guard.Lock()
+			finished = true
+			guard.Unlock()
+		}()
+		go func() {
+			select {
+			case <-ended:
+				cancel()
+				// Only a write in progress is cut short; before one, the handler answers itself.
+				guard.Lock()
+				if writing && !finished {
+					_ = rc.SetWriteDeadline(time.Now())
+				}
+				guard.Unlock()
+			case <-streamCtx.Done():
+			}
+		}()
+		check = func() (bool, error) {
+			if streamCtx.Err() != nil {
+				return false, nil
+			}
+			ok, err := h.net.sessionAlive(streamCtx, sess.ID)
+			if err != nil {
+				// A revocation that cancelled the read is not a store failure.
+				select {
+				case <-ended:
+					return false, nil
+				default:
+				}
+			}
+			return ok, err
+		}
+	}
+	// refused answers, before any header, a request whose session has ended or could not be read.
+	refused := func() bool {
+		ok, err := check()
+		if err != nil {
+			writeInternalError(w, err)
+			return true
+		}
+		if !ok {
+			writeError(w, 401, "unauthenticated")
+			return true
+		}
+		return false
+	}
+	alive := func() bool {
+		ok, err := check()
+		return ok && err == nil
+	}
+	deadline := h.hub.WriteDeadline
+	if deadline <= 0 {
+		deadline = 10 * time.Second
+	}
+	// emit makes each write of the response under its deadline, and none once the session has
+	// ended (errSessionEnded, nothing sent); a revocation during a write moves its deadline to now.
+	emit := func(write func() error) error {
+		guard.Lock()
+		select {
+		case <-ended: // closed by the revocation itself, before the watcher cancels
+			guard.Unlock()
+			return errSessionEnded
+		default:
+		}
+		if streamCtx.Err() != nil {
+			guard.Unlock()
+			return errSessionEnded
+		}
+		if err := rc.SetWriteDeadline(time.Now().Add(deadline)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			guard.Unlock()
+			return err
+		}
+		writing = true
+		guard.Unlock()
+		err := write()
+		guard.Lock()
+		writing = false
+		_ = rc.SetWriteDeadline(time.Time{})
+		guard.Unlock()
+		return err
+	}
+	// answer writes a whole answer through emit, or 401 when the session ended first.
+	answer := func(write func() error) {
+		if errors.Is(emit(write), errSessionEnded) {
+			writeError(w, 401, "unauthenticated")
+		}
+	}
+	// Registered first, then read again: a revocation from here on cancels every wait below.
+	if refused() {
+		return
+	}
 	// A non-member or an unknown attempt is answered before any slot or budget
 	// is held; the reads below check membership again under the reservation.
-	if _, err := h.store.AttemptProject(r.Context(), user, id); err != nil {
+	attemptProject := h.attemptProject
+	if attemptProject == nil {
+		attemptProject = h.store.AttemptProject
+	}
+	if _, err := attemptProject(streamCtx, user, id); err != nil {
+		if refused() {
+			return
+		}
 		storeError(w, err)
 		return
 	}
@@ -1148,16 +1299,15 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		}
 		defer release()
 	}
-	deadline := h.hub.WriteDeadline
-	if deadline <= 0 {
-		deadline = 10 * time.Second
-	}
 	// The first reservation waits no longer than a page's.
-	reserveCtx, cancel := context.WithTimeout(r.Context(), deadline)
+	reserveCtx, cancel := context.WithTimeout(streamCtx, deadline)
 	got := h.hub.reserveBytes(reserveCtx, pageBytes)
 	cancel()
 	if !got {
 		if r.Context().Err() == nil {
+			if refused() {
+				return
+			}
 			w.Header().Set("Retry-After", "2")
 			if h.hub.closed() {
 				writeError(w, 503, "shutting_down")
@@ -1177,67 +1327,86 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 	if readLast == nil {
 		readLast = h.store.LastEventSequence
 	}
-	last, err := readLast(r.Context(), user, id)
+	last, err := readLast(streamCtx, user, id)
 	if err != nil {
+		if refused() {
+			return
+		}
 		storeError(w, err)
 		return
 	}
+	if refused() {
+		return
+	}
 	if after > last {
+		if h.net != nil {
+			h.net.at(streamCtx, "cursor-ahead")
+		}
 		if !stream {
-			writeJSON(w, 409, map[string]any{"error": "cursor_ahead", "message": "cursor ahead", "last_sequence": last})
+			answer(func() error {
+				writeJSON(w, 409, map[string]any{"error": "cursor_ahead", "message": "cursor ahead", "last_sequence": last})
+				return nil
+			})
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		rc := http.NewResponseController(w)
-		if err := rc.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
-			return
-		}
-		w.WriteHeader(200)
-		fmt.Fprintf(w, "retry: 2000\n\nevent: cursor_ahead\ndata: {\"last_sequence\":%d}\n\n", last)
-		_ = rc.Flush()
-		_ = rc.SetWriteDeadline(time.Time{})
+		answer(func() error {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(200)
+			fmt.Fprintf(w, "retry: 2000\n\nevent: cursor_ahead\ndata: {\"last_sequence\":%d}\n\n", last)
+			return rc.Flush()
+		})
 		return
 	}
 	if !stream {
-		_, page, err := h.page(r.Context(), user, id, after, false)
+		_, page, err := h.page(streamCtx, user, id, after, false)
+		// Read again after the page: time alone can end the session while it is read.
+		if refused() {
+			return
+		}
 		if err != nil {
 			storeError(w, err)
 			return
 		}
 		h.hub.releaseBytes(held - len(page))
 		held = len(page)
-		w.Header().Set("Content-Type", "application/json")
-		rc := http.NewResponseController(w)
-		_ = rc.SetWriteDeadline(time.Now().Add(deadline))
-		w.WriteHeader(200)
-		_, _ = w.Write(page)
-		_ = rc.SetWriteDeadline(time.Time{})
+		answer(func() error {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			_, err := w.Write(page)
+			return err
+		})
 		return
 	}
 	h.hub.releaseBytes(held)
 	held = 0
 	wake, unsubscribe := h.hub.subscribe(id)
 	defer unsubscribe()
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(200)
-	rc := http.NewResponseController(w)
 	write := func(page []byte) bool {
-		if err := rc.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
-			return false
-		}
-		n, err := w.Write(page)
-		if err == nil && n != len(page) {
-			err = io.ErrShortWrite
-		}
-		if err == nil {
-			err = rc.Flush()
-		}
-		_ = rc.SetWriteDeadline(time.Time{})
-		return err == nil
+		return emit(func() error {
+			n, err := w.Write(page)
+			if err == nil && n != len(page) {
+				err = io.ErrShortWrite
+			}
+			if err == nil {
+				err = rc.Flush()
+			}
+			return err
+		}) == nil
 	}
-	if !write([]byte("retry: 2000\n\n")) {
+	started := emit(func() error {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(200)
+		if _, err := w.Write([]byte("retry: 2000\n\n")); err != nil {
+			return err
+		}
+		return rc.Flush()
+	})
+	if errors.Is(started, errSessionEnded) {
+		writeError(w, 401, "unauthenticated")
+	}
+	if started != nil {
 		return
 	}
 	poll := h.hub.PollInterval
@@ -1254,8 +1423,11 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 	defer pingTicker.Stop()
 	send := func() bool {
 		for {
+			if !alive() {
+				return false
+			}
 			count, lastSeq, pageLen, ok := func() (int, int64, int, bool) {
-				reserveCtx, cancel := context.WithTimeout(r.Context(), deadline)
+				reserveCtx, cancel := context.WithTimeout(streamCtx, deadline)
 				got := h.hub.reserveBytes(reserveCtx, pageBytes)
 				cancel()
 				if !got {
@@ -1263,8 +1435,12 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 				}
 				pageHeld := pageBytes
 				defer func() { h.hub.releaseBytes(pageHeld) }()
-				events, page, err := h.page(r.Context(), user, id, after, true)
+				events, page, err := h.page(streamCtx, user, id, after, true)
 				if err != nil {
+					return 0, after, 0, false
+				}
+				// The session is read again after any wait, before the page goes out.
+				if len(page) != 0 && !alive() {
 					return 0, after, 0, false
 				}
 				h.hub.releaseBytes(pageHeld - len(page))
@@ -1305,9 +1481,14 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-h.hub.draining:
 			final = true
+		case <-ended:
+			return
 		case <-wake:
 		case <-pollTicker.C:
 		case <-pingTicker.C:
+			if !alive() {
+				return
+			}
 			if !write([]byte(": ping\n\n")) {
 				return
 			}

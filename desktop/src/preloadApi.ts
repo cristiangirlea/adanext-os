@@ -63,5 +63,13 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
     addFinding: (taskId, body) => invoke("addFinding", [taskId, body]),
     accept: (taskId, revision, commit, generation, secrets) => invoke("accept", [taskId, revision, commit, generation, secrets]),
     refine: (taskId, revision, request) => invoke("refine", [taskId, revision, request]),
+    listAccounts: () => invoke("listAccounts", []),
+    createAccount: (input) => invoke("createAccount", [input]),
+    updateAccount: (id, change) => invoke("updateAccount", [id, change]),
+    removeAccount: (id) => invoke("removeAccount", [id]),
+    issueEnrollmentCode: (id) => invoke("issueEnrollmentCode", [id]),
+    recoverAccount: (id) => invoke("recoverAccount", [id]),
+    listSessions: () => invoke("listSessions", []),
+    revokeSession: (id) => invoke("revokeSession", [id]),
   };
 }
