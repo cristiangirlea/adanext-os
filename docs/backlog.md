@@ -546,6 +546,10 @@ assumes a desktop on the coordinator's host (decisions log, 2026-11-23, #147).
   blocks (checks and descendants included, a check reading its own actor's login among them)
   and what it costs to install, with a recommendation and whether M4b.6 should be split in two
   (the boundary, then the sign-in relay), and the owner has chosen (owner action 15).
+  Progress (#156): the owner chose on 2026-11-24 a separate OS account per user, the owner's own
+  tasks included, with a guarantee narrowed to what any candidate can show (decisions log,
+  2026-11-24, M4b.1: the owner chose the execution boundary); the Windows probes that need no
+  setup ran. The account probes and the Linux probes wait for owner action 16.
 - [x] **M4b.2 Accounts, credentials and sessions** (#154: #155, 2026-11-24). A forward migration for credentials (passkeys,
   and an Argon2id password where the owner enables it for an account), sessions stored as
   SHA-256 hashes, enrollment codes, and a disabled flag on accounts, all as #6 specifies; a
@@ -627,9 +631,10 @@ assumes a desktop on the coordinator's host (decisions log, 2026-11-23, #147).
   invalid profile refusing the start; a second user's start refused on a host where the chosen
   boundary is not active, and through an HTTPS session a second user creating, readying and
   starting a task once it is; and, with scratch credentials and keys under the chosen boundary,
-  only the provider process able to read its own profile's login, while the engine, a check and
-  the descendants of each read neither that login nor another profile, `adad`'s state, its pipe or
-  socket and token, the TLS key or the DNS token.
+  the engine, a check and the descendants of each reading no other user's profile, `adad`'s
+  state, its pipe or socket and token, the TLS key or the DNS token (a user's own tasks may read
+  that user's own login; decisions log, 2026-11-24, M4b.1: the owner chose the execution
+  boundary).
 - [ ] **M4b.7 Import roots and the server-side chooser.** Roots granted per user through the
   owner's channel and kept in the store (a forward migration), so they survive a restart;
   browsing below a root, inspecting the chosen directory by root id and relative path before
@@ -685,8 +690,8 @@ Broken into slices when M2 is done, from `docs/plan.md` sections 3 to 6.
 - **M4b Web access:** broken into slices; see "M4b Web access" above.
 - **M4d Headless server (#147):** after M4b, on its listener, accounts and sessions (decisions
   log, 2026-11-23). Slices: the execution boundary first (engine, CLIs, checks and descendants;
-  only the provider process holds the login; `adad` refuses tasks where the host cannot provide
-  it); the owner's channel as an `adad` subcommand over the socket, run by SSH as the service
+  nothing a task starts reads another user's login or `adad`'s secrets, as amended 2026-11-24;
+  `adad` refuses tasks where the host cannot provide it); the owner's channel as an `adad` subcommand over the socket, run by SSH as the service
   account, taking every desktop-channel operation of M4b; the Linux package and systemd unit
   (brought forward from M9); public mode behind an access proxy the owner controls (forwarded
   headers trusted only from the proxy, passkeys only, rate limits, the external hostname as the
