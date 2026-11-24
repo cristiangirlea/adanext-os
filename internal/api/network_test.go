@@ -70,6 +70,8 @@ func newNetFixture(t *testing.T) *netFixture {
 	if err := f.n.hasher.calibrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// Measured on the real clock, a fast hash costs 0 on Windows and microseconds on Linux; freeze it.
+	f.n.hasher.cost = 0
 	return f
 }
 
