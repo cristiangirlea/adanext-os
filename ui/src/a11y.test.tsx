@@ -127,6 +127,31 @@ describe("accessibility", () => {
     check();
   });
 
+  it("names every control of the network access view, with and without a certificate, and its refusal", async () => {
+    const client = new FakeClient();
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Network access" }));
+    await flush();
+    await flush();
+    const check = () => {
+      const unnamed = Array.from(document.querySelectorAll(controls + ', [role="group"], [role="region"], [role="status"], [role="note"], input[type="checkbox"], input[type="text"]')).filter((el) => nameOf(el) === "");
+      expect(unnamed.map((el) => el.outerHTML.slice(0, 100))).toEqual([]);
+    };
+    check();
+    expect(screen.getByRole("dialog", { name: "Network access" })).toBeTruthy();
+    for (const label of ["Enabled", "Address", "Name"]) expect(screen.getByLabelText(label)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Choose certificate and key…" }));
+    await flush();
+    await flush();
+    check();
+    client.refuse.setListener = new AdaError("name_invalid", 400, "the name must be a lowercase host name");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await flush();
+    await flush();
+    check();
+  });
+
   it("lets the keyboard select a task in the navigation", async () => {
     const client = new FakeClient([makeTask({ id: "t1", objective: "by keyboard" })]);
     render(<App client={client} />);

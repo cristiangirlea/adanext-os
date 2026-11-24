@@ -55,5 +55,8 @@ export function createBridgeClient(): AdaClient {
     recoverAccount: async (id) => unwrap(await bridge().recoverAccount(id)),
     listSessions: async () => unwrap(await bridge().listSessions()),
     revokeSession: async (id) => { unwrap(await bridge().revokeSession(id)); },
+    listener: async () => unwrap(await bridge().listener()),
+    setListener: async (setting) => unwrap(await bridge().setListener(setting)),
+    installListenerCertificate: async () => unwrap(await bridge().installListenerCertificate()),
   };
 }

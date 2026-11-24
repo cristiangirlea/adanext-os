@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { AdaError, type Account, type BridgeApi, type StreamMessage, type Task } from "../api";
+import { AdaError, type Account, type BridgeApi, type ListenerStatus, type StreamMessage, type Task } from "../api";
 import { createBridgeClient } from "./bridge";
 
 const account: Account = { id: "u1", name: "sam", owner: false, disabled: false, password_allowed: false, credentials: 0, sessions: 0, created: "" };
+const listenerOff: ListenerStatus = { enabled: false, address: "", name: "", origin: "", state: "off", reason: "disabled", message: "The network listener is turned off.", certificate: null };
 const task: Task = { id: "t1", project: "p", created_by: "local", objective: "o", criteria: "", state: "draft", revision: 0, created: "", updated: "", attempt: null };
 
 function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
@@ -39,6 +40,9 @@ function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
     recoverAccount: async () => ({ ok: false, error: { code: "local_only", status: 403, message: "local only" } }),
     listSessions: async () => ({ ok: true, value: [{ id: "s1", account: "u1", created: "", last_used: "", address: "192.0.2.4" }] }),
     revokeSession: async () => ({ ok: true, value: null }),
+    listener: async () => ({ ok: true, value: listenerOff }),
+    setListener: async () => ({ ok: false, error: { code: "name_invalid", status: 400, message: "the name must be a lowercase host name" } }),
+    installListenerCertificate: async () => ({ ok: true, value: null }),
     ...overrides,
   };
 }
@@ -130,6 +134,37 @@ describe("bridge adapter", () => {
     expect((inUse as AdaError).code).toBe("account_in_use");
     expect((inUse as AdaError).status).toBe(409);
     expect(((await client.recoverAccount("u1").catch((e: unknown) => e)) as AdaError).code).toBe("local_only");
+  });
+
+  it("forwards the listener methods with their arguments and hands back their values and refusals", async () => {
+    const seen: [string, unknown[]][] = [];
+    const serving: ListenerStatus = { ...listenerOff, enabled: true, state: "serving", reason: "", message: "" };
+    install(
+      fakeBridge({
+        listener: async (...args: unknown[]) => {
+          seen.push(["listener", args]);
+          return { ok: true as const, value: listenerOff };
+        },
+        installListenerCertificate: async (...args: unknown[]) => {
+          seen.push(["installListenerCertificate", args]);
+          return { ok: true as const, value: serving };
+        },
+      }),
+    );
+    const client = createBridgeClient();
+    expect(await client.listener()).toEqual(listenerOff);
+    expect(await client.installListenerCertificate()).toEqual(serving);
+    expect(seen).toEqual([
+      ["listener", []],
+      ["installListenerCertificate", []],
+    ]);
+    const refused = await client.setListener({ enabled: true, address: "192.0.2.20:8443", name: "Home" }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(AdaError);
+    expect((refused as AdaError).code).toBe("name_invalid");
+    expect((refused as AdaError).status).toBe(400);
+    expect((refused as AdaError).message).toBe("the name must be a lowercase host name");
+    install(fakeBridge());
+    expect(await createBridgeClient().installListenerCertificate()).toBeNull();
   });
 
   it("reports a missing bridge as bridge_unavailable", async () => {

@@ -44,6 +44,9 @@ export interface BridgeOptions {
   // Opens the native folder dialog for the calling window: the chosen path, or null. A path
   // enters only this way (decisions log, 2026-10-20).
   chooseFolder?: (event: BridgeEvent) => Promise<string | null>;
+  // Opens the native file dialogs for the listener's certificate and key: their paths, or null
+  // when the owner cancelled one. The paths go to adad and never to the renderer.
+  chooseCertificate?: (event: BridgeEvent) => Promise<{ certificate: string; key: string } | null>;
   now?: () => number;
 }
 
@@ -68,6 +71,8 @@ const maxSecretAcks = 1000;
 const maxSecretReason = 1 << 10;
 // adad takes an account name of 1 to 64 printable characters.
 const maxAccountName = 64;
+// adad checks the listener's address and name; a host name is at most 253 bytes.
+const maxListenerField = 255;
 
 function refused(code: string, message: string): BridgeResult<never> {
   return { ok: false, error: { code, status: 0, message } };
@@ -167,6 +172,17 @@ function isAccountChange(value: unknown): boolean {
     hasKeys(value, [], ["disabled", "password_allowed"]) &&
     (value.disabled === undefined || typeof value.disabled === "boolean") &&
     (value.password_allowed === undefined || typeof value.password_allowed === "boolean")
+  );
+}
+function isListenerSetting(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasKeys(value, ["enabled", "address", "name"]) &&
+    typeof value.enabled === "boolean" &&
+    typeof value.address === "string" &&
+    value.address.length <= maxListenerField &&
+    typeof value.name === "string" &&
+    value.name.length <= maxListenerField
   );
 }
 // A path inside a commit, as the files route takes it: never a host path, which it cannot reach.
@@ -299,6 +315,17 @@ export function createBridge(options: BridgeOptions): Bridge {
     return { ok: true, value: { handle, path: chosen } };
   };
 
+  const installCertificate = async (event: BridgeEvent): Promise<BridgeResult<unknown>> => {
+    if (!options.chooseCertificate) return refused("malformed_call", "this shell has no certificate dialog");
+    const chosen: unknown = await options.chooseCertificate(event);
+    if (chosen === null) return { ok: true, value: null };
+    // A file is checked as a folder is: a local absolute path.
+    if (!isRecord(chosen) || !hasKeys(chosen, ["certificate", "key"]) || !isLocalFolder(chosen.certificate) || !isLocalFolder(chosen.key)) {
+      return refused("malformed_call", "the certificate and key must be local absolute paths");
+    }
+    return forward({ method: "PUT", path: "/v1/listener/certificate", body: { certificate: chosen.certificate, key: chosen.key } });
+  };
+
   const subscribe = (event: BridgeEvent, subId: string, attemptId: string): BridgeResult<null> => {
     const sender = event.sender;
     const k = key(sender.id, subId);
@@ -420,6 +447,15 @@ export function createBridge(options: BridgeOptions): Bridge {
         case "revokeSession":
           if (args.length !== 1 || !isId(args[0])) return bad();
           return forward({ method: "DELETE", path: `/v1/sessions/${args[0]}`, idempotent: true, emptyOk: true });
+        case "listener":
+          if (args.length !== 0) return bad();
+          return forward({ method: "GET", path: "/v1/listener" });
+        case "setListener":
+          if (args.length !== 1 || !isListenerSetting(args[0])) return bad();
+          return forward({ method: "PUT", path: "/v1/listener", body: args[0] });
+        case "installListenerCertificate":
+          if (args.length !== 0) return bad();
+          return installCertificate(event);
         case "listTasks":
           if (args.length !== 0) return bad();
           return forward({ method: "GET", path: "/v1/tasks", limit: listingLimit });

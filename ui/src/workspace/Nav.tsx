@@ -16,6 +16,7 @@ export function Nav({
   onImport,
   onNewTask,
   onAccounts,
+  onListener,
 }: {
   tasks: Task[];
   loaded: boolean;
@@ -25,6 +26,7 @@ export function Nav({
   onImport: () => void;
   onNewTask: (project?: string) => void;
   onAccounts: () => void;
+  onListener: () => void;
 }) {
   const projects: string[] = [];
   for (const task of tasks) if (!projects.includes(task.project)) projects.push(task.project);
@@ -42,6 +44,9 @@ export function Nav({
         </button>
         <button type="button" className="quiet" onClick={onAccounts}>
           Accounts
+        </button>
+        <button type="button" className="quiet" onClick={onListener}>
+          Network access
         </button>
       </div>
       {!loaded ? (

@@ -36,7 +36,7 @@ export class BadResponse extends Error {
 }
 
 export interface Call {
-  method: "GET" | "POST" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   body?: unknown;
   // The expected task revision, sent as If-Match in the ETag's quoted form.
