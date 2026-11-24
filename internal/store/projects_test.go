@@ -253,3 +253,23 @@ func TestAVersionSixStoreMigratesForwardWithItsSnapshotsAndWorkspacesUnbound(t *
 		t.Fatalf("an older workspace: %+v, %v", w, err)
 	}
 }
+
+func TestProjectsListsTheUsersMembershipsByNameThenIDWithoutTasksOrOtherUsersProjects(t *testing.T) {
+	s := openTestStore(t)
+	users(t, s, "alice", "bob")
+	for _, p := range []struct{ id, name, created string }{{"p2", "Beta", "2026-01-02"}, {"p1", "Beta", "2026-01-01"}, {"p3", "Alpha", "2026-01-03"}, {"p4", "Bob's", "2026-01-04"}} {
+		execute(t, s, "INSERT INTO projects(id,name,source_path,created) VALUES(?,?,'/host/path',?)", p.id, p.name, p.created)
+	}
+	execute(t, s, "INSERT INTO project_members(project,user,role,added) VALUES('p1','alice','owner','now'),('p2','alice','member','now'),('p3','alice','member','now'),('p4','bob','owner','now')")
+	got, err := s.Projects(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ProjectSummary{{"p3", "Alpha", "member", "2026-01-03"}, {"p1", "Beta", "owner", "2026-01-01"}, {"p2", "Beta", "member", "2026-01-02"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("projects = %+v", got)
+	}
+	if none, err := s.Projects(ctx, "nobody"); err != nil || none == nil || len(none) != 0 {
+		t.Fatalf("a user without projects: %#v, %v", none, err)
+	}
+}

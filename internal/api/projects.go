@@ -430,6 +430,31 @@ func (h *handler) discardSnapshot(ctx context.Context, cause error, written []st
 	return cause
 }
 
+type projectSummaryJSON struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Role    string `json:"role"`
+	Created string `json:"created"`
+}
+
+// listProjects answers the actor's projects, those with no task included, and never a host path.
+func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.actor(w, r)
+	if !ok {
+		return
+	}
+	projects, err := h.store.Projects(r.Context(), user)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	out := make([]projectSummaryJSON, 0, len(projects))
+	for _, p := range projects {
+		out = append(out, projectSummaryJSON{p.ID, p.Name, p.Role, p.Created})
+	}
+	writeJSON(w, 200, out)
+}
+
 func (h *handler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.actor(w, r)
 	if !ok {

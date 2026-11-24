@@ -20,6 +20,9 @@ func (h *handler) ownerRoutes() map[string]http.HandlerFunc {
 		"POST /v1/accounts/{id}/recover":          h.issueCode(true),
 		"GET /v1/sessions":                        h.listSessions,
 		"DELETE /v1/sessions/{id}":                h.revokeSession,
+		"GET /v1/listener":                        h.getListener,
+		"PUT /v1/listener":                        h.setListener,
+		"PUT /v1/listener/certificate":            h.installCertificate,
 	}
 }
 

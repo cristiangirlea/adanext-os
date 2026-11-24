@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
@@ -127,6 +128,7 @@ func isLowerHex(value string) bool {
 
 type options struct {
 	stateDir, name, enginePath, engineHash string
+	uiDir                                  string
 	detach                                 bool
 	concurrency                            int
 	preparingDeadline                      time.Duration
@@ -143,6 +145,7 @@ func parseFlags(args []string, output io.Writer) (*options, *flag.FlagSet, error
 	flags.StringVar(&o.engineHash, "engine-sha256", "", "optional: the pinned engine's SHA-256 again, which must equal the one built into adad")
 	flags.IntVar(&o.concurrency, "concurrency", 1, "attempts launched at once across all users; one writer per workspace holds regardless")
 	flags.DurationVar(&o.preparingDeadline, "preparing-deadline", 2*time.Minute, "how long a launched engine has to say hello and accept the start before the attempt fails")
+	flags.StringVar(&o.uiDir, "ui", "", "the built shared UI the network listener serves; default ui in the application's directory")
 	return o, flags, flags.Parse(args)
 }
 
@@ -170,7 +173,7 @@ func detachedArgs(args []string, o *options) ([]string, error) {
 	for _, path := range []struct {
 		flag  string
 		value *string
-	}{{"state-dir", &o.stateDir}, {"engine", &o.enginePath}} {
+	}{{"state-dir", &o.stateDir}, {"engine", &o.enginePath}, {"ui", &o.uiDir}} {
 		if *path.value == "" {
 			continue
 		}
@@ -182,6 +185,24 @@ func detachedArgs(args []string, o *options) ([]string, error) {
 		child = append(child, "-"+path.flag+"="+abs)
 	}
 	return child, nil
+}
+
+// resolveUI opens the built shared UI in dir, by default ui in the application's directory, as a
+// root no link inside it can leave; nil when there is no such directory, and the network
+// listener then serves no static files.
+func resolveUI(dir string) *os.Root {
+	if dir == "" {
+		app, err := appDirectory()
+		if err != nil {
+			return nil
+		}
+		dir = filepath.Join(app, "ui")
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil
+	}
+	return root
 }
 
 // startupLogLimit caps the start-up log; anything beyond it is dropped.
@@ -423,8 +444,20 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "adad: remove unreferenced artifacts:", err)
 		}
 	}
+	var ui fs.FS
+	if root := resolveUI(opts.uiDir); root != nil {
+		defer root.Close()
+		ui = root.FS()
+	}
+	web := newWebListener(filepath.Join(opts.stateDir, "config"), time.Now, func(name, origin string) http.Handler {
+		return api.NewWeb(s, hub, api.WebConfig{Name: name, Origin: origin, Owner: ownerAccount, UI: ui, Clock: time.Now}, execution)
+	}, stderr)
+	defer web.Close()
+	execution.Listener = web
 	server := &http.Server{Handler: api.New(s, hub, func(*http.Request) (string, error) { return ownerAccount, nil }, execution), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20, IdleTimeout: 60 * time.Second}
 	server.RegisterOnShutdown(hub.Close)
+	// Before serving, so the owner's first status read already sees it; a failure only keeps it off.
+	web.start()
 	serveErr := make(chan error, 1)
 	startup.close()
 	go func() { serveErr <- server.Serve(listener) }()
@@ -458,6 +491,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		// Open streams first deliver what the stop committed, within the write
 		// deadline, before the shutdown closes the hub under them.
 		hub.Drain()
+		// After the drain, so network streams see it, and before the local server goes.
+		web.Close()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
