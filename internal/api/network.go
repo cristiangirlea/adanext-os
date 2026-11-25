@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -72,6 +73,13 @@ func (n *network) at(ctx context.Context, point string) {
 // The network lists: every local route is in exactly one of them, or is an owner-channel route,
 // which the network refuses as networkLocalOnly.
 var (
+	// networkChooser checks each session against its explicit root grants.
+	networkChooser = []string{
+		"GET /v1/import-roots",
+		"GET /v1/import-roots/{id}/browse",
+		"POST /v1/import-roots/{id}/inspect",
+		"POST /v1/import-roots/{id}/import",
+	}
 	// networkReads are served to a session through the handler's own membership checks.
 	networkReads = []string{
 		"GET /v1/projects",
@@ -97,6 +105,7 @@ var (
 	// networkOwner are served to the coordinator owner account's session; any other account's
 	// is refused with not_on_network until a later slice opens them to other users.
 	networkOwner = []string{
+		"GET /v1/projects/{id}/untracked",
 		"POST /v1/tasks",
 		"PUT /v1/tasks/{id}/checks",
 		"POST /v1/tasks/{id}/ready",
@@ -176,7 +185,7 @@ func newNetwork(s *store.Store, hub *Hub, cfg NetworkConfig, execution ...Execut
 		n.session.HandleFunc(pattern, route)
 	}
 	local := n.h.localRoutes()
-	for _, pattern := range networkReads {
+	for _, pattern := range slices.Concat(networkReads, networkChooser) {
 		n.reads.HandleFunc(pattern, local[pattern])
 	}
 	refuse := func(code string) http.HandlerFunc {

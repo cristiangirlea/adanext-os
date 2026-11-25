@@ -4,6 +4,7 @@ package source
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"unsafe"
 
@@ -88,29 +89,32 @@ func plainDirectory(h windows.Handle) error {
 	return nil
 }
 
-func openDirNoFollow(root, rel string) error {
+func holdDirNoFollow(root, rel string) (*os.File, error) {
 	dir, err := openReparsePoint(root, windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE)
 	if err != nil {
-		return &os.PathError{Op: "open", Path: root, Err: err}
+		return nil, &os.PathError{Op: "open", Path: root, Err: err}
 	}
-	defer func() { windows.CloseHandle(dir) }()
+
 	if err := plainDirectory(dir); err != nil {
-		return &os.PathError{Op: "open", Path: root, Err: err}
-	}
-	if rel == "" || rel == "." {
-		return nil
+		windows.CloseHandle(dir)
+		return nil, &os.PathError{Op: "open", Path: root, Err: err}
 	}
 	for _, part := range strings.Split(rel, "/") {
+		if part == "" || part == "." {
+			continue
+		}
 		next, err := ntCreate(dir, part, windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
 			windows.FILE_ATTRIBUTE_DIRECTORY, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE)
 		if err != nil {
-			return &os.PathError{Op: "open", Path: rel, Err: err}
+			windows.CloseHandle(dir)
+			return nil, &os.PathError{Op: "open", Path: rel, Err: err}
 		}
 		windows.CloseHandle(dir)
 		dir = next
 		if err := plainDirectory(dir); err != nil {
-			return &os.PathError{Op: "open", Path: rel, Err: err}
+			windows.CloseHandle(dir)
+			return nil, &os.PathError{Op: "open", Path: rel, Err: err}
 		}
 	}
-	return nil
+	return os.NewFile(uintptr(dir), filepath.Join(root, filepath.FromSlash(rel))), nil
 }

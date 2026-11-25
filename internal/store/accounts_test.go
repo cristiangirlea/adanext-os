@@ -70,7 +70,7 @@ func TestTheAccountsMigrationLeavesEveryUserEnabledWithoutAPasswordOrHandle(t *t
 	s := openTestStore(t)
 	seed(t, s)
 	path := s.path
-	for _, q := range []string{"DROP TABLE permission_decisions", "ALTER TABLE projects DROP COLUMN default_mode", "DROP TABLE enrollment_codes", "DROP TABLE sessions", "DROP TABLE credentials", "DROP INDEX users_webauthn_handle", "ALTER TABLE users DROP COLUMN webauthn_handle", "ALTER TABLE users DROP COLUMN password_allowed", "ALTER TABLE users DROP COLUMN disabled", "DELETE FROM schema_migrations WHERE version>=14", "PRAGMA user_version=13"} {
+	for _, q := range []string{"DROP TABLE import_root_grants", "DROP TABLE import_roots", "ALTER TABLE project_sources DROP COLUMN import_root", "DROP TABLE permission_decisions", "ALTER TABLE projects DROP COLUMN default_mode", "DROP TABLE enrollment_codes", "DROP TABLE sessions", "DROP TABLE credentials", "DROP INDEX users_webauthn_handle", "ALTER TABLE users DROP COLUMN webauthn_handle", "ALTER TABLE users DROP COLUMN password_allowed", "ALTER TABLE users DROP COLUMN disabled", "DELETE FROM schema_migrations WHERE version>=14", "PRAGMA user_version=13"} {
 		execute(t, s, q)
 	}
 	if err := s.Close(); err != nil {

@@ -7,7 +7,7 @@ export type ProjectsRead = { state: "loading" } | { state: "ok" } | { state: "er
 
 // The left navigation: each project with its tasks, the active ones first in the order adad
 // listed them, then the finished ones. The projects come from adad's list, those with no task yet
-// included; a project known only from a task shows its id. The browser has no import, accounts,
+// included; a project known only from a task shows its id. The browser has no accounts,
 // network access or project settings controls, and opens the signed-in account instead; it
 // offers new tasks only to the owner account.
 
@@ -25,6 +25,7 @@ export function Nav({
   selectedId,
   onSelect,
   onImport,
+  onRoots,
   onNewTask,
   onAccounts,
   onListener,
@@ -44,6 +45,7 @@ export function Nav({
   selectedId: string | null;
   onSelect: (id: string) => void;
   onImport: () => void;
+  onRoots?: () => void;
   onNewTask: (project?: string) => void;
   onAccounts: () => void;
   onListener: () => void;
@@ -59,6 +61,9 @@ export function Nav({
     <nav className="nav" id="task-list" aria-label="Projects and tasks">
       <div className="nav-head">
         <span className="wordmark">Ada</span>
+        <button type="button" onClick={onImport}>
+          Import a repository
+        </button>
         {browser ? (
           <>
             <button type="button" className="quiet" onClick={onAccount}>
@@ -72,9 +77,7 @@ export function Nav({
           </>
         ) : (
           <>
-            <button type="button" onClick={onImport}>
-              Import a repository
-            </button>
+            <button type="button" className="quiet" onClick={onRoots}>Import roots</button>
             <button type="button" className="quiet" onClick={() => onNewTask()}>
               New task
             </button>

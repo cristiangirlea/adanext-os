@@ -31,12 +31,18 @@ type TaskSummary struct {
 // ProjectSource is an imported project's source identity at import.
 type ProjectSource struct {
 	Project, Path, CommonDir, Fingerprint, Imported string
+	ImportRoot                                      string
 }
 
 // ImportProject creates project id for src with the transaction's user as
 // its owner and returns the source as recorded. A source whose canonical
 // path a project already holds is refused with *AlreadyImportedError.
 func (tx *Tx) ImportProject(ctx context.Context, id, name string, src ProjectSource) (ProjectSource, error) {
+	if src.ImportRoot != "" {
+		if _, err := grantedRootPath(ctx, tx.tx, tx.userID, src.ImportRoot); err != nil {
+			return ProjectSource{}, err
+		}
+	}
 	var existing string
 	err := tx.tx.QueryRowContext(ctx, "SELECT project FROM project_sources WHERE canonical_path=?", src.Path).Scan(&existing)
 	if err == nil {
@@ -51,7 +57,7 @@ func (tx *Tx) ImportProject(ctx context.Context, id, name string, src ProjectSou
 		args  []any
 	}{
 		{"INSERT INTO projects(id,name,source_path,created) VALUES(?,?,?,?)", []any{id, name, src.Path, at}},
-		{"INSERT INTO project_sources(project,canonical_path,common_dir,fingerprint,imported) VALUES(?,?,?,?,?)", []any{id, src.Path, src.CommonDir, src.Fingerprint, at}},
+		{"INSERT INTO project_sources(project,canonical_path,common_dir,fingerprint,imported,import_root) VALUES(?,?,?,?,?,?)", []any{id, src.Path, src.CommonDir, src.Fingerprint, at, src.ImportRoot}},
 		{"INSERT INTO project_members(project,user,role,added) VALUES(?,?,'owner',?)", []any{id, tx.userID, at}},
 	} {
 		if _, err := tx.tx.ExecContext(ctx, insert.query, insert.args...); err != nil {
@@ -117,9 +123,9 @@ func (s *Store) Projects(ctx context.Context, user string) ([]ProjectSummary, er
 // that was not imported.
 func (s *Store) ProjectSource(ctx context.Context, userID, projectID string) (ProjectSource, error) {
 	src := ProjectSource{Project: projectID}
-	var path, commonDir, fingerprint, imported sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT s.canonical_path,s.common_dir,s.fingerprint,s.imported FROM project_members m
-		LEFT JOIN project_sources s ON s.project=m.project WHERE m.project=? AND m.user=?`, projectID, userID).Scan(&path, &commonDir, &fingerprint, &imported)
+	var path, commonDir, fingerprint, imported, root sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT s.canonical_path,s.common_dir,s.fingerprint,s.imported,s.import_root FROM project_members m
+		LEFT JOIN project_sources s ON s.project=m.project WHERE m.project=? AND m.user=?`, projectID, userID).Scan(&path, &commonDir, &fingerprint, &imported, &root)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProjectSource{}, ErrNotFound
 	}
@@ -130,6 +136,7 @@ func (s *Store) ProjectSource(ctx context.Context, userID, projectID string) (Pr
 		return ProjectSource{}, ErrNoSource
 	}
 	src.Path, src.CommonDir, src.Fingerprint, src.Imported = path.String, commonDir.String, fingerprint.String, imported.String
+	src.ImportRoot = root.String
 	return src, nil
 }
 

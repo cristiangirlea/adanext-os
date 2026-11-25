@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/cristiangirlea/ada-os/internal/source"
@@ -19,7 +18,6 @@ import (
 // Snapshot request limits: paths per request and bytes per path.
 const (
 	maxSelected   = 1000
-	maxPathLength = 4096
 	maxNameLength = 200
 )
 
@@ -96,6 +94,18 @@ func (h *handler) importProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	rootID := r.PathValue("id")
+	var root string
+	var scope *store.Scope
+	if rootID != "" {
+		var err error
+		scope = &store.Scope{ImportRootID: rootID}
+		root, err = h.store.GrantedRootPath(r.Context(), user, rootID)
+		if err != nil {
+			storeError(w, err)
+			return
+		}
+	}
 	k, ok := key(w, r)
 	if !ok {
 		return
@@ -105,25 +115,44 @@ func (h *handler) importProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Path string `json:"path"`
-		Name string `json:"name"`
+		Path *string `json:"path"`
+		Name string  `json:"name"`
 	}
-	if err := decode(body, &input); err != nil || !validRepoPath(input.Path) || !validName(input.Name) {
+	if err := decode(body, &input); err != nil || input.Path == nil || (rootID == "" && !validRepoPath(*input.Path)) || !validName(input.Name) {
 		writeError(w, 400, "bad_request")
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
-	if h.replayed(w, r, user, k, nil) {
+	var dir *os.File
+	if rootID != "" {
+		var err error
+		dir, err = source.OpenImportDirectory(root, *input.Path)
+		if err != nil {
+			writeRootError(w, err)
+			return
+		}
+		defer dir.Close()
+	}
+	if h.replayed(w, r, user, k, scope) {
 		return
 	}
-	if h.exec.Inspector == nil {
-		h.gitUnavailable(w)
-		return
-	}
-	result, err := h.exec.Inspector.Inspect(r.Context(), input.Path)
-	if err != nil {
-		writeInternalError(w, err)
-		return
+	var result source.Inspection
+	if rootID != "" {
+		result, ok = h.inspectGrantedDirectory(w, r, user, root, *input.Path, dir)
+		if !ok {
+			return
+		}
+	} else {
+		if h.exec.Inspector == nil {
+			h.gitUnavailable(w)
+			return
+		}
+		var err error
+		result, err = h.exec.Inspector.Inspect(r.Context(), *input.Path)
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
 	}
 	if len(result.Blockers) > 0 {
 		writeJSON(w, 409, blockedBody{errorBody{"import_blocked", "the repository cannot be imported as it stands"}, result.Blockers})
@@ -132,15 +161,21 @@ func (h *handler) importProject(w http.ResponseWriter, r *http.Request) {
 	name := input.Name
 	if name == "" {
 		name = filepath.Base(result.Identity.Path)
+		if rootID != "" && filepath.Dir(result.Identity.Path) == result.Identity.Path {
+			name = "Repository"
+		}
 	}
-	h.mutate(w, r, user, k, nil, "", func(tx *store.Tx) (int, any, error) {
+	h.mutate(w, r, user, k, scope, "", func(tx *store.Tx) (int, any, error) {
 		id, err := newID()
 		if err != nil {
 			return 0, nil, err
 		}
-		src, err := tx.ImportProject(r.Context(), id, name, store.ProjectSource{Path: result.Identity.Path, CommonDir: result.Identity.CommonDir, Fingerprint: result.Fingerprint})
+		src, err := tx.ImportProject(r.Context(), id, name, store.ProjectSource{Path: result.Identity.Path, CommonDir: result.Identity.CommonDir, Fingerprint: result.Fingerprint, ImportRoot: rootID})
 		if err != nil {
 			return 0, nil, err
+		}
+		if rootID != "" {
+			return 201, map[string]string{"id": id, "name": name, "role": "owner"}, nil
 		}
 		return 201, projectJSON{id, name, "owner", sourceJSON{src.Path, src.CommonDir, src.Fingerprint, src.Imported}}, nil
 	})
@@ -226,7 +261,7 @@ func validSelection(sel source.Selection) bool {
 	}
 	seen := map[string]bool{}
 	for _, p := range sel.Untracked {
-		if p == "" || len(p) > maxPathLength || !utf8.ValidString(p) || strings.ContainsRune(p, 0) || seen[p] {
+		if !source.ValidSelectionPath(p) || seen[p] {
 			return false
 		}
 		seen[p] = true
@@ -247,10 +282,7 @@ func (h *handler) captureError(w http.ResponseWriter, err error) {
 	if e, ok := errors.AsType[*source.BlockedError](err); ok {
 		blockers := e.Blockers
 		if h.net != nil {
-			blockers = make([]source.Blocker, 0, len(e.Blockers))
-			for _, b := range e.Blockers {
-				blockers = append(blockers, source.Blocker{Code: b.Code, Paths: []string{}, Count: b.Count})
-			}
+			blockers = redactedBlockers(e.Blockers)
 		}
 		writeJSON(w, 409, blockedBody{errorBody{"import_blocked", "the repository cannot be captured as it stands"}, blockers})
 		return
@@ -332,7 +364,31 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.guards.capturing.Store(false)
-	c, err := h.exec.Capturer.Capture(r.Context(), src.Path, sel)
+	root, ok := h.projectImportRoot(w, r, src)
+	if !ok {
+		return
+	}
+	var c source.Capture
+	if root == "" {
+		c, err = h.exec.Capturer.Capture(r.Context(), src.Path, sel)
+	} else {
+		bounded, ok := h.exec.Capturer.(interface {
+			CaptureInRoot(context.Context, string, string, source.Selection) (source.Capture, error)
+		})
+		if !ok {
+			h.gitUnavailable(w)
+			return
+		}
+		dir, ok := h.openProjectDirectory(w, src, root)
+		if !ok {
+			return
+		}
+		defer dir.Close()
+		c, err = bounded.CaptureInRoot(r.Context(), src.Path, root, sel)
+		if err == nil && !h.recheckProjectDirectory(w, r, src, dir) {
+			return
+		}
+	}
 	if err != nil {
 		h.captureError(w, err)
 		return
@@ -515,7 +571,37 @@ func (h *handler) drift(w http.ResponseWriter, r *http.Request) {
 	for _, p := range snap.State.Paths {
 		base.Paths = append(base.Paths, source.PathEntry{Path: p.Path, Untracked: p.Untracked, Entry: p.Entry})
 	}
-	d, err := h.exec.Drifter.Drift(r.Context(), src.Path, base)
+	root, ok := h.projectImportRoot(w, r, src)
+	if !ok {
+		return
+	}
+	var d source.Drift
+	if root == "" {
+		d, err = h.exec.Drifter.Drift(r.Context(), src.Path, base)
+	} else {
+		bounded, ok := h.exec.Drifter.(interface {
+			DriftInRoot(context.Context, string, string, source.Baseline) (source.Drift, error)
+		})
+		if !ok {
+			h.gitUnavailable(w)
+			return
+		}
+		dir, ok := h.openProjectDirectory(w, src, root)
+		if !ok {
+			return
+		}
+		defer dir.Close()
+		d, err = bounded.DriftInRoot(r.Context(), src.Path, root, base)
+		if err == nil {
+			if !h.recheckProjectDirectory(w, r, src, dir) {
+				return
+			}
+			if len(d.Blockers) > 0 {
+				h.captureError(w, &source.BlockedError{Blockers: redactedBlockers(d.Blockers)})
+				return
+			}
+		}
+	}
 	if err != nil {
 		writeInternalError(w, err)
 		return

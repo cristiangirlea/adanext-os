@@ -436,6 +436,7 @@ func TestADecisionIsSeenAndAnsweredInTheActorsSessionAndInvisibleInAnotherUsers(
 }
 
 func TestThroughAnHTTPSSessionTheOwnerAccountRunsATaskAndAnotherUserIsRefusedEach(t *testing.T) {
+	trustImportRoots(t)
 	runner := &recordingRunner{}
 	g, err := source.Resolve(context.Background(), canonicalTemp(t))
 	if err != nil {
@@ -451,14 +452,43 @@ func TestThroughAnHTTPSSessionTheOwnerAccountRunsATaskAndAnotherUserIsRefusedEac
 		e.Inspector, e.Capturer, e.Writer, e.Artifacts = inspector, inspector, artifacts, artifacts
 	})
 	repo := newRepo(t)
-	imported := f.owner(t, "POST", "/v1/projects", map[string]any{"path": repo, "name": "repo"})
-	if imported.status != 201 {
-		t.Fatalf("import: %d %s", imported.status, imported.body)
+	root := f.owner(t, "POST", "/v1/import-roots", map[string]string{"path": repo})
+	if root.status != 201 {
+		t.Fatalf("add root: %d %s", root.status, root.body)
 	}
-	project := imported.json(t)["id"].(string)
+	base := "/v1/import-roots/" + root.json(t)["id"].(string)
 	owner := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
 	id, code := f.account(t, "Vera", false)
 	vera := f.mustEnroll(t, code, newSoftKey(t))
+	body := map[string]string{"path": ""}
+	if r := f.call(t, "GET", base+"/browse", owner, nil); r.status != 404 {
+		t.Fatalf("owner without grant: %d", r.status)
+	}
+	if r := f.owner(t, "PUT", base+"/grants/local", nil); r.status != 200 {
+		t.Fatalf("grant: %d %s", r.status, r.body)
+	}
+	for _, route := range []string{"browse", "inspect", "import"} {
+		method := "POST"
+		if route == "browse" {
+			method = "GET"
+		}
+		if r := f.keyed(t, method, base+"/"+route, vera, "denied", "", nil); r.status != 404 {
+			t.Fatalf("another user's %s: %d", route, r.status)
+		}
+	}
+	inspected := f.call(t, "POST", base+"/inspect", owner, body)
+	if inspected.status != 200 || !strings.Contains(string(inspected.body), "notes/n.bin") || strings.Contains(string(inspected.body), "identity") {
+		t.Fatalf("inspect: %s", inspected.body)
+	}
+	imported := f.keyed(t, "POST", base+"/import", owner, "import", "", body)
+	if imported.status != 201 || imported.json(t)["source"] != nil {
+		t.Fatalf("import: %d %s", imported.status, imported.body)
+	}
+	project := imported.json(t)["id"].(string)
+	listed := f.call(t, "GET", "/v1/projects/"+project+"/untracked", owner, nil)
+	if listed.status != 200 || !strings.Contains(string(listed.body), "notes/n.bin") {
+		t.Fatalf("untracked: %s", listed.body)
+	}
 	f.exec(t, "INSERT INTO project_members(project,user,role,added) VALUES(?,?,'member','now')", project, id)
 	refused := func(method, path, match string, body any) {
 		t.Helper()
@@ -466,11 +496,14 @@ func TestThroughAnHTTPSSessionTheOwnerAccountRunsATaskAndAnotherUserIsRefusedEac
 			t.Fatalf("another user's %s %s: %d %s", method, path, r.status, r.body)
 		}
 	}
-	snapshotBody := map[string]any{"include_changes": false}
+	snapshotBody := map[string]any{"include_changes": false, "untracked": []string{"notes/n.bin"}}
 	refused("POST", "/v1/projects/"+project+"/snapshots", "", snapshotBody)
 	r := f.keyed(t, "POST", "/v1/projects/"+project+"/snapshots", owner, "snapshot", "", snapshotBody)
 	if r.status != 201 {
 		t.Fatalf("snapshot: %d %s", r.status, r.body)
+	}
+	if !strings.Contains(string(r.body), "notes/n.bin") {
+		t.Fatal("selected file missing", string(r.body))
 	}
 	snapshot := r.json(t)["id"].(string)
 	taskBody := map[string]any{"project": project, "objective": "work", "criteria": "done", "snapshot": snapshot}

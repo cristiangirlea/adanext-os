@@ -12,6 +12,12 @@ import (
 // network channel refuses each of them with local_only, a session of the owner's included.
 func (h *handler) ownerRoutes() map[string]http.HandlerFunc {
 	return map[string]http.HandlerFunc{
+		"GET /v1/import-roots/all":                   h.allImportRoots,
+		"POST /v1/import-roots":                      h.addImportRoot,
+		"DELETE /v1/import-roots/{id}":               h.changeImportRoot,
+		"PUT /v1/import-roots/{id}/grants/{user}":    h.changeImportRoot,
+		"DELETE /v1/import-roots/{id}/grants/{user}": h.changeImportRoot,
+
 		"GET /v1/accounts":                        h.listAccounts,
 		"POST /v1/accounts":                       h.createAccount,
 		"PATCH /v1/accounts/{id}":                 h.updateAccount,

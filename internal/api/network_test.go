@@ -1070,6 +1070,11 @@ func TestTheOwnersFirstPasskeyGoesOnTheLocalAccountWithItsProjectsAndTasks(t *te
 
 // ownerChannelRoutes is every owner-channel route with a body it would take.
 var ownerChannelRoutes = []struct{ method, path string }{
+	{"GET", "/v1/import-roots/all"},
+	{"POST", "/v1/import-roots"},
+	{"DELETE", "/v1/import-roots/root"},
+	{"PUT", "/v1/import-roots/root/grants/local"},
+	{"DELETE", "/v1/import-roots/root/grants/local"},
 	{"GET", "/v1/accounts"},
 	{"POST", "/v1/accounts"},
 	{"PATCH", "/v1/accounts/local"},

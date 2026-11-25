@@ -149,6 +149,11 @@ func alphanumericByte(c byte) bool {
 // generation, the snapshot, base commit, executor and policy; the returned
 // manifest adds the version, branch, path and prepared HEAD commit.
 func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, changes Changes) (Manifest, error) {
+	return w.PrepareInRoot(ctx, source, "", m, changes)
+}
+
+// PrepareInRoot prepares a worktree from an original confined to its import root.
+func (w *Workspaces) PrepareInRoot(ctx context.Context, source, root string, m Manifest, changes Changes) (Manifest, error) {
 	for _, id := range []string{m.Project, m.Task, m.Attempt} {
 		if !safeName(id) {
 			return Manifest{}, fmt.Errorf("identifier %q cannot name a workspace", id)
@@ -161,7 +166,7 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 		return Manifest{}, fmt.Errorf("base commit %q is not an object ID", m.BaseCommit)
 	}
 	defer w.lock(m.Project)()
-	configHash, err := w.sync(ctx, m.Project, source, m.BaseCommit)
+	configHash, err := w.sync(ctx, m.Project, source, root, m.BaseCommit)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("update the clone: %w", err)
 	}
@@ -205,7 +210,7 @@ func (w *Workspaces) Prepare(ctx context.Context, source string, m Manifest, cha
 // names base as refs/ada/base when it has the commit, so the clone gets it
 // however the original's refs have moved since the snapshot. It returns the
 // SHA-256 of the config it wrote.
-func (w *Workspaces) sync(ctx context.Context, project, source, base string) (string, error) {
+func (w *Workspaces) sync(ctx context.Context, project, source, boundary, base string) (string, error) {
 	in := w.Inspector
 	if err := in.Git.checkHooks(); err != nil {
 		return "", err
@@ -221,11 +226,11 @@ func (w *Workspaces) sync(ctx context.Context, project, source, base string) (st
 		return "", err
 	}
 	defer os.RemoveAll(mirror)
-	r, src, err := in.inspectMirror(ctx, source, mirror)
+	r, src, err := in.inspectMirror(ctx, source, mirror, boundary)
 	if err != nil {
 		return "", err
 	}
-	if src == nil {
+	if src == nil || (boundary != "" && len(r.Blockers) > 0) {
 		return "", &BlockedError{Blockers: r.Blockers}
 	}
 	// A base the original has pruned gets no ref: the clone may still hold

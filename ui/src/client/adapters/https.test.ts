@@ -78,6 +78,11 @@ describe("the HTTPS adapter's requests", () => {
     const refused = [
       https.experience(),
       https.finishQuit(),
+      https.allImportRoots(),
+      https.addImportRoot(),
+      https.removeImportRoot("r"),
+      https.grantImportRoot("r", "u"),
+      https.revokeImportRoot("r", "u"),
       https.chooseFolder(),
       https.inspectFolder("h"),
       https.importFolder("h", "n"),

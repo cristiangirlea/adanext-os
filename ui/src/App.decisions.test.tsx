@@ -201,15 +201,19 @@ describe("the browser owner's new task on a snapshot", () => {
   it("takes a snapshot of the project, creates the task on it, readies it and starts it, with the decision when above the default", async () => {
     const adad = seeded(makeTask({ id: "t0", objective: "an older task", state: "accepted" }));
     adad.signedIn = owner;
+    adad.refusals["GET /v1/projects/p1/untracked"] = { status: 200, body: ["notes.txt", ".env"] };
     show("https", adad, owner);
     fireEvent.click(await screen.findByRole("button", { name: "New task" }));
     const take = await screen.findByRole("group", { name: "Snapshot" });
     fireEvent.change(within(take).getByLabelText("Project"), { target: { value: "p1" } });
+    const credential = await within(take).findByRole("checkbox", { name: /\.env/ });
+    expect((credential as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(credential);
     fireEvent.click(within(take).getByRole("button", { name: "Take a snapshot" }));
     await waitFor(() => expect(adad.requests.some((r) => r.url === "/v1/projects/p1/snapshots")).toBe(true));
     const snap = adad.requests.find((r) => r.url === "/v1/projects/p1/snapshots")!;
     expect(snap.method).toBe("POST");
-    expect(JSON.parse(snap.body)).toEqual({ untracked: [], include_sensitive: [], include_changes: true });
+    expect(JSON.parse(snap.body)).toEqual({ untracked: ["notes.txt", ".env"], include_sensitive: [".env"], include_changes: true });
     expect(snap.headers["idempotency-key"]).toBeTruthy();
     const form = await screen.findByRole("form", { name: "New task" });
     expect(form.textContent).toContain("from snapshot snap-1");
@@ -226,12 +230,12 @@ describe("the browser owner's new task on a snapshot", () => {
     expect(JSON.parse(adad.requests.find((r) => r.url.endsWith("/start"))!.body)).toMatchObject({ mode: "auto" });
   });
 
-  it("tells the owner the snapshot is taken here and only the import needs the desktop", async () => {
+  it("offers the browser owner both import and snapshot", async () => {
     show("https", seeded(makeTask({ id: "t0", objective: "an older task", state: "accepted" })), owner);
     fireEvent.click(await screen.findByRole("button", { name: "New task" }));
     const start = (await screen.findByRole("heading", { name: "New task" })).parentElement!;
-    expect(start.textContent).toContain("Importing a repository is done in the Ada desktop app");
-    expect(start.textContent).not.toContain("taking its snapshot are done in the Ada desktop app");
+    expect(start.textContent).toContain("Choose a project");
+    expect(screen.getByRole("button", { name: "Import a repository" })).toBeTruthy();
   });
 
   it("shows a refused snapshot with its blockers and creates nothing", async () => {

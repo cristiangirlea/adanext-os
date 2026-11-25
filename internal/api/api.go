@@ -89,6 +89,7 @@ type Stopper interface{ StopWork() }
 // satisfies it.
 type Inspector interface {
 	Inspect(ctx context.Context, path string) (source.Inspection, error)
+	InspectInRoot(ctx context.Context, path, root string) (source.Inspection, error)
 }
 
 // Capturer snapshots a repository's work between two equal fingerprints;
@@ -216,6 +217,11 @@ func newHandler(s *store.Store, hub *Hub, auth Authenticator, execution ...Execu
 // network channel sorts each into one of its lists.
 func (h *handler) localRoutes() map[string]http.HandlerFunc {
 	return map[string]http.HandlerFunc{
+		"GET /v1/import-roots":                   h.importRoots,
+		"GET /v1/import-roots/{id}/browse":       h.browseImportRoot,
+		"POST /v1/import-roots/{id}/inspect":     h.inspectInRoot,
+		"POST /v1/import-roots/{id}/import":      h.importProject,
+		"GET /v1/projects/{id}/untracked":        h.projectUntracked,
 		"POST /v1/tasks":                         h.create,
 		"GET /v1/tasks":                          h.list,
 		"GET /v1/tasks/{id}":                     h.get,
@@ -384,6 +390,8 @@ func storeError(w http.ResponseWriter, err error) {
 		writeError(w, 409, "snapshot_required")
 	case errors.Is(err, errUnbornBase):
 		writeError(w, 409, "unborn_base")
+	case errors.Is(err, store.ErrRootExists):
+		writeJSON(w, 409, errorBody{"root_exists", "this folder is already an import root"})
 	case errors.Is(err, store.ErrNameTaken):
 		writeError(w, 409, "name_taken")
 	case errors.Is(err, store.ErrAccountInUse):
@@ -1715,12 +1723,15 @@ func (h *handler) streamBlob(w http.ResponseWriter, hash string, size int64) {
 // validRepoPath is an absolute local path. A UNC or device path is refused
 // before anything touches it: opening one sends credentials over SMB.
 func validRepoPath(p string) bool {
+	if scheme, _, ok := strings.Cut(p, "://"); ok && !strings.ContainsAny(scheme, `/\`) {
+		return false
+	}
 	return !source.IsRemotePath(p) && filepath.IsAbs(p) && !strings.ContainsRune(p, 0)
 }
 
 func (h *handler) gitUnavailable(w http.ResponseWriter) {
 	reason := h.exec.GitUnavailable
-	if reason == "" {
+	if h.net != nil || reason == "" {
 		reason = "git unavailable"
 	}
 	writeJSON(w, 503, struct {

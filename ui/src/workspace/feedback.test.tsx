@@ -16,14 +16,16 @@ const repo: ProjectSummary = { id: "p1", name: "repo", role: "owner", created: "
 describe("the snapshot form", () => {
   it("snapshots the one project that arrived after mount, without the select changing", async () => {
     const client = new FakeClient();
+    client.projectUntracked = async () => ["notes.txt", ".env"];
     const props = { client, matrix: null, defaultProject: "", busy: false, onCreate: () => {} };
     const { rerender } = render(<SnapshotTask {...props} projects={[]} />);
     rerender(<SnapshotTask {...props} projects={[repo]} />);
     expect((screen.getByLabelText("Project") as HTMLSelectElement).value).toBe("p1");
+    expect((await screen.findByLabelText("notes.txt") as HTMLInputElement).checked).toBe(true);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Take a snapshot" }));
     });
-    expect(client.args.snapshotProject).toEqual([["p1", { untracked: [], include_sensitive: [], include_changes: true }]]);
+    expect(client.args.snapshotProject).toEqual([["p1", { untracked: ["notes.txt"], include_sensitive: [], include_changes: true }]]);
   });
 });
 

@@ -41,23 +41,23 @@ func (tx *Tx) TaskSource(ctx context.Context, taskID string) (TaskSource, error)
 // task's project and that project's imported path, empty when it has none,
 // the task's revision, and the task's snapshot, nil when it has none.
 type AttemptSource struct {
-	Project, Task, SourcePath string
-	TaskRevision              int64
-	Snapshot                  *Snapshot
+	Project, Task, SourcePath, ImportRoot string
+	TaskRevision                          int64
+	Snapshot                              *Snapshot
 }
 
 func (s *Store) AttemptSource(ctx context.Context, attemptID string) (AttemptSource, error) {
 	var src AttemptSource
-	var path, snapshot sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT t.project,t.id,p.canonical_path,t.snapshot,t.revision FROM attempts a JOIN tasks t ON t.id=a.task
-		LEFT JOIN project_sources p ON p.project=t.project WHERE a.id=?`, attemptID).Scan(&src.Project, &src.Task, &path, &snapshot, &src.TaskRevision)
+	var path, root, snapshot sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT t.project,t.id,p.canonical_path,p.import_root,t.snapshot,t.revision FROM attempts a JOIN tasks t ON t.id=a.task
+		LEFT JOIN project_sources p ON p.project=t.project WHERE a.id=?`, attemptID).Scan(&src.Project, &src.Task, &path, &root, &snapshot, &src.TaskRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AttemptSource{}, ErrNotFound
 	}
 	if err != nil {
 		return AttemptSource{}, err
 	}
-	src.SourcePath = path.String
+	src.SourcePath, src.ImportRoot = path.String, root.String
 	if snapshot.Valid {
 		snap, err := s.readSnapshot(ctx, "", nil, snapshot.String, src.Project)
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -112,6 +113,10 @@ func volumeRoot(p string) string { return filepath.VolumeName(p) + string(filepa
 // symlink, a remote or rooted target, a loop, a target outside root when
 // bounded (a `..` above it too), or any link at all when follow is false.
 func resolve(root, p string, bounded, follow bool) (string, bool) {
+	return resolvePath(root, p, bounded, follow, nil)
+}
+
+func resolvePath(root, p string, bounded, follow bool, localVolume func(string) bool) (string, bool) {
 	parts := func(root, p string) []string {
 		rel, err := filepath.Rel(root, p)
 		if err != nil || rel == "." {
@@ -165,6 +170,9 @@ func resolve(root, p string, bounded, follow bool) (string, bool) {
 		head := filepath.Clean(strings.Join(c[:i], sep) + sep)
 		if !bounded {
 			root = volumeRoot(head)
+			if localVolume != nil && !localVolume(root) {
+				return "", false
+			}
 		} else if !within(root, head) {
 			return "", false
 		}
@@ -201,8 +209,9 @@ func IsRemotePath(p string) bool {
 }
 
 type layout struct {
-	workTree, gitDir, commonDir string
-	alternates                  []string // the original's alternates chain, absolute
+	workTree, gitDir, commonDir, objects string
+	boundary                             string
+	alternates                           []string // the original's alternates chain, absolute
 }
 
 // readPointer reads a one-line pointer file such as .git or commondir.
@@ -217,9 +226,18 @@ func readPointer(base, path string) (string, error) {
 // resolvePointer makes a pointer absolute against base and resolves the links
 // of every component, refusing a remote one, so no later Lstat crosses a link
 // to a remote target. It returns the named path too.
-func resolvePointer(base, value string) (resolved, named string, b *Blocker) {
+func resolvePointer(base, value, boundary string) (resolved, named string, b *Blocker) {
 	if IsRemotePath(value) {
 		return "", "", &Blocker{Code: BlockRemotePath, Paths: []string{value}}
+	}
+	if boundary != "" {
+		var b *Blocker
+		named, b = importPointerPath(base, value, boundary)
+		if b != nil {
+			return "", "", b
+		}
+		resolved, b = resolveWithinImportRoot(boundary, named, true, false)
+		return resolved, named, b
 	}
 	if !filepath.IsAbs(value) {
 		value = filepath.Join(base, filepath.FromSlash(value))
@@ -232,12 +250,121 @@ func resolvePointer(base, value string) (resolved, named string, b *Blocker) {
 	return resolved, named, nil
 }
 
+// A pointer can contain parent components. Check the preceding directory
+// before removing each one, since Git may resolve a link before following "..".
+func importPointerPath(base, value, boundary string) (string, *Blocker) {
+	if IsRemotePath(value) {
+		return "", &Blocker{Code: BlockRemotePath, Paths: []string{value}}
+	}
+	value = filepath.FromSlash(value)
+	path := base
+	if filepath.IsAbs(value) {
+		path = volumeRoot(value)
+		value = strings.TrimPrefix(value, path)
+	} else if filepath.VolumeName(value) != "" || strings.HasPrefix(value, `\`) {
+		return "", &Blocker{Code: BlockEscapingLink, Paths: []string{value}}
+	}
+	for part := range strings.SplitSeq(value, string(filepath.Separator)) {
+		if part == ".." {
+			if _, b := resolveWithinImportRoot(boundary, path, true, false); b != nil {
+				return "", b
+			}
+		}
+		path = filepath.Join(path, part)
+	}
+	return path, nil
+}
+
+// resolveWithinImportRoot approves a concrete target by its open directory
+// ancestry, and returns the validated spelling for the caller's reader.
+func resolveWithinImportRoot(boundary, path string, directory, optional bool) (string, *Blocker) {
+	if IsRemotePath(path) {
+		return "", &Blocker{Code: BlockRemotePath, Paths: []string{path}}
+	}
+	target := path
+	if !directory {
+		target = filepath.Dir(path)
+		if !validChooserPath(filepath.Base(path)) {
+			return "", &Blocker{Code: BlockEscapingLink, Paths: []string{path}}
+		}
+	}
+	target, err := resolveImportDirectory(boundary, target, false)
+	if err == nil && !directory {
+		target = filepath.Join(target, filepath.Base(path))
+		err = checkImportFileBoundary(target)
+	}
+	if err == nil {
+		return target, nil
+	}
+	if optional && errors.Is(err, fs.ErrNotExist) {
+		return filepath.Clean(path), nil
+	}
+	return "", importPathBlocker(path, err)
+}
+
+func resolveImportDirectory(boundary, path string, checkWalkPermissions bool) (string, error) {
+	dir, err := openBoundImportDirectory(boundary, path, checkWalkPermissions)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Close()
+	return importDirectoryPath(dir)
+}
+
+func importPathBlocker(path string, err error) *Blocker {
+	code := BlockEscapingLink
+	if e, ok := errors.AsType[*PathError](err); ok {
+		code = e.Code
+	}
+	return &Blocker{Code: code, Paths: []string{path}}
+}
+
+func checkImportFileBoundary(path string) error {
+	f, err := openShared(path)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// Git opens loose objects and packs directly through the mirror's alternates.
+func checkImportObjectTree(objects string) *Blocker {
+	var failed string
+	err := filepath.WalkDir(objects, func(path string, entry fs.DirEntry, err error) error {
+		failed = path
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			dir, err := OpenSourceDirectory(path)
+			if err != nil {
+				return err
+			}
+			return dir.Close()
+		}
+		return checkImportFileBoundary(path)
+	})
+	if err == nil {
+		return nil
+	}
+	if e, ok := errors.AsType[*PathError](err); ok {
+		return &Blocker{Code: e.Code, Paths: []string{failed}}
+	}
+	return &Blocker{Code: BlockEscapingLink, Paths: []string{failed}}
+}
+
 // readLayout finds the git directory of the work tree root and its common
 // directory and alternates, reading only files whose paths are local.
-func readLayout(root string) (layout, *Blocker) {
-	l := layout{workTree: root}
+func readLayout(root, boundary string) (layout, *Blocker) {
+	l := layout{workTree: root, boundary: boundary}
 	dotGit := filepath.Join(root, ".git")
 	info, err := os.Lstat(dotGit)
+	if boundary != "" && err == nil {
+		var b *Blocker
+		if dotGit, b = resolveWithinImportRoot(boundary, dotGit, info.IsDir(), false); b != nil {
+			return l, b
+		}
+	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if isGitDir(root) {
@@ -255,7 +382,7 @@ func readLayout(root string) (layout, *Blocker) {
 			return l, &Blocker{Code: BlockNotRepository, Paths: []string{dotGit}}
 		}
 		var b *Blocker
-		if l.gitDir, _, b = resolvePointer(root, value); b != nil {
+		if l.gitDir, _, b = resolvePointer(root, value, boundary); b != nil {
 			return l, b
 		}
 	default:
@@ -265,9 +392,16 @@ func readLayout(root string) (layout, *Blocker) {
 		return l, &Blocker{Code: BlockNotRepository, Paths: []string{l.gitDir}}
 	}
 	l.commonDir = l.gitDir
-	if value, err := readPointer(l.gitDir, filepath.Join(l.gitDir, "commondir")); err == nil {
+	commonPointer := filepath.Join(l.gitDir, "commondir")
+	if boundary != "" {
 		var b *Blocker
-		if l.commonDir, _, b = resolvePointer(l.gitDir, value); b != nil {
+		if commonPointer, b = resolveWithinImportRoot(boundary, commonPointer, false, true); b != nil {
+			return l, b
+		}
+	}
+	if value, err := readPointer(l.gitDir, commonPointer); err == nil {
+		var b *Blocker
+		if l.commonDir, _, b = resolvePointer(l.gitDir, value, boundary); b != nil {
 			return l, b
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -276,7 +410,14 @@ func readLayout(root string) (layout, *Blocker) {
 	if !isGitDir(l.commonDir) {
 		return l, &Blocker{Code: BlockNotRepository, Paths: []string{l.commonDir}}
 	}
-	return l, l.readAlternates(filepath.Join(l.commonDir, "objects"), 0)
+	l.objects = filepath.Join(l.commonDir, "objects")
+	if boundary != "" {
+		var b *Blocker
+		if l.objects, b = resolveWithinImportRoot(boundary, l.objects, true, false); b != nil {
+			return l, b
+		}
+	}
+	return l, l.readAlternates(l.objects, 0)
 }
 
 // readAlternates follows objects/info/alternates as git does, to its depth limit.
@@ -285,6 +426,11 @@ func (l *layout) readAlternates(objects string, depth int) *Blocker {
 		return nil
 	}
 	file := filepath.Join(objects, "info", "alternates")
+	if l.boundary != "" {
+		if b := checkImportObjectTree(objects); b != nil {
+			return b
+		}
+	}
 	data, _, err := readUnder(objects, file, maxFileSize)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -293,12 +439,21 @@ func (l *layout) readAlternates(objects string, depth int) *Blocker {
 		return &Blocker{Code: BlockNotRepository, Paths: []string{file}}
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimRight(line, "\r")
+		if l.boundary == "" {
+			line = strings.TrimRight(line, "\r")
+		}
 		if line == "" || line[0] == '#' {
 			continue
 		}
-		line = strings.Trim(line, `"`)
-		alt, named, b := resolvePointer(objects, line)
+		if l.boundary == "" {
+			line = strings.Trim(line, `"`)
+		} else if strings.HasPrefix(line, `"`) {
+			var ok bool
+			if line, ok = unquoteImportAlternate(line); !ok {
+				return &Blocker{Code: BlockNotRepository, Paths: []string{file}}
+			}
+		}
+		alt, named, b := resolvePointer(objects, line, l.boundary)
 		if b != nil {
 			return b
 		}
@@ -312,6 +467,22 @@ func (l *layout) readAlternates(objects string, depth int) *Blocker {
 		}
 	}
 	return nil
+}
+
+// Go accepts extra escapes. Keep only the C-style escapes Git recognizes.
+func unquoteImportAlternate(line string) (string, bool) {
+	for rest := line; ; {
+		_, escape, found := strings.Cut(rest, `\`)
+		if !found {
+			break
+		}
+		if escape == "" || !strings.ContainsRune(`abfnrtv"0123`, rune(escape[0])) {
+			return "", false
+		}
+		rest = escape[1:]
+	}
+	path, err := strconv.Unquote(line)
+	return path, err == nil
 }
 
 func isGitDir(dir string) bool {

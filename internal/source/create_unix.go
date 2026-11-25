@@ -5,6 +5,7 @@ package source
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -65,22 +66,24 @@ func linkError(dir int, name string, err error) error {
 	return err
 }
 
-func openDirNoFollow(root, rel string) error {
+func holdDirNoFollow(root, rel string) (*os.File, error) {
 	dir, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return &os.PathError{Op: "open", Path: root, Err: linkError(unix.AT_FDCWD, root, err)}
+		return nil, &os.PathError{Op: "open", Path: root, Err: linkError(unix.AT_FDCWD, root, err)}
 	}
-	defer func() { unix.Close(dir) }()
-	if rel == "" || rel == "." {
-		return nil
-	}
+
 	for _, part := range strings.Split(rel, "/") {
+		if part == "" || part == "." {
+			continue
+		}
 		next, err := unix.Openat(dir, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
-			return &os.PathError{Op: "open", Path: rel, Err: linkError(dir, part, err)}
+			cause := linkError(dir, part, err)
+			unix.Close(dir)
+			return nil, &os.PathError{Op: "open", Path: rel, Err: cause}
 		}
 		unix.Close(dir)
 		dir = next
 	}
-	return nil
+	return os.NewFile(uintptr(dir), filepath.Join(root, filepath.FromSlash(rel))), nil
 }

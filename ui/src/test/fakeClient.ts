@@ -283,6 +283,17 @@ export class FakeClient implements AdaClient {
     this.check("snapshot", handle, selection);
     return { id: "snap1", project: this.project.id, base_commit: "b".repeat(40), untracked: selection.untracked.map((path) => ({ path })), provider_configuration: null };
   }
+  async importRoots() { return []; }
+  async browseRoot() { return { directories: [], truncated: false }; }
+  async inspectInRoot() { return { blockers: [], findings: [], untracked: [] }; }
+  async importFromRoot() { return this.project; }
+  async projectUntracked(_project: string): Promise<string[]> { return []; }
+  async allImportRoots() { return []; }
+  async addImportRoot() { return null; }
+  async removeImportRoot() { }
+  async grantImportRoot() { }
+  async revokeImportRoot() { }
+
   async snapshotProject(projectId: string, selection: SnapshotSelection): Promise<Snapshot> {
     this.check("snapshotProject", projectId, selection);
     return { id: "snap1", project: projectId, base_commit: "b".repeat(40), untracked: [], provider_configuration: null };

@@ -313,6 +313,19 @@ export function createHttpsClient(options: HttpsOptions = {}): AdaClient {
     finishQuit: localOnly,
     onQuitRequested: () => () => {},
     capabilities: () => call("GET", "/v1/capabilities"),
+    importRoots: () => call("GET", "/v1/import-roots"),
+    browseRoot: async (root, path) => {
+      const res = await send("GET", `/v1/import-roots/${id(root)}/browse?path=${encodeURIComponent(path)}`);
+      return { directories: await res.json(), truncated: res.headers.get("X-Ada-Truncated") === "true" };
+    },
+    inspectInRoot: (root, path) => call("POST", `/v1/import-roots/${id(root)}/inspect`, { body: { path } }),
+    importFromRoot: (root, path, name) => call("POST", `/v1/import-roots/${id(root)}/import`, { body: { path, name }, idempotent: true }),
+    projectUntracked: (project) => call("GET", `/v1/projects/${id(project)}/untracked`),
+    allImportRoots: localOnly,
+    addImportRoot: localOnly,
+    removeImportRoot: localOnly,
+    grantImportRoot: localOnly,
+    revokeImportRoot: localOnly,
     chooseFolder: localOnly,
     inspectFolder: localOnly,
     importFolder: localOnly,

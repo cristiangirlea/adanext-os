@@ -1,9 +1,12 @@
 import { chromium, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import os from "node:os";
+import { spawn } from "node:child_process";
+import { mkdtemp, realpath } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import { call, findOrStart } from "../src/adad";
-import { exec, executable, fixtureTest } from "./fixture";
+import { call } from "../src/adad";
+import { exec, executable, Fixture, fixtureTest, waitForBrowserCoordinator } from "./fixture";
 
 // The browser shell against a real adad on its TLS listener: two seeded accounts, each with a
 // project holding a task and an empty project, each enrolling with its code in its own browser
@@ -36,8 +39,9 @@ async function expectProjects(page: Page, names: string[]): Promise<void> {
 fixtureTest("two accounts enroll and sign in from their own browsers and each sees only its own projects", async ({ fixture: f }) => {
   fixtureTest.setTimeout(180_000);
   await exec(executable("testseed"), ["users", f.state]);
-  const config = f.config();
-  await findOrStart({ ...config, args: [...config.args, "-ui", ui] }, f.socket);
+  // adad makes artifacts owner-only and the fixture puts the granted folder inside it.
+  f.env.ADANEXT_TEST_IMPORT_PERMISSION_TOP = path.join(await realpath(f.state), "artifacts");
+  await f.serveBrowser(ui);
 
   // The listener and its test certificate, set up through the owner's channel.
   const port = await freePort();
@@ -48,18 +52,7 @@ fixtureTest("two accounts enroll and sign in from their own browsers and each se
   const status = (await call(f.socket, { method: "PUT", path: "/v1/listener/certificate", body: { certificate: path.join(certs, "cert.pem"), key: path.join(certs, "key.pem") } })) as { state: string; origin: string; message: string };
   expect(status, status.message).toMatchObject({ state: "serving", origin });
 
-  // A repository the owner imports through the owner's channel: the seeded projects have no
-  // source to snapshot.
-  const repo = await mkdtemp(path.join(f.state, "repo-"));
-  const git = (...args: string[]) => exec("git", args, { cwd: repo, windowsHide: true });
-  await git("init", "-q", "-b", "main");
-  await git("config", "user.email", "fixture@example.invalid");
-  await git("config", "user.name", "Fixture");
-  await git("config", "core.autocrlf", "false");
-  await writeFile(path.join(repo, "README.md"), "# fixture\n");
-  await git("add", "-A");
-  await git("commit", "-q", "-m", "start");
-  const imported = (await call(f.socket, { method: "POST", path: "/v1/projects", body: { path: repo, name: "Repo project" }, idempotent: true })) as { id: string };
+  await f.grantRepositoryRoot();
 
   // The accounts: sam may use a password; the owner's code comes from a recovery.
   await call(f.socket, { method: "PATCH", path: "/v1/accounts/sam", body: { password_allowed: true }, idempotent: true });
@@ -110,7 +103,7 @@ fixtureTest("two accounts enroll and sign in from their own browsers and each se
     await expect(owner.page.getByText("Signed in as")).toBeVisible();
     await owner.page.getByRole("button", { name: "Leave" }).click();
     await owner.page.getByRole("button", { name: "Sign in with a passkey" }).click();
-    await expectProjects(owner.page, ["Owner empty project", "Repo project", "Test project"]);
+    await expectProjects(owner.page, ["Owner empty project", "Test project"]);
     await expect(owner.page.getByText("Owner task")).toBeVisible();
     await expect(owner.page.getByText("Sam task")).toHaveCount(0);
     // The owner account has the create-task control back, and a stop that asks first.
@@ -120,11 +113,22 @@ fixtureTest("two accounts enroll and sign in from their own browsers and each se
     await expect(ask).toContainText("No task of other users is running or queued.");
     await ask.getByRole("button", { name: "Keep working", exact: true }).click();
     await expect(ask).toHaveCount(0);
-    // The owner snapshots the imported project, creates a task on it and starts it in readonly,
-    // the project's default, so no decision is asked for.
+    // A granted repository supplies the snapshot for this browser task.
+    await owner.page.getByRole("button", { name: "Import a repository" }).click();
+    const chooser = owner.page.getByRole("dialog", { name: "Import a repository" });
+    await expect(chooser.getByRole("textbox")).toHaveCount(0);
+    await chooser.getByRole("button", { name: "Granted folders" }).click();
+    await chooser.getByRole("button", { name: "repo", exact: true }).click();
+    await chooser.getByRole("button", { name: "Inspect", exact: true }).click();
+    await expect(chooser.getByText("notes.txt")).toBeVisible();
+    await chooser.getByLabel("Project name").fill("Repo project");
+    const importedAnswer = owner.page.waitForResponse(res => res.url().endsWith("/import") && res.request().method() === "POST");
+    await chooser.getByRole("button", { name: "Import", exact: true }).click();
+    const imported = await (await importedAnswer).json() as { id: string };
     await owner.page.getByRole("button", { name: "New task", exact: true }).click();
     const take = owner.page.getByRole("group", { name: "Snapshot" });
     await take.getByLabel("Project").selectOption({ label: "Repo project" });
+    await take.getByLabel("notes.txt").check();
     await take.getByRole("button", { name: "Take a snapshot", exact: true }).click();
     const form = owner.page.getByRole("form", { name: "New task" });
     await expect(form).toContainText("from snapshot");
@@ -137,6 +141,8 @@ fixtureTest("two accounts enroll and sign in from their own browsers and each se
     // With a snapshot the attempt runs in its worktree and its verification finishes.
     await expect.poll(async () => (await started())?.state, { timeout: 30_000 }).toBe("awaiting_review");
     expect(await started()).toMatchObject({ project: imported.id, snapshot: expect.any(String) });
+    const snapshot = (await started())!.snapshot;
+    expect(await call(f.socket, { method: "GET", path: `/v1/projects/${imported.id}/snapshots/${snapshot}` })).toMatchObject({ untracked: [{ path: "notes.txt" }] });
     await expect(owner.page.getByRole("region", { name: "Waiting for your decision" })).toHaveCount(0);
     expect(requests.filter((url) => new URL(url).pathname === `/v1/projects/${imported.id}/snapshots`)).toHaveLength(1);
 
@@ -161,4 +167,30 @@ fixtureTest("two accounts enroll and sign in from their own browsers and each se
   } finally {
     await browser?.close();
   }
+});
+
+fixtureTest("gives the coordinator time to exit normally after shutdown", async () => {
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 150)"], { windowsHide: true, stdio: "ignore" });
+  await waitForBrowserCoordinator(child);
+  expect(child.exitCode).toBe(0);
+  expect(child.signalCode).toBeNull();
+});
+
+fixtureTest("dispose waits for the coordinator exit after killing it", async () => {
+  const fixture = new Fixture();
+  fixture.state = await mkdtemp(path.join(os.tmpdir(), "ada-exit-"));
+  fixture.holder = async () => null;
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+    kill: () => {
+      setTimeout(() => child.emit("exit", null, "SIGTERM"), 100);
+      return true;
+    },
+  });
+  let exited = false;
+  child.once("exit", () => { exited = true; });
+  Object.assign(fixture, { browserCoordinator: child });
+  await fixture.dispose();
+  expect(exited).toBe(true);
 });

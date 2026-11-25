@@ -236,6 +236,26 @@ export interface Inspection {
   findings: { code: string; paths: string[]; count: number }[];
 }
 
+export interface ImportRoot {
+  id: string;
+  label: string;
+}
+
+export interface ManagedImportRoot extends ImportRoot {
+  grants: string[];
+}
+
+export interface DirectoryListing {
+  directories: { name: string; path: string }[];
+  truncated: boolean;
+}
+
+export interface RootInspection {
+  blockers: Blocker[];
+  findings: Inspection["findings"];
+  untracked: string[];
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -607,6 +627,16 @@ export interface AdaClient {
   finishQuit(): Promise<void>;
   onQuitRequested(listener: () => void): () => void;
   capabilities(): Promise<Capabilities>;
+  importRoots(): Promise<ImportRoot[]>;
+  browseRoot(id: string, path: string): Promise<DirectoryListing>;
+  inspectInRoot(id: string, path: string): Promise<RootInspection>;
+  importFromRoot(id: string, path: string, name?: string): Promise<Project>;
+  projectUntracked(projectId: string): Promise<string[]>;
+  allImportRoots(): Promise<ManagedImportRoot[]>;
+  addImportRoot(label?: string): Promise<ImportRoot | null>;
+  removeImportRoot(id: string): Promise<void>;
+  grantImportRoot(id: string, user: string): Promise<void>;
+  revokeImportRoot(id: string, user: string): Promise<void>;
   // Opens the desktop's folder dialog; null when the owner closed it without choosing.
   chooseFolder(): Promise<ChosenFolder | null>;
   inspectFolder(handle: string): Promise<Inspection>;
@@ -684,6 +714,16 @@ export interface BridgeApi {
   finishQuit(): Promise<BridgeResult<null>>;
   onQuitRequested(listener: () => void): () => void;
   capabilities(): Promise<BridgeResult<Capabilities>>;
+  importRoots(): Promise<BridgeResult<ImportRoot[]>>;
+  browseRoot(id: string, path: string): Promise<BridgeResult<DirectoryListing>>;
+  inspectInRoot(id: string, path: string): Promise<BridgeResult<RootInspection>>;
+  importFromRoot(id: string, path: string, name?: string): Promise<BridgeResult<Project>>;
+  projectUntracked(projectId: string): Promise<BridgeResult<string[]>>;
+  allImportRoots(): Promise<BridgeResult<ManagedImportRoot[]>>;
+  addImportRoot(label?: string): Promise<BridgeResult<ImportRoot | null>>;
+  removeImportRoot(id: string): Promise<BridgeResult<null>>;
+  grantImportRoot(id: string, user: string): Promise<BridgeResult<null>>;
+  revokeImportRoot(id: string, user: string): Promise<BridgeResult<null>>;
   chooseFolder(): Promise<BridgeResult<ChosenFolder | null>>;
   inspectFolder(handle: string): Promise<BridgeResult<Inspection>>;
   importFolder(handle: string, name: string): Promise<BridgeResult<Project>>;

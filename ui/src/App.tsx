@@ -14,6 +14,8 @@ import { Marked, PathText } from "./text/Marked";
 import { Activity } from "./workspace/Activity";
 import { DecisionPanel } from "./workspace/Decision";
 import { ErrorLine, shown, type Shown } from "./workspace/errors";
+import { ImportRoots } from "./settings/ImportRoots";
+import { RootChooser } from "./workspace/RootChooser";
 import { ImportFlow } from "./workspace/ImportFlow";
 import { Nav, type ProjectsRead } from "./workspace/Nav";
 import { defaultPolicy } from "./workspace/policy";
@@ -78,6 +80,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectsRead, setProjectsRead] = useState<ProjectsRead>({ state: "loading" });
   const [accountOpen, setAccountOpen] = useState(false);
+  const [rootsOpen, setRootsOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [accounts, setAccounts] = useState(false);
   const [listener, setListener] = useState(false);
@@ -359,13 +362,14 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
   };
   const otherTheme = themes.find((t) => t !== theme) ?? "light";
   const shared: QuickAction[] = [
+    { id: "import", label: "Import a repository", run: () => setImporting(true) },
     { id: "theme", label: `Switch to the ${themeNames[otherTheme].toLowerCase()} theme`, run: () => chooseTheme(otherTheme) },
     { id: "motion", label: motionOn ? "Turn motion off" : "Turn motion on", run: () => setMotion(!motionOn) },
   ];
   const actions: QuickAction[] = browser
     ? [{ id: "account", label: "Your account and sessions", run: () => setAccountOpen(true) }, ...shared]
     : [
-        { id: "import", label: "Import a repository", run: () => setImporting(true) },
+        { id: "import-roots", label: "Manage import roots", run: () => setRootsOpen(true) },
         { id: "new-task", label: "Create a task", run: () => newTask() },
         { id: "accounts", label: "Manage accounts and sessions", run: () => setAccounts(true) },
         { id: "listener", label: "Set up network access", run: () => setListener(true) },
@@ -408,6 +412,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
           canCreate={owner}
           selectedId={selectedId}
           onSelect={select}
+          onRoots={() => setRootsOpen(true)}
           onImport={() => setImporting(true)}
           onNewTask={newTask}
           onAccounts={() => setAccounts(true)}
@@ -507,7 +512,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
         ) : (
           <div className="start">
             <h2>New task</h2>
-            <p className="empty">{browser ? "Take a snapshot of an imported project and add a task to it here. Importing a repository is done in the Ada desktop app." : "Import a repository to give a task its own workspace, or add a task to a project here."}</p>
+            <p className="empty">{browser ? "Choose a project to take a snapshot and create a task." : "Import a repository to give a task its own workspace, or add a task to a project here."}</p>
             {ownerBrowser ? (
               <SnapshotTask key={`${formProject}:${formOpened}`} client={client} projects={projects} matrix={matrix} defaultProject={formProject} busy={pressed === "create"} onCreate={(input, chosen) => void run(() => created(input, chosen), undefined, "create")} />
             ) : (
@@ -593,7 +598,14 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
           </BusyButton>
         )}
       </footer>
-      {importing && (
+      {rootsOpen && !browser && <ImportRoots client={client} onClose={() => setRootsOpen(false)} />}
+      {importing && browser && <RootChooser client={client} onClose={() => setImporting(false)} onImport={(project) => {
+        setNames(current => ({ ...current, [project.id]: project.name }));
+        readProjects();
+        setImporting(false);
+        if (ownerBrowser) newTask(project.id);
+      }} />}
+      {importing && !browser && (
         <ImportFlow
           client={client}
           matrix={matrix}

@@ -68,7 +68,17 @@ func (e *Executor) prepare(a store.Attempt, active *active, scratch string) (str
 		if err != nil {
 			return "", false, err
 		}
-		if m, err = e.cfg.Workspaces.Prepare(ctx, src.SourcePath, e.expectedManifest(a, src), changes); err != nil {
+		var root string
+		if src.ImportRoot != "" {
+			root, err = e.cfg.Store.ImportRootPath(ctx, src.ImportRoot)
+			if errors.Is(err, store.ErrNotFound) {
+				return "", false, errors.New("import_root_missing: the project's import root was removed")
+			}
+			if err != nil {
+				return "", false, err
+			}
+		}
+		if m, err = e.cfg.Workspaces.PrepareInRoot(ctx, src.SourcePath, root, e.expectedManifest(a, src), changes); err != nil {
 			return "", false, err
 		}
 		imported = m.Head

@@ -53,6 +53,11 @@ type Drift struct {
 // that appeared: a snapshot is never taken with one. A blocker that stops the
 // inspection leaves the commits and paths unread.
 func (in *Inspector) Drift(ctx context.Context, path string, base Baseline) (Drift, error) {
+	return in.DriftInRoot(ctx, path, "", base)
+}
+
+// DriftInRoot checks the original against its import boundary before comparing it.
+func (in *Inspector) DriftInRoot(ctx context.Context, path, boundary string, base Baseline) (Drift, error) {
 	if base.BaseCommit != "" && ((len(base.BaseCommit) != 40 && len(base.BaseCommit) != 64) || !isHex(base.BaseCommit)) {
 		return Drift{}, fmt.Errorf("base commit %q is not an object ID", base.BaseCommit)
 	}
@@ -64,7 +69,7 @@ func (in *Inspector) Drift(ctx context.Context, path string, base Baseline) (Dri
 		return Drift{}, err
 	}
 	defer os.RemoveAll(mirror)
-	r, src, err := in.inspectMirror(ctx, path, mirror)
+	r, src, err := in.inspectMirror(ctx, path, mirror, boundary)
 	if err != nil {
 		return Drift{}, err
 	}
