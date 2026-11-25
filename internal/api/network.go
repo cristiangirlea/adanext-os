@@ -54,7 +54,9 @@ type network struct {
 	clock      func() time.Time
 	open       *http.ServeMux                // the routes that need no session
 	session    *http.ServeMux                // the routes of a signed-in account
-	owner      *http.ServeMux                // the owner channel's routes, refused here with local_only
+	reads      *http.ServeMux                // networkReads, served with the session's account as actor
+	localOnly  *http.ServeMux                // networkLocalOnly and the owner's routes, refused with local_only
+	later      *http.ServeMux                // networkLater, refused with not_on_network
 	pause      func(context.Context, string) // test seam: called at the named point of a request; nil in service
 	shutdown   context.Context               // ends when the hub drains or closes
 }
@@ -65,6 +67,48 @@ func (n *network) at(ctx context.Context, point string) {
 		n.pause(ctx, point)
 	}
 }
+
+// The network lists: every local route is in exactly one of them, or is an owner-channel route,
+// which the network refuses as networkLocalOnly.
+var (
+	// networkReads are served to a session through the handler's own membership checks.
+	networkReads = []string{
+		"GET /v1/projects",
+		"GET /v1/capabilities",
+		"GET /v1/tasks",
+		"GET /v1/tasks/{id}",
+		"GET /v1/tasks/{id}/checks",
+		"GET /v1/tasks/{id}/changes",
+		"GET /v1/tasks/{id}/files",
+		"GET /v1/tasks/{id}/findings",
+		"GET /v1/projects/{id}/snapshots/{sid}",
+		"GET /v1/attempts/{id}/events",
+		"GET /v1/attempts/{id}/artifacts/{hash}",
+		"GET /v1/checks/{id}/log",
+		"GET /v1/tasks/{task}/checks/{id}/log",
+	}
+	// networkLocalOnly stay on the pipe or socket for good: host paths and the coordinator's ledger.
+	networkLocalOnly = []string{
+		"GET /v1/experience",
+		"POST /v1/projects/inspect",
+		"POST /v1/projects",
+	}
+	// networkLater are refused until a later slice brings them to the network.
+	networkLater = []string{
+		"POST /v1/tasks",
+		"PUT /v1/tasks/{id}/checks",
+		"POST /v1/tasks/{id}/ready",
+		"POST /v1/tasks/{id}/start",
+		"POST /v1/tasks/{id}/cancel",
+		"POST /v1/tasks/{id}/findings",
+		"POST /v1/tasks/{id}/accept",
+		"POST /v1/tasks/{id}/refine",
+		"POST /v1/projects/{id}/snapshots",
+		// Its answer can carry a host path and git's own messages.
+		"GET /v1/projects/{id}/drift",
+		"POST /v1/coordinator/stop",
+	}
+)
 
 // NewNetwork serves the network channel: sign-in, enrollment with a code, and the signed-in
 // account's own sessions and credentials. The actor of every other route is the session's
@@ -90,7 +134,7 @@ func newNetwork(s *store.Store, hub *Hub, cfg NetworkConfig, execution ...Execut
 	if err != nil {
 		return nil, err
 	}
-	n := &network{rp: rp, ceremonies: newCeremonies(), hasher: newHasher(), clock: cfg.Clock, open: http.NewServeMux(), session: http.NewServeMux(), owner: http.NewServeMux()}
+	n := &network{rp: rp, ceremonies: newCeremonies(), hasher: newHasher(), clock: cfg.Clock, open: http.NewServeMux(), session: http.NewServeMux(), reads: http.NewServeMux(), localOnly: http.NewServeMux(), later: http.NewServeMux()}
 	if n.clock == nil {
 		n.clock = time.Now
 	}
@@ -121,16 +165,38 @@ func newNetwork(s *store.Store, hub *Hub, cfg NetworkConfig, execution ...Execut
 	n.open.HandleFunc("POST /v1/enrollment/options", n.enrollmentOptions)
 	n.open.HandleFunc("POST /v1/enrollment/passkey", n.enrollPasskey)
 	n.open.HandleFunc("POST /v1/enrollment/password", n.enrollPassword)
-	n.session.HandleFunc("POST /v1/session/logout", n.logout)
-	n.session.HandleFunc("GET /v1/account", n.account)
-	n.session.HandleFunc("GET /v1/account/sessions", n.accountSessions)
-	n.session.HandleFunc("DELETE /v1/account/sessions/{id}", n.revokeOwnSession)
-	n.session.HandleFunc("GET /v1/account/credentials", n.accountCredentials)
-	n.session.HandleFunc("DELETE /v1/account/credentials/{id}", n.removeOwnCredential)
+	for pattern, route := range n.sessionRoutes() {
+		n.session.HandleFunc(pattern, route)
+	}
+	local := n.h.localRoutes()
+	for _, pattern := range networkReads {
+		n.reads.HandleFunc(pattern, local[pattern])
+	}
+	refuse := func(code string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) { writeError(w, 403, code) }
+	}
 	for pattern := range n.h.ownerRoutes() {
-		n.owner.HandleFunc(pattern, func(w http.ResponseWriter, _ *http.Request) { writeError(w, 403, "local_only") })
+		n.localOnly.HandleFunc(pattern, refuse("local_only"))
+	}
+	for _, pattern := range networkLocalOnly {
+		n.localOnly.HandleFunc(pattern, refuse("local_only"))
+	}
+	for _, pattern := range networkLater {
+		n.later.HandleFunc(pattern, refuse("not_on_network"))
 	}
 	return n, nil
+}
+
+// sessionRoutes are the signed-in account's own: its sessions, credentials and sign-out.
+func (n *network) sessionRoutes() map[string]http.HandlerFunc {
+	return map[string]http.HandlerFunc{
+		"POST /v1/session/logout":             n.logout,
+		"GET /v1/account":                     n.account,
+		"GET /v1/account/sessions":            n.accountSessions,
+		"DELETE /v1/account/sessions/{id}":    n.revokeOwnSession,
+		"GET /v1/account/credentials":         n.accountCredentials,
+		"DELETE /v1/account/credentials/{id}": n.removeOwnCredential,
+	}
 }
 
 func (n *network) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -152,9 +218,11 @@ func (n *network) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		n.session.ServeHTTP(w, r)
 		return
 	}
-	if _, pattern := n.owner.Handler(r); pattern != "" {
-		n.owner.ServeHTTP(w, r)
-		return
+	for _, mux := range []*http.ServeMux{n.reads, n.localOnly, n.later} {
+		if _, pattern := mux.Handler(r); pattern != "" {
+			mux.ServeHTTP(w, r)
+			return
+		}
 	}
 	writeError(w, 404, "not_found")
 }

@@ -4,9 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!--
-      Browsers ignore frame-ancestors in a meta tag; it stays here to document the intended
-      policy. The slice that serves the page over HTTP (M4b) must send the whole policy as a
-      Content-Security-Policy response header.
+      Browsers ignore frame-ancestors in a meta tag; adad's TLS listener sends this same policy
+      as a Content-Security-Policy header (internal/api/web.go, whose test keeps the two equal).
     -->
     <meta
       http-equiv="Content-Security-Policy"

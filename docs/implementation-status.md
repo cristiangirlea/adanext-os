@@ -11,7 +11,7 @@ are in `docs/backlog.md`.
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); follow-ups #82, #88, #94, #96, #101, #103, #107 and #111 (the last 2026-10-25); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100; content several owners stored is read through each attempt that stored it, migration 0013 (#89, 2026-11-21) | Open: #83 (a repository in OneDrive with online-only metadata) |
 | M4 First local workflow | in progress | Slices in `docs/backlog.md` (#109, #117); M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) #115; M4.3 (#118) #122, M4.4a (#119) #121, M4.4b (#120) #123 and M4.5's opt-in demonstration (#124) #125, into `main` with #126 (`b36259f`); M4.6 (#130) #132; the experience card (#128) #129; check worktree removal through a linked parent refused, #134 (`aa72d93`, 2026-11-18); adad's children start without a console window on Windows, so a closed console no longer ends a git call (#145, 2026-11-20); the desktop waits for adad's launcher, so a cold Windows PowerShell broker no longer outlasts it (#138, 2026-11-21); M4.2 to M4.4b and M4.6 implemented, none of them verified | M4.5's demonstrations on Windows and Ubuntu (#124, open; owner action 13). The Windows CI job on `main` passes again at `763a797` (#127: #137 and #139, 2026-11-18). M4 stays in progress until the demonstrations are recorded |
-| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155); M4b.1's boundary chosen by the owner, an OS account per user (decisions log, 2026-11-24) | M4b.1's account and Linux probes wait for the owner's scratch accounts and a Linux machine (owner action 16); evidence from a second computer (decisions log, 2026-10-13) |
+| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155); M4b.3 the TLS listener from files merged (#159; decisions log, 2026-11-24, M4b.3's listener details); M4b.1's boundary chosen by the owner, an OS account per user (decisions log, 2026-11-24) | M4b.1's account and Linux probes wait for the owner's scratch accounts and a Linux machine (owner action 16); evidence from a second computer (decisions log, 2026-10-13) |
 | M4c Editor integration | not started | `docs/backlog.md` (#93); #91 and #92 open | After M4 (decisions log, 2026-10-18) |
 | M4d Headless server | not started | `docs/backlog.md` (#147) | After M4b; behind an access proxy first; its own gate (decisions log, 2026-11-23) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -2261,6 +2261,33 @@ Evidence, left for the supervisor:
   Reason: an identity boundary is the only candidate that closes every ambient channel at once,
   needs no driver or service on Windows, and is what M4d's server needs anyway. The narrower
   guarantee says what any candidate can actually show by test.
+
+- **2026-11-24, M4b.3's listener details (#158).** These are the details the backlog entry left
+  open, fixed so that M4b.4, M4b.5 and M4b.8 build on the same ones.
+  - **Where things live.** `adad`'s configuration directory is `<state directory>/config`,
+    owner-only like the store.
+    - The setting is `config/listener.json`.
+    - Each pair is `config/tls/pairs/<id>/cert.pem` and `key.pem`.
+    - The pointer files `config/tls/current` and `config/tls/previous` each name a pair, and
+      each is renamed into place.
+    - An install from M4b.8 writes the same way.
+  - **How the owner sets it up.** The desktop's main process opens two file dialogs, and the
+    bridge sends their paths to `PUT /v1/listener/certificate`. The paths never reach the
+    renderer. `adad` copies the pair into its own directory and leaves the source files alone.
+  - **How the network refuses routes.** Every local route is in exactly one of three network
+    lists, and a test keeps them complete.
+    - The reads a membership allows, plus `GET /v1/capabilities` and the new `GET /v1/projects`.
+    - Routes refused `local_only` for good: the owner's routes, the listener's, host paths and
+      `GET /v1/experience`.
+    - Routes refused `not_on_network` until a later slice moves them: every write, and
+      `GET /v1/projects/{id}/drift`, whose blockers can name the checkout's absolute host path.
+  - **The certificate's name is checked too.** It must name the configured host, or the
+    listener stays off with `certificate_name`.
+  - **The shared UI** comes from `adad`'s `-ui` directory, by default `ui` beside the
+    executable. Without it, the listener serves the API alone.
+
+  Reason: the backlog fixed what the listener must refuse, not where its files live or how a
+  refused route answers. Fixing them once keeps the next slices from choosing again.
 
 ## Owner actions pending
 

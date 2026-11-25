@@ -55,6 +55,23 @@ void app.whenReady().then(async () => {
     const options = { title: "Import a repository", properties: ["openDirectory" as const, "dontAddToRecent" as const] };
     const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
     return result.canceled ? null : (result.filePaths[0] ?? null);
+  }, chooseCertificate: async (event) => {
+    // The certificate's paths enter the same way, and go from main to adad only.
+    const contents = webContents.fromId(event.sender.id);
+    const owner = contents ? BrowserWindow.fromWebContents(contents) : null;
+    const pick = async (title: string): Promise<string | null> => {
+      const options = {
+        title,
+        properties: ["openFile" as const, "dontAddToRecent" as const],
+        filters: [{ name: "PEM files", extensions: ["pem", "crt", "key"] }, { name: "All files", extensions: ["*"] }],
+      };
+      const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+      return result.canceled ? null : (result.filePaths[0] ?? null);
+    };
+    const certificate = await pick("Choose the certificate (PEM)");
+    if (certificate === null) return null;
+    const key = await pick("Choose the private key (PEM)");
+    return key === null ? null : { certificate, key };
   }, finishQuit: async () => {
     const windows = BrowserWindow.getAllWindows();
     for (const window of windows) {

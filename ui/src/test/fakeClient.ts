@@ -16,6 +16,9 @@ import type {
   FileView,
   Finding,
   Inspection,
+  ListenerCertificate,
+  ListenerSetting,
+  ListenerStatus,
   NewTask,
   Project,
   RefineRequest,
@@ -58,6 +61,9 @@ export class FakeClient implements AdaClient {
   sessionList: AccountSession[] = [];
   // The code each issue, create or recover hands out, in turn.
   codes = 0;
+  listenerStatus: ListenerStatus = listenerStatus({ enabled: false, address: "", name: "" }, null);
+  // The pair the certificate dialogs choose; null as if the owner cancelled them.
+  chosenCertificate: ListenerCertificate | null = makeCertificate();
 
   constructor(tasks: Task[] = []) {
     this.tasks = tasks;
@@ -249,6 +255,22 @@ export class FakeClient implements AdaClient {
     this.sessionList = this.sessionList.filter((s) => s.id !== id);
     this.accountList = this.accountList.map((a) => (a.id === session.account ? { ...a, sessions: a.sessions - 1 } : a));
   }
+  async listener(): Promise<ListenerStatus> {
+    this.check("listener");
+    return this.listenerStatus;
+  }
+  async setListener(setting: ListenerSetting): Promise<ListenerStatus> {
+    this.check("setListener", setting);
+    this.listenerStatus = listenerStatus(setting, this.listenerStatus.certificate);
+    return this.listenerStatus;
+  }
+  async installListenerCertificate(): Promise<ListenerStatus | null> {
+    this.check("installListenerCertificate");
+    if (this.chosenCertificate === null) return null;
+    this.listenerStatus = listenerStatus(this.listenerStatus, this.chosenCertificate);
+    return this.listenerStatus;
+  }
+
   private account(id: string): Account {
     const account = this.accountList.find((a) => a.id === id);
     if (!account) throw new AdaError("not_found", 404, "no such account");
@@ -293,6 +315,21 @@ export function makeTask(fields: Partial<Task> & { id: string }): Task {
 
 export function makeAccount(fields: Partial<Account> & { id: string }): Account {
   return { name: fields.id, owner: false, disabled: false, password_allowed: false, credentials: 0, sessions: 0, created: "2026-11-01T00:00:00Z", ...fields };
+}
+
+export function makeCertificate(fields: Partial<ListenerCertificate> = {}): ListenerCertificate {
+  return { names: ["home.adanext.si"], not_before: "2026-11-01T00:00:00Z", not_after: "2027-02-01T00:00:00Z", sha256: "ab".repeat(32), ...fields };
+}
+
+// The status adad reports for a setting and an installed pair, as far as the fake can tell.
+export function listenerStatus(setting: ListenerSetting, certificate: ListenerCertificate | null): ListenerStatus {
+  const port = setting.address.slice(setting.address.lastIndexOf(":") + 1);
+  const origin = setting.name === "" ? "" : port === "443" ? `https://${setting.name}` : `https://${setting.name}:${port}`;
+  const base = { enabled: setting.enabled, address: setting.address, name: setting.name, origin, certificate };
+  if (!setting.enabled) return { ...base, state: "off", reason: "disabled", message: "The network listener is turned off." };
+  if (setting.address === "" || setting.name === "") return { ...base, state: "off", reason: "not_configured", message: "Set the address and the name to turn the listener on." };
+  if (certificate === null) return { ...base, state: "off", reason: "certificate_missing", message: "Install a certificate and its key to turn the listener on." };
+  return { ...base, state: "serving", reason: "", message: "" };
 }
 
 // The pinned engine's matrix, cut down to what the UI reads: claude and codex, each with

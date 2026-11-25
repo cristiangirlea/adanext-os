@@ -71,5 +71,9 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
     recoverAccount: (id) => invoke("recoverAccount", [id]),
     listSessions: () => invoke("listSessions", []),
     revokeSession: (id) => invoke("revokeSession", [id]),
+    listener: () => invoke("listener", []),
+    setListener: (setting) => invoke("setListener", [setting]),
+    // Main opens the certificate and key dialogs; nothing the page passes here reaches it.
+    installListenerCertificate: () => invoke("installListenerCertificate", []),
   };
 }

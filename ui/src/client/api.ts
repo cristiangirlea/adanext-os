@@ -392,6 +392,36 @@ export interface AccountSession {
   address: string;
 }
 
+// The owner's network listener (M4b.3), on the local channel only, like the accounts. The paths
+// of a certificate's files stay in the desktop's main process: the page never sees them.
+export type ListenerReason = "" | "disabled" | "not_configured" | "certificate_missing" | "certificate_invalid" | "certificate_expired" | "certificate_name" | "listen_failed";
+export interface ListenerCertificate {
+  // The leaf's DNS names.
+  names: string[];
+  not_before: string;
+  not_after: string;
+  // The SHA-256 of the leaf's DER, in hex.
+  sha256: string;
+}
+export interface ListenerStatus {
+  enabled: boolean;
+  // "" while unset.
+  address: string;
+  name: string;
+  origin: string;
+  state: "serving" | "off";
+  reason: ListenerReason;
+  // A sentence for the owner: where it serves, or what is wrong and what to do.
+  message: string;
+  // The installed pair, valid or not; null when none is installed.
+  certificate: ListenerCertificate | null;
+}
+export interface ListenerSetting {
+  enabled: boolean;
+  address: string;
+  name: string;
+}
+
 // The body of every refused request: adad's error code and message.
 export interface ErrorBody {
   error: string;
@@ -433,6 +463,12 @@ export type ErrorCode =
   | "local_only"
   | "name_taken"
   | "code_shown"
+  | "address_invalid"
+  | "name_invalid"
+  | "certificate_invalid"
+  | "certificate_expired"
+  | "certificate_name"
+  | "listener_unavailable"
   | "coordinator_unreachable"
   | "bridge_unavailable"
   | "malformed_call"
@@ -498,6 +534,10 @@ export interface AdaClient {
   recoverAccount(id: string): Promise<EnrollmentCode>;
   listSessions(): Promise<AccountSession[]>;
   revokeSession(id: string): Promise<void>;
+  listener(): Promise<ListenerStatus>;
+  setListener(setting: ListenerSetting): Promise<ListenerStatus>;
+  // Opens the desktop's two file dialogs, certificate then key; null when the owner cancelled one.
+  installListenerCertificate(): Promise<ListenerStatus | null>;
 }
 
 // The preload bridge's shape, the `ada` global the desktop's preload exposes: the same methods,
@@ -539,4 +579,7 @@ export interface BridgeApi {
   recoverAccount(id: string): Promise<BridgeResult<EnrollmentCode>>;
   listSessions(): Promise<BridgeResult<AccountSession[]>>;
   revokeSession(id: string): Promise<BridgeResult<null>>;
+  listener(): Promise<BridgeResult<ListenerStatus>>;
+  setListener(setting: ListenerSetting): Promise<BridgeResult<ListenerStatus>>;
+  installListenerCertificate(): Promise<BridgeResult<ListenerStatus | null>>;
 }

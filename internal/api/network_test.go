@@ -53,7 +53,6 @@ type netFixture struct {
 	clock  *fakeClock
 	server *httptest.Server
 	keys   int
-	events sync.Once
 }
 
 // fastKey stands in for Argon2id where a test is about something else.
@@ -188,8 +187,13 @@ func (f *netFixture) call(t *testing.T, method, path, cookie string, body any) r
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body != nil {
+	// What a browser on the configured origin sends, so the web channel's checks pass.
+	req.Host = testRPID
+	if body != nil || (method != http.MethodGet && method != http.MethodHead) {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if method != http.MethodGet && method != http.MethodHead {
+		req.Header.Set("Origin", testOrigin)
 	}
 	if cookie != "" {
 		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
@@ -841,15 +845,14 @@ func mustSessions(t *testing.T, f *netFixture, user string) []store.Session {
 	return sessions
 }
 
-// openStream opens the attempt's event stream on the network session; the events route is
-// not on the network list yet, so the test adds it to this handler alone.
+// openStream opens the attempt's event stream on the network session.
 func (f *netFixture) openStream(t *testing.T, cookie string) *http.Response {
 	t.Helper()
-	f.eventsRoute()
 	req, err := http.NewRequest("GET", f.server.URL+"/v1/attempts/a/events", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Host = testRPID
 	req.Header.Set("Accept", "text/event-stream")
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
 	resp, err := f.server.Client().Do(req)
@@ -1072,6 +1075,9 @@ var ownerChannelRoutes = []struct{ method, path string }{
 	{"POST", "/v1/accounts/local/recover"},
 	{"GET", "/v1/sessions"},
 	{"DELETE", "/v1/sessions/any"},
+	{"GET", "/v1/listener"},
+	{"PUT", "/v1/listener"},
+	{"PUT", "/v1/listener/certificate"},
 }
 
 func TestEveryOwnerChannelRouteIsRefusedOnTheNetworkToTheOwnersFreshSessionToo(t *testing.T) {
@@ -1096,8 +1102,14 @@ func TestEveryOwnerChannelRouteIsRefusedOnTheNetworkToTheOwnersFreshSessionToo(t
 	if accounts, _ := f.s.Accounts(context.Background(), store.Live{}); len(accounts) != 2 {
 		t.Fatalf("%d accounts", len(accounts))
 	}
-	for _, path := range []string{"/v1/tasks", "/v1/projects", "/v1/experience", "/v1/attempts/a/events"} {
-		if r := f.call(t, "GET", path, cookie, nil); r.status != 404 || r.code(t) != "not_found" {
+	if err := f.s.AppendEvent(context.Background(), "local", store.Event{Attempt: "a", Seq: 1, Time: "now", Kind: "update", Payload: json.RawMessage(`{"seeded":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.call(t, "GET", "/v1/attempts/a/events", cookie, nil); r.status != 200 || !strings.Contains(string(r.body), `"seeded":true`) {
+		t.Fatalf("the seeded attempt's events page: %d %s", r.status, r.body)
+	}
+	for path, want := range map[string]int{"/v1/tasks": 200, "/v1/projects": 200, "/v1/attempts/a/events": 200, "/v1/experience": 403} {
+		if r := f.call(t, "GET", path, cookie, nil); r.status != want {
 			t.Fatalf("%s with a session: %d %s", path, r.status, r.body)
 		}
 		if r := f.call(t, "GET", path, "", nil); r.status != 401 {
@@ -1473,11 +1485,6 @@ func TestAReplacedPasswordEndsEverySessionOfTheAccountAndClosesTheirStreams(t *t
 	}
 }
 
-// eventsRoute adds the events route to this fixture's network handler alone.
-func (f *netFixture) eventsRoute() {
-	f.events.Do(func() { f.n.session.HandleFunc("GET /v1/attempts/{id}/events", f.n.h.events) })
-}
-
 // hashClock is the hasher's clock in a test: hashes and waits move it, nothing else does.
 type hashClock struct {
 	mu      sync.Mutex
@@ -1622,7 +1629,6 @@ func TestAStreamRevokedWhileItStartsEndsWithNothingSent(t *testing.T) {
 	f.hub.BudgetBytes = pageBytes
 	f.hub.PollInterval, f.hub.HeartbeatInterval, f.hub.WriteDeadline = time.Hour, time.Hour, time.Minute
 	cookie := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
-	f.eventsRoute()
 	if err := f.s.AppendEvent(context.Background(), "local", store.Event{Attempt: "a", Seq: 1, Time: "now", Kind: "text", Payload: json.RawMessage(`{"secret":"after revocation"}`)}); err != nil {
 		t.Fatal(err)
 	}
@@ -1753,7 +1759,6 @@ func TestTheCacheProbeReturnsAnErrorMetMidScan(t *testing.T) {
 func TestAStreamRevokedDuringItsMembershipLookupAnswersUnauthenticated(t *testing.T) {
 	f := newNetFixture(t)
 	cookie := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
-	f.eventsRoute()
 	entered := make(chan struct{})
 	f.n.h.attemptProject = func(ctx context.Context, _, _ string) (string, error) {
 		close(entered)
@@ -2196,7 +2201,6 @@ func TestARevocationInterruptsAStreamBlockedInAWriteAndFreesItsBudgetAndSlot(t *
 	f := newNetFixture(t)
 	f.hub.PollInterval, f.hub.HeartbeatInterval = time.Hour, time.Hour
 	cookie := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
-	f.eventsRoute()
 	w := &stuckWriter{header: http.Header{}, inside: make(chan struct{}), freed: make(chan struct{})}
 	req := httptest.NewRequest("GET", "/v1/attempts/a/events", nil)
 	req.Header.Set("Accept", "text/event-stream")
@@ -2308,7 +2312,6 @@ func revokeOwner(t *testing.T, f *netFixture) {
 func TestARevocationRacingTheCursorAheadAnswerSendsNothingAfterIt(t *testing.T) {
 	f := newNetFixture(t)
 	cookie := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
-	f.eventsRoute()
 	entered, release := pauseAt(f, "cursor-ahead")
 	result := f.streamOnce(t, "/v1/attempts/a/events?after=5", cookie)
 	waitFor(t, entered, "the cursor-ahead answer")
@@ -2327,7 +2330,6 @@ func TestARevocationRacingTheCursorAheadAnswerSendsNothingAfterIt(t *testing.T) 
 func TestAStoreFailureAtTheRecheckIsAnInternalError(t *testing.T) {
 	f := newNetFixture(t)
 	cookie := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
-	f.eventsRoute()
 	// Authentication passed; the store fails before the session is read again.
 	f.n.h.attemptProject = func(ctx context.Context, _, _ string) (string, error) {
 		f.s.Close()
@@ -2540,7 +2542,6 @@ func holdWriter(t *testing.T, f *netFixture) func() {
 func TestAFinitePageReadAsTheSessionReachesSevenDaysIsNotSent(t *testing.T) {
 	f := newNetFixture(t)
 	cookie := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
-	f.eventsRoute()
 	if err := f.s.AppendEvent(context.Background(), "local", store.Event{Attempt: "a", Seq: 1, Time: "now", Kind: "text", Payload: json.RawMessage(`{"secret":"past the limit"}`)}); err != nil {
 		t.Fatal(err)
 	}
@@ -2636,7 +2637,6 @@ func TestAFailureCountsAtItsDeadlineEvenWhenItsCheckEndsLate(t *testing.T) {
 func TestARevocationThatCancelsTheRecheckAnswersUnauthenticated(t *testing.T) {
 	f := newNetFixture(t)
 	cookie := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
-	f.eventsRoute()
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	f.n.pause = func(ctx context.Context, at string) {

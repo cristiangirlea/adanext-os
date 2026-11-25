@@ -567,7 +567,7 @@ assumes a desktop on the coordinator's host (decisions log, 2026-11-23, #147).
   inputs; the owner's first credential added to the existing owner account, whose projects and
   tasks stay visible; this slice's owner-channel routes refused through a network session, a
   freshly authenticated owner's included.
-- [ ] **M4b.3 The TLS listener, from files.** The network listener as a setting, off by default,
+- [x] **M4b.3 The TLS listener, from files** (#158: #159, 2026-11-24). The network listener as a setting, off by default,
   set through the owner's channel: one interface address, and a certificate and key from files in
   `adad`'s configuration directory, owner-only, checked (the key matches, the chain parses, not
   expired). Missing or mismatched files leave the listener off with the reason shown to the

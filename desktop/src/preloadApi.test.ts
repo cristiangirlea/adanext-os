@@ -114,6 +114,22 @@ describe("preload api", () => {
     ]);
   });
 
+  it("forwards each network listener method under its own name, and the certificate's takes no argument", async () => {
+    const fake = ipc();
+    const api = createApi(fake, "doc");
+    await api.listener();
+    await api.setListener({ enabled: true, address: "192.0.2.20:8443", name: "home.adanext.si" });
+    await api.installListenerCertificate();
+    // The dialogs are main's: whatever the page passes, no argument reaches main.
+    await (api.installListenerCertificate as (...args: unknown[]) => Promise<unknown>)("C:\\elsewhere\\key.pem");
+    expect(fake.calls).toEqual([
+      ["listener", []],
+      ["setListener", [{ enabled: true, address: "192.0.2.20:8443", name: "home.adanext.si" }]],
+      ["installListenerCertificate", []],
+      ["installListenerCertificate", []],
+    ]);
+  });
+
   it("leaves no listener behind a refused subscription", async () => {
     const fake = ipc({ subscribe: { ok: false, error: { code: "coordinator_unreachable", status: 0, message: "no socket" } } });
     const received: StreamMessage[] = [];

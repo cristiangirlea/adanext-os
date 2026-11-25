@@ -87,6 +87,31 @@ func alreadyImported(ctx context.Context, tx *Tx, project string) error {
 	return e
 }
 
+// ProjectSummary is a project as its member sees it in a list; never its host path.
+type ProjectSummary struct {
+	ID, Name, Role, Created string
+}
+
+// Projects are the projects user is a member of, ordered by name then id, those with no task
+// included.
+func (s *Store) Projects(ctx context.Context, user string) ([]ProjectSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT p.id,p.name,m.role,p.created FROM project_members m
+		JOIN projects p ON p.id=m.project WHERE m.user=? ORDER BY p.name,p.id`, user)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ProjectSummary{}
+	for rows.Next() {
+		var p ProjectSummary
+		if err := rows.Scan(&p.ID, &p.Name, &p.Role, &p.Created); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ProjectSource is the project's source for a member: ErrNotFound for an
 // unknown or inaccessible project alike, ErrNoSource for a member's project
 // that was not imported.

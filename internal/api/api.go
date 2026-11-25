@@ -159,6 +159,8 @@ type Execution struct {
 	// Review reads changes and files and releases an ended attempt's worktree for a refine;
 	// *source.Workspaces satisfies it. nil answers those routes engine_unavailable.
 	Review Reviewer
+	// Listener controls the network listener; nil answers the listener routes 503 listener_unavailable.
+	Listener ListenerControl
 }
 
 // BranchReader reads the current commit of ada/<task> in a project's clone; "" when unknown.
@@ -196,36 +198,47 @@ func newHandler(s *store.Store, hub *Hub, auth Authenticator, execution ...Execu
 	return h
 }
 
+// localRoutes are the local channel's routes beside the owner's, pattern to handler; the
+// network channel sorts each into one of its lists.
+func (h *handler) localRoutes() map[string]http.HandlerFunc {
+	return map[string]http.HandlerFunc{
+		"POST /v1/tasks":                         h.create,
+		"GET /v1/tasks":                          h.list,
+		"GET /v1/tasks/{id}":                     h.get,
+		"PUT /v1/tasks/{id}/checks":              h.setChecks,
+		"GET /v1/tasks/{id}/checks":              h.getChecks,
+		"POST /v1/tasks/{id}/ready":              h.transition(store.Draft, store.Ready),
+		"POST /v1/tasks/{id}/start":              h.start,
+		"POST /v1/tasks/{id}/cancel":             h.cancel,
+		"GET /v1/tasks/{id}/changes":             h.changes,
+		"GET /v1/tasks/{id}/files":               h.files,
+		"GET /v1/tasks/{id}/findings":            h.listFindings,
+		"POST /v1/tasks/{id}/findings":           h.addFinding,
+		"POST /v1/tasks/{id}/accept":             h.accept,
+		"POST /v1/tasks/{id}/refine":             h.refine,
+		"POST /v1/coordinator/stop":              h.stop,
+		"GET /v1/capabilities":                   h.capabilities,
+		"GET /v1/experience":                     h.experience,
+		"GET /v1/projects":                       h.listProjects,
+		"POST /v1/projects/inspect":              h.inspect,
+		"POST /v1/projects":                      h.importProject,
+		"POST /v1/projects/{id}/snapshots":       h.snapshot,
+		"GET /v1/projects/{id}/snapshots/{sid}":  h.getSnapshot,
+		"GET /v1/projects/{id}/drift":            h.drift,
+		"GET /v1/attempts/{id}/events":           h.events,
+		"GET /v1/attempts/{id}/artifacts/{hash}": h.artifact,
+		"GET /v1/checks/{id}/log":                h.checkLog,
+		"GET /v1/tasks/{task}/checks/{id}/log":   h.checkLog,
+	}
+}
+
 // New serves the local channel: the actor is the pipe or socket's owner, as auth says.
 func New(s *store.Store, hub *Hub, auth Authenticator, execution ...Execution) http.Handler {
 	h := newHandler(s, hub, auth, execution...)
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/tasks", h.create)
-	mux.HandleFunc("GET /v1/tasks", h.list)
-	mux.HandleFunc("GET /v1/tasks/{id}", h.get)
-	mux.HandleFunc("PUT /v1/tasks/{id}/checks", h.setChecks)
-	mux.HandleFunc("GET /v1/tasks/{id}/checks", h.getChecks)
-	mux.HandleFunc("POST /v1/tasks/{id}/ready", h.transition(store.Draft, store.Ready))
-	mux.HandleFunc("POST /v1/tasks/{id}/start", h.start)
-	mux.HandleFunc("POST /v1/tasks/{id}/cancel", h.cancel)
-	mux.HandleFunc("GET /v1/tasks/{id}/changes", h.changes)
-	mux.HandleFunc("GET /v1/tasks/{id}/files", h.files)
-	mux.HandleFunc("GET /v1/tasks/{id}/findings", h.listFindings)
-	mux.HandleFunc("POST /v1/tasks/{id}/findings", h.addFinding)
-	mux.HandleFunc("POST /v1/tasks/{id}/accept", h.accept)
-	mux.HandleFunc("POST /v1/tasks/{id}/refine", h.refine)
-	mux.HandleFunc("POST /v1/coordinator/stop", h.stop)
-	mux.HandleFunc("GET /v1/capabilities", h.capabilities)
-	mux.HandleFunc("GET /v1/experience", h.experience)
-	mux.HandleFunc("POST /v1/projects/inspect", h.inspect)
-	mux.HandleFunc("POST /v1/projects", h.importProject)
-	mux.HandleFunc("POST /v1/projects/{id}/snapshots", h.snapshot)
-	mux.HandleFunc("GET /v1/projects/{id}/snapshots/{sid}", h.getSnapshot)
-	mux.HandleFunc("GET /v1/projects/{id}/drift", h.drift)
-	mux.HandleFunc("GET /v1/attempts/{id}/events", h.events)
-	mux.HandleFunc("GET /v1/attempts/{id}/artifacts/{hash}", h.artifact)
-	mux.HandleFunc("GET /v1/checks/{id}/log", h.checkLog)
-	mux.HandleFunc("GET /v1/tasks/{task}/checks/{id}/log", h.checkLog)
+	for pattern, route := range h.localRoutes() {
+		mux.HandleFunc(pattern, route)
+	}
 	for pattern, route := range h.ownerRoutes() {
 		mux.HandleFunc(pattern, route)
 	}
@@ -288,7 +301,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "experience_unavailable": "experience unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit", "unauthenticated": "sign in first", "local_only": "only the owner's desktop can do this", "owner_account": "the owner's account can be neither disabled nor removed", "account_in_use": "the account has history; disable it instead", "last_credential": "the account's last credential cannot be removed", "name_taken": "an account has this name", "throttled": "too many failed attempts; try again later", "login_failed": "sign-in failed", "credential_invalid": "the credential was refused", "code_invalid": "the enrollment code is unknown, used or expired", "ceremony_invalid": "the passkey ceremony is unknown or expired", "password_invalid": "a password needs at least 12 characters and at most 1,024 bytes", "password_not_allowed": "the account does not allow a password", "code_shown": "the code was shown once; issue a new one"}[code]
+	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "experience_unavailable": "experience unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit", "unauthenticated": "sign in first", "local_only": "only the owner's desktop can do this", "owner_account": "the owner's account can be neither disabled nor removed", "account_in_use": "the account has history; disable it instead", "last_credential": "the account's last credential cannot be removed", "name_taken": "an account has this name", "throttled": "too many failed attempts; try again later", "login_failed": "sign-in failed", "credential_invalid": "the credential was refused", "code_invalid": "the enrollment code is unknown, used or expired", "ceremony_invalid": "the passkey ceremony is unknown or expired", "password_invalid": "a password needs at least 12 characters and at most 1,024 bytes", "password_not_allowed": "the account does not allow a password", "code_shown": "the code was shown once; issue a new one", "listener_unavailable": "the network listener is not available", "host_invalid": "this host name is not the configured one", "origin_refused": "a change must come from the configured origin", "content_type_refused": "a change must be sent as application/json", "not_on_network": "not available on the network yet", "address_invalid": "the address must be an IP address and a port", "name_invalid": "the name must be a lowercase DNS host name", "certificate_invalid": "the certificate or key was refused", "certificate_expired": "the certificate is expired or not yet valid", "certificate_name": "the certificate does not name the configured host"}[code]
 	if status == 500 {
 		writeInternalError(w, errors.New("unspecified internal error"))
 		return
@@ -299,11 +312,22 @@ func writeError(w http.ResponseWriter, status int, code string) {
 	}{code, message})
 }
 
-func writeInternalError(w http.ResponseWriter, err error) {
-	id := "unknown"
-	if rw, ok := w.(*requestWriter); ok {
-		id = rw.id
+// requestID is the id withRequestID gave the request, found through any writer wrapping it.
+func requestID(w http.ResponseWriter) string {
+	for {
+		if rw, ok := w.(*requestWriter); ok {
+			return rw.id
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return "unknown"
+		}
+		w = u.Unwrap()
 	}
+}
+
+func writeInternalError(w http.ResponseWriter, err error) {
+	id := requestID(w)
 	fmt.Fprintf(os.Stderr, "adad: request %s: %v\n", id, err)
 	writeJSON(w, 500, struct {
 		Error     string `json:"error"`
@@ -1580,11 +1604,7 @@ func (h *handler) streamBlob(w http.ResponseWriter, hash string, size int64) {
 			writeInternalError(w, err)
 			return
 		}
-		requestID := "unknown"
-		if rw, ok := w.(*requestWriter); ok {
-			requestID = rw.id
-		}
-		fmt.Fprintf(os.Stderr, "adad: request %s: %v\n", requestID, err)
+		fmt.Fprintf(os.Stderr, "adad: request %s: %v\n", requestID(w), err)
 	}
 	bufs := [2][]byte{make([]byte, 32<<10), make([]byte, 32<<10)}
 	var held []byte // the last chunk read, in the buffer the next read leaves alone
