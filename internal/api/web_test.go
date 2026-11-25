@@ -33,9 +33,9 @@ var testUI = fstest.MapFS{
 }
 
 // newWebFixture is newNetFixture with its network channel served through the web middleware.
-func newWebFixture(t *testing.T, ui fs.FS) *netFixture {
+func newWebFixture(t *testing.T, ui fs.FS, change ...func(*Execution)) *netFixture {
 	t.Helper()
-	f := newNetFixture(t)
+	f := newNetFixture(t, change...)
 	f.server.Close()
 	f.server = httptest.NewUnstartedServer(withRequestID(newWeb(f.n, WebConfig{Name: testRPID, Origin: testOrigin, Owner: "local", UI: ui, Clock: f.clock.Now})))
 	// As adad's listener: OPTIONS * reaches the middleware.
@@ -292,7 +292,7 @@ func TestEveryLocalRouteIsInExactlyOneNetworkList(t *testing.T) {
 		}
 	}
 	count := map[string]int{}
-	for _, list := range [][]string{networkReads, networkLocalOnly, networkLater} {
+	for _, list := range [][]string{networkReads, networkLocalOnly, networkOwner, networkLater} {
 		for _, pattern := range list {
 			count[pattern]++
 		}
@@ -321,7 +321,10 @@ func TestEveryLocalRouteIsInExactlyOneNetworkList(t *testing.T) {
 
 func TestWithASessionTheNetworkRefusesStartsRefinementsHostPathsAndTheExperienceCard(t *testing.T) {
 	f := newWebFixture(t, testUI)
-	cookie := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
+	owner := f.mustEnroll(t, f.newCode(t, "local"), newSoftKey(t))
+	// The task writes are the owner account's alone; another account's session is refused them.
+	_, code := f.account(t, "Vera", false)
+	cookie := f.mustEnroll(t, code, newSoftKey(t))
 	for _, c := range []struct {
 		method, path string
 		body         any
@@ -348,11 +351,15 @@ func TestWithASessionTheNetworkRefusesStartsRefinementsHostPathsAndTheExperience
 	for _, list := range []struct {
 		patterns []string
 		code     string
-	}{{networkLater, "not_on_network"}, {networkLocalOnly, "local_only"}} {
+		owner    bool // the owner account's session is refused too
+	}{{networkLater, "not_on_network", true}, {networkLocalOnly, "local_only", true}, {networkOwner, "not_on_network", false}} {
 		for _, pattern := range list.patterns {
 			method, path := concrete(pattern)
 			if r := f.call(t, method, path, cookie, nil); r.status != 403 || r.code(t) != list.code {
 				t.Fatalf("%s with a session: %d %s", pattern, r.status, r.body)
+			}
+			if r := f.call(t, method, path, owner, nil); list.owner && (r.status != 403 || r.code(t) != list.code) {
+				t.Fatalf("%s with the owner's session: %d %s", pattern, r.status, r.body)
 			}
 		}
 	}
@@ -372,7 +379,7 @@ func TestTheNetworkProjectListShowsAMembersProjectWithoutATaskAndNoOtherUsers(t 
 	if err := json.Unmarshal(r.body, &projects); err != nil || r.status != 200 {
 		t.Fatalf("%d %s: %v", r.status, r.body, err)
 	}
-	want := map[string]any{"id": "q", "name": "Quiet", "role": "member", "created": "2026-11-24T10:00:00Z"}
+	want := map[string]any{"id": "q", "name": "Quiet", "role": "member", "created": "2026-11-24T10:00:00Z", "default_mode": "readonly"}
 	if len(projects) != 1 || !maps.Equal(projects[0], want) {
 		t.Fatalf("Vera sees %s", r.body)
 	}
@@ -391,7 +398,7 @@ func TestTheLocalProjectListShowsTheOwnersProjects(t *testing.T) {
 	if err := json.Unmarshal(r.body, &projects); err != nil || r.status != 200 {
 		t.Fatalf("%d %s: %v", r.status, r.body, err)
 	}
-	if len(projects) != 1 || !maps.Equal(projects[0], map[string]any{"id": "p", "name": "p", "role": "owner", "created": "now"}) {
+	if len(projects) != 1 || !maps.Equal(projects[0], map[string]any{"id": "p", "name": "p", "role": "owner", "created": "now", "default_mode": "readonly"}) {
 		t.Fatalf("the owner sees %s", r.body)
 	}
 }

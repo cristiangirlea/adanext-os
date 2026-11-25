@@ -886,12 +886,20 @@ func TestArtifactReadNeedsCurrentMembershipOnEveryRead(t *testing.T) {
 	if resp, body := get(t, url[:len(url)-len(ref.Hash)]+other, "alice"); resp.StatusCode != 404 || !bytes.Equal(body, unknown) || opener.calls.Load() != opens {
 		t.Fatalf("unreferenced hash: %d %s, opens=%d", resp.StatusCode, body, opener.calls.Load())
 	}
-	if err := f.s.RemoveMember(context.Background(), "a", "alice"); err != nil {
-		t.Fatal(err)
+	// The owner's removal route, with another owner kept: the project's last owner stays.
+	owner := ownerChannel(t, f)
+	if code, body := do(t, owner, "PUT", "/v1/projects/a/members/bob", "add-bob", "", []byte(`{"role":"owner"}`)); code != 200 {
+		t.Fatalf("add bob: %d %s", code, body)
+	}
+	if code, body := do(t, owner, "DELETE", "/v1/projects/a/members/alice", "remove-alice", "", nil); code != 200 {
+		t.Fatalf("remove alice: %d %s", code, body)
 	}
 	resp, body = get(t, url, "alice")
 	if resp.StatusCode != 404 || !bytes.Equal(body, unknown) {
 		t.Fatalf("removed member: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := get(t, url, "bob"); resp.StatusCode != 200 {
+		t.Fatalf("the new owner: %d", resp.StatusCode)
 	}
 }
 

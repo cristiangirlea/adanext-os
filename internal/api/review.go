@@ -510,15 +510,21 @@ func (h *handler) refine(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(context.WithValue(r.Context(), bodyKey{}, body))
 	scope := &store.Scope{ProjectID: project}
+	if h.atRefineLock != nil {
+		h.atRefineLock()
+	}
+	h.guards.refine.Lock()
+	defer h.guards.refine.Unlock()
+	// Probed under the lock: a second identical request waits for the first and answers its result.
 	if h.replayedAt(w, r, user, k, scope, strconv.FormatInt(revision, 10)) {
 		return
 	}
-	h.refineMu.Lock()
-	defer h.refineMu.Unlock()
-	if err := h.releaseEarlierWork(r.Context(), user, id, revision, input.Acknowledge); err != nil {
+	ctx, err := h.releaseEarlierWork(r.Context(), user, id, revision, input.Acknowledge)
+	if err != nil {
 		reviewError(w, err)
 		return
 	}
+	r = r.WithContext(ctx)
 	h.admission.mu.RLock()
 	defer h.admission.mu.RUnlock()
 	var attemptID string
@@ -569,61 +575,79 @@ func (h *handler) refine(w http.ResponseWriter, r *http.Request) {
 // releaseEarlierWork commits each ended attempt's remaining changes on ada/<task> and removes its
 // worktree, once the refine would be allowed. The clone is checked first, and a clone that fails
 // refuses the refine with nothing changed. An attempt whose worktree no longer matches its record
-// moves to recovery_required, which refuses the refine.
-func (h *handler) releaseEarlierWork(ctx context.Context, user, task string, revision int64, acknowledged bool) error {
+// moves to recovery_required, which refuses the refine. The refine is authorized just before
+// its first irreversible step, when it has one; the returned context carries that to its commit,
+// and a refine with nothing to release is authorized at its commit like any write.
+func (h *handler) releaseEarlierWork(ctx context.Context, user, task string, revision int64, acknowledged bool) (context.Context, error) {
 	rs, err := h.store.ReviewState(ctx, user, task)
 	if err != nil {
-		return err
+		return ctx, err
 	}
 	if err := rs.CheckRefine(user, revision, acknowledged, false); err != nil {
-		return err
+		return ctx, err
 	}
 	if active, ok := h.exec.Runner.(TaskActivity); ok && active.TaskActive(task) {
-		return store.ErrAttemptActive
+		return ctx, store.ErrAttemptActive
 	}
 	// The clone is checked before anything is committed or removed, whatever the task's state.
 	if h.exec.Review != nil {
 		cfg, err := h.store.CloneConfig(ctx, rs.Project)
 		if err != nil {
-			return err
+			return ctx, err
 		}
 		if err := h.exec.Review.VerifyClone(rs.Project, cfg); err != nil {
-			return err
+			return ctx, err
 		}
 	}
+	authorized := false
 	for _, a := range rs.Attempts {
 		if !a.Workspace || a.Removed {
 			continue
 		}
 		if h.exec.Review == nil {
-			return errEngineUnavailable
+			return ctx, errEngineUnavailable
+		}
+		if !authorized {
+			// The first irreversible step: the requester's membership, permission and session
+			// are judged together, after the clone check, and then the refine completes.
+			current, err := h.store.ReviewState(ctx, user, task)
+			if err != nil {
+				return ctx, err
+			}
+			if err := current.CheckRefine(user, revision, acknowledged, false); err != nil {
+				return ctx, err
+			}
+			if ctx, err = h.authorize(ctx); err != nil {
+				return ctx, err
+			}
+			authorized = true
 		}
 		if a.TestedCommit == "" {
 			tested, err := h.commitRemaining(ctx, a.ID)
 			if _, mismatch := errors.AsType[*source.MismatchError](err); mismatch {
 				if rerr := h.store.RecoverEndedAttempt(ctx, a.ID, "workspace verification failed", err.Error()); rerr != nil {
-					return rerr
+					return ctx, rerr
 				}
 				if h.hub != nil {
 					h.hub.Notify(a.ID)
 				}
-				return store.ErrAttemptRecovery
+				return ctx, store.ErrAttemptRecovery
 			}
 			if err != nil {
-				return err
+				return ctx, err
 			}
 			if err := h.store.RecordAgentCommit(ctx, a.ID, tested); err != nil {
-				return err
+				return ctx, err
 			}
 		}
 		if err := h.exec.Review.RemoveWorktree(rs.Project, a.ID); err != nil {
-			return err
+			return ctx, err
 		}
 		if err := h.store.MarkWorktreeRemoved(ctx, a.ID); err != nil {
-			return err
+			return ctx, err
 		}
 	}
-	return nil
+	return ctx, nil
 }
 
 // commitRemaining commits what an ended attempt left in its worktree, as M4.2 commits an ok one.

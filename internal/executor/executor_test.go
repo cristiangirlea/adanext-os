@@ -586,7 +586,7 @@ func testExecutor(t *testing.T, script string) (*Executor, *store.Store, string,
 		t.Fatal(err)
 	}
 	_, err = s.Do(ctx, "u", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','p','/never-use','now')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created,default_mode) VALUES('p','p','/never-use','now','yolo')")
 		return []byte("ok"), err
 	})
 	if err != nil {

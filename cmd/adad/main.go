@@ -397,7 +397,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	stop := &coordinatorStop{requested: make(chan struct{})}
 	admission := &api.Admission{}
-	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Writer: artifacts, Owner: ownerAccount, Stopper: stop, Admission: admission}
+	execution := api.Execution{Generation: generation, Artifacts: artifacts, References: s, Writer: artifacts, Owner: ownerAccount, Stopper: stop, Admission: admission, Guards: &api.Guards{}}
 	// Without a usable git adad still serves; only inspection answers
 	// git_unavailable, and an imported project's attempt fails.
 	mirrors := filepath.Join(opts.stateDir, "inspect")

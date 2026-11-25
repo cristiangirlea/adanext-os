@@ -51,13 +51,15 @@ func TestTaskReadsIncludeTheCurrentAttemptAndQueuePosition(t *testing.T) {
 			}
 		}
 	}
-	check(map[string]any{"id": attempt, "state": "pending", "queue_position": 1, "backend": "codex", "model": "", "effort": "", "mode": "auto", "provider_changes": nil, "provider_flagged": false})
+	// The auto start waits for its actor's decision under the project's readonly default.
+	decision := map[string]any{"actor": "alice", "required": true, "scope": map[string]any{"backend": "codex", "mode": "auto", "workspace": "local"}, "project_default": "readonly", "allowed": false, "denied": false}
+	check(map[string]any{"id": attempt, "state": "pending", "queue_position": 1, "backend": "codex", "model": "", "effort": "", "mode": "auto", "provider_changes": nil, "provider_flagged": false, "decision": decision})
 	// Latest means insertion order, including a terminal attempt, not lexicographic id or timestamp.
 	ctx := context.Background()
 	if err := f.s.CreateAttempt(ctx, store.Attempt{ID: "latest", Task: id, Actor: "alice", Backend: "codex", Mode: "auto", Executor: "local", State: "canceled"}); err != nil {
 		t.Fatal(err)
 	}
-	check(map[string]any{"id": "latest", "state": "canceled", "backend": "codex", "model": "", "effort": "", "mode": "auto", "provider_changes": nil, "provider_flagged": false})
+	check(map[string]any{"id": "latest", "state": "canceled", "backend": "codex", "model": "", "effort": "", "mode": "auto", "provider_changes": nil, "provider_flagged": false, "decision": nil})
 	if code, _ := do(t, asUser(f, "bob"), "GET", "/v1/tasks/"+id, "", "", nil); code != 404 {
 		t.Fatal(code)
 	}

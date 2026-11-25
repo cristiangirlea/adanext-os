@@ -469,7 +469,7 @@ func TestCrashAndRestartRecoversTheRunningAttemptWithoutRelaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = s.Do(ctx, "local", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','p','/never-use','now')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created,default_mode) VALUES('p','p','/never-use','now','yolo')")
 		return []byte("ok"), err
 	})
 	if err != nil {
@@ -653,7 +653,7 @@ func TestPendingAttemptRecoversBeforeTheNewCoordinatorServes(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = s.Do(ctx, "local", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','p','/never-use','now')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created,default_mode) VALUES('p','p','/never-use','now','yolo')")
 		return []byte("ok"), err
 	})
 	if err != nil {
@@ -706,7 +706,7 @@ func TestCoordinatorWithoutEngineFlagsRefusesStartWithoutIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = s.Do(ctx, "local", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','p','/never-use','now')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created,default_mode) VALUES('p','p','/never-use','now','yolo')")
 		return []byte("ok"), err
 	})
 	if err != nil {
@@ -775,7 +775,7 @@ func TestOwnerStopEndpointCancelsRunningAndQueuedWorkAndExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = s.Do(ctx, "local", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','p','/never-use','now')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created,default_mode) VALUES('p','p','/never-use','now','yolo')")
 		return []byte("ok"), err
 	})
 	if err != nil {
@@ -874,7 +874,7 @@ func TestOwnerStopEndpointCancelsRunningAndQueuedWorkAndExits(t *testing.T) {
 		data, _ := io.ReadAll(stream.Body)
 		streamed <- data
 	}()
-	code, body = post("/v1/coordinator/stop", "quit", "", "")
+	code, body = post("/v1/coordinator/stop", "quit", "", `{"others":0}`)
 	if code != 202 || !bytes.Contains(body, []byte(`"running":1`)) || !bytes.Contains(body, []byte(`"queued":1`)) {
 		t.Fatalf("stop = %d %s", code, body)
 	}
@@ -1063,7 +1063,7 @@ func stopCoordinator(t *testing.T, cfg ipc.Config) {
 	t.Helper()
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return ipc.Dial(ctx, cfg) }}}
 	defer client.CloseIdleConnections()
-	req, _ := http.NewRequest("POST", "http://ipc/v1/coordinator/stop", nil)
+	req, _ := http.NewRequest("POST", "http://ipc/v1/coordinator/stop", strings.NewReader(`{"others":0}`))
 	req.Header.Set("Idempotency-Key", "stop-detached")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1180,7 +1180,7 @@ func TestAStartDuringASignalDrivenStopIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = s.Do(ctx, "local", "project", "project", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','p','/never-use','now'),('q','q','/never-use-either','now')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created,default_mode) VALUES('p','p','/never-use','now','yolo'),('q','q','/never-use-either','now','yolo')")
 		return []byte("ok"), err
 	})
 	if err != nil {

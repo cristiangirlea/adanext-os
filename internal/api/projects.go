@@ -241,10 +241,18 @@ func validSelection(sel source.Selection) bool {
 	return true
 }
 
-// captureError answers a capture that was refused or failed.
-func captureError(w http.ResponseWriter, err error) {
+// captureError answers a capture that was refused or failed. Over the network a blocker keeps
+// its code and count and loses its paths, which can name the coordinator's host paths.
+func (h *handler) captureError(w http.ResponseWriter, err error) {
 	if e, ok := errors.AsType[*source.BlockedError](err); ok {
-		writeJSON(w, 409, blockedBody{errorBody{"import_blocked", "the repository cannot be captured as it stands"}, e.Blockers})
+		blockers := e.Blockers
+		if h.net != nil {
+			blockers = make([]source.Blocker, 0, len(e.Blockers))
+			for _, b := range e.Blockers {
+				blockers = append(blockers, source.Blocker{Code: b.Code, Paths: []string{}, Count: b.Count})
+			}
+		}
+		writeJSON(w, 409, blockedBody{errorBody{"import_blocked", "the repository cannot be captured as it stands"}, blockers})
 		return
 	}
 	if e, ok := errors.AsType[*source.PathError](err); ok {
@@ -319,19 +327,19 @@ func (h *handler) snapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// One capture at a time: each holds its patches and files in memory until stored.
-	if !h.capturing.CompareAndSwap(false, true) {
+	if !h.guards.capturing.CompareAndSwap(false, true) {
 		writeJSON(w, 429, errorBody{"capture_busy", "another snapshot is being taken; try again"})
 		return
 	}
-	defer h.capturing.Store(false)
+	defer h.guards.capturing.Store(false)
 	c, err := h.exec.Capturer.Capture(r.Context(), src.Path, sel)
 	if err != nil {
-		captureError(w, err)
+		h.captureError(w, err)
 		return
 	}
 	if id := c.Inspection.Identity; id.Path != src.Path || id.CommonDir != src.CommonDir {
 		// Another repository now stands at the imported path.
-		captureError(w, source.ErrSourceChanged)
+		h.captureError(w, source.ErrSourceChanged)
 		return
 	}
 	declined := input.IncludeChanges != nil && !*input.IncludeChanges
@@ -431,10 +439,11 @@ func (h *handler) discardSnapshot(ctx context.Context, cause error, written []st
 }
 
 type projectSummaryJSON struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Role    string `json:"role"`
-	Created string `json:"created"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Role        string `json:"role"`
+	Created     string `json:"created"`
+	DefaultMode string `json:"default_mode"`
 }
 
 // listProjects answers the actor's projects, those with no task included, and never a host path.
@@ -450,7 +459,7 @@ func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]projectSummaryJSON, 0, len(projects))
 	for _, p := range projects {
-		out = append(out, projectSummaryJSON{p.ID, p.Name, p.Role, p.Created})
+		out = append(out, projectSummaryJSON{p.ID, p.Name, p.Role, p.Created, p.DefaultMode})
 	}
 	writeJSON(w, 200, out)
 }
@@ -514,7 +523,7 @@ func (h *handler) drift(w http.ResponseWriter, r *http.Request) {
 	// Another repository now stands at the imported path; with none read,
 	// the blocker says so.
 	if d.Path != src.Path || d.CommonDir != "" && d.CommonDir != src.CommonDir {
-		captureError(w, source.ErrSourceChanged)
+		h.captureError(w, source.ErrSourceChanged)
 		return
 	}
 	writeJSON(w, 200, struct {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ErrAttemptLaunched reports a cancel that found the task's attempt no longer
@@ -27,28 +28,41 @@ type QueuedAttempt struct {
 }
 
 // NextPendingAttempt returns the oldest pending attempt of this generation
-// whose project busy does not report, in creation order. The launch claim
+// whose project busy does not report, in creation order, passing over one that
+// needs a decision with no matching allow at at: it keeps its place and holds
+// up no one. The launch claim
 // (pending to launching under DoOwned) still decides a race between two
 // coordinators or a cancel; this read only chooses the candidate.
-func (s *Store) NextPendingAttempt(ctx context.Context, generation int64, busy func(project string) bool) (QueuedAttempt, bool, error) {
+func (s *Store) NextPendingAttempt(ctx context.Context, generation int64, at time.Time, busy func(project string) bool) (QueuedAttempt, bool, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT a."+strings.ReplaceAll(attemptColumns, ",", ",a.")+",t.project FROM attempts a JOIN tasks t ON t.id=a.task WHERE a.state='pending' AND a.ownership_generation=? ORDER BY "+queueOrder, generation)
 	if err != nil {
 		return QueuedAttempt{}, false, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var a QueuedAttempt
-		var run, session, ended sql.NullString
-		if err := rows.Scan(&a.ID, &a.Task, &a.Actor, &a.Backend, &a.Model, &a.Effort, &a.Mode, &a.Executor, &a.OwnershipGeneration, &a.EngineSHA256, &run, &session, &a.State, &a.Started, &ended, &a.Project); err != nil {
-			return QueuedAttempt{}, false, err
-		}
-		a.RunID, a.NativeSession, a.Ended = run.String, session.String, ended.String
+	type row struct {
+		QueuedAttempt
+		run, session, ended sql.NullString
+	}
+	all, err := collect(rows, func(r *row) []any {
+		return []any{&r.ID, &r.Task, &r.Actor, &r.Backend, &r.Model, &r.Effort, &r.Mode, &r.Executor, &r.OwnershipGeneration, &r.EngineSHA256, &r.run, &r.session, &r.State, &r.Started, &r.ended, &r.Project}
+	})
+	if err != nil {
+		return QueuedAttempt{}, false, err
+	}
+	for _, r := range all {
+		a := r.QueuedAttempt
+		a.RunID, a.NativeSession, a.Ended = r.run.String, r.session.String, r.ended.String
 		if busy != nil && busy(a.Project) {
 			continue
 		}
-		return a, true, nil
+		ok, err := launchable(ctx, s.db, a.ID, at)
+		if err != nil {
+			return QueuedAttempt{}, false, err
+		}
+		if ok {
+			return a, true, nil
+		}
 	}
-	return QueuedAttempt{}, false, rows.Err()
+	return QueuedAttempt{}, false, nil
 }
 
 // QueuePosition is the 1-based place of the task's pending attempt among all
@@ -186,7 +200,7 @@ func appendCancelEvent(ctx context.Context, tx *sql.Tx, attemptID, reason string
 
 // A StopResult says what a stop touched: the attempts it recorded the reason
 // on, for their open streams to be woken, and how many of them were running
-// (launching included) or queued.
+// (launching or verifying included) or queued.
 type StopResult struct {
 	Attempts        []string
 	Running, Queued int
@@ -199,28 +213,14 @@ type StopResult struct {
 // here, in the stop's own transaction, so a result the engine returns before
 // the executor acts cannot end it ok; a cancel its actor already requested
 // stays as it is. A launching attempt's task is still preparing: the executor
-// honours the recorded cancel when acceptance advances it.
+// honours the recorded cancel when acceptance advances it. A task verifying
+// its checks gets the event too; the executor's cancel kills its check.
 func (tx *Tx) StopWork(ctx context.Context, generation int64, reason string) (StopResult, error) {
 	var result StopResult
-	rows, err := tx.tx.QueryContext(ctx, "SELECT a.id,a.task,a.state FROM attempts a WHERE a.state IN ('pending','launching','running') AND a.ownership_generation=? ORDER BY "+queueOrder, generation)
+	all, err := openAttempts(ctx, tx.tx, "a.ownership_generation=?", generation)
 	if err != nil {
 		return result, err
 	}
-	type open struct{ id, task, state string }
-	var all []open
-	for rows.Next() {
-		var a open
-		if err := rows.Scan(&a.id, &a.task, &a.state); err != nil {
-			rows.Close()
-			return result, err
-		}
-		all = append(all, a)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return result, err
-	}
-	rows.Close()
 	for _, a := range all {
 		result.Attempts = append(result.Attempts, a.id)
 		if a.state != "pending" {

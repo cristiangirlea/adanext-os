@@ -71,7 +71,7 @@ func TestMembershipInAnotherProjectDoesNotGrantTaskAccess(t *testing.T) {
 	if err := s.CreateUser(ctx, "other", "other"); err != nil {
 		t.Fatal(err)
 	}
-	execute(t, s, "INSERT INTO projects VALUES('q','other project','source','created')")
+	execute(t, s, "INSERT INTO projects(id,name,source_path,created) VALUES('q','other project','source','created')")
 	if err := s.AddMember(ctx, "q", "other", "member"); err != nil {
 		t.Fatal(err)
 	}

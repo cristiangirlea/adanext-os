@@ -56,6 +56,7 @@ type network struct {
 	session    *http.ServeMux                // the routes of a signed-in account
 	reads      *http.ServeMux                // networkReads, served with the session's account as actor
 	localOnly  *http.ServeMux                // networkLocalOnly and the owner's routes, refused with local_only
+	owners     *http.ServeMux                // networkOwner, served to the owner account's session alone
 	later      *http.ServeMux                // networkLater, refused with not_on_network
 	pause      func(context.Context, string) // test seam: called at the named point of a request; nil in service
 	shutdown   context.Context               // ends when the hub drains or closes
@@ -93,20 +94,26 @@ var (
 		"POST /v1/projects/inspect",
 		"POST /v1/projects",
 	}
-	// networkLater are refused until a later slice brings them to the network.
-	networkLater = []string{
+	// networkOwner are served to the coordinator owner account's session; any other account's
+	// is refused with not_on_network until a later slice opens them to other users.
+	networkOwner = []string{
 		"POST /v1/tasks",
 		"PUT /v1/tasks/{id}/checks",
 		"POST /v1/tasks/{id}/ready",
 		"POST /v1/tasks/{id}/start",
 		"POST /v1/tasks/{id}/cancel",
+		"POST /v1/tasks/{id}/refine",
 		"POST /v1/tasks/{id}/findings",
 		"POST /v1/tasks/{id}/accept",
-		"POST /v1/tasks/{id}/refine",
 		"POST /v1/projects/{id}/snapshots",
+		"POST /v1/attempts/{id}/decision",
+		"GET /v1/coordinator/stop",
+		"POST /v1/coordinator/stop",
+	}
+	// networkLater are refused until a later slice brings them to the network.
+	networkLater = []string{
 		// Its answer can carry a host path and git's own messages.
 		"GET /v1/projects/{id}/drift",
-		"POST /v1/coordinator/stop",
 	}
 )
 
@@ -134,7 +141,7 @@ func newNetwork(s *store.Store, hub *Hub, cfg NetworkConfig, execution ...Execut
 	if err != nil {
 		return nil, err
 	}
-	n := &network{rp: rp, ceremonies: newCeremonies(), hasher: newHasher(), clock: cfg.Clock, open: http.NewServeMux(), session: http.NewServeMux(), reads: http.NewServeMux(), localOnly: http.NewServeMux(), later: http.NewServeMux()}
+	n := &network{rp: rp, ceremonies: newCeremonies(), hasher: newHasher(), clock: cfg.Clock, open: http.NewServeMux(), session: http.NewServeMux(), reads: http.NewServeMux(), localOnly: http.NewServeMux(), owners: http.NewServeMux(), later: http.NewServeMux()}
 	if n.clock == nil {
 		n.clock = time.Now
 	}
@@ -181,6 +188,16 @@ func newNetwork(s *store.Store, hub *Hub, cfg NetworkConfig, execution ...Execut
 	for _, pattern := range networkLocalOnly {
 		n.localOnly.HandleFunc(pattern, refuse("local_only"))
 	}
+	for _, pattern := range networkOwner {
+		route := local[pattern]
+		n.owners.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			if sess, _ := sessionFrom(r.Context()); !n.h.isOwner(sess.User) {
+				writeError(w, 403, "not_on_network")
+				return
+			}
+			route(w, r)
+		})
+	}
 	for _, pattern := range networkLater {
 		n.later.HandleFunc(pattern, refuse("not_on_network"))
 	}
@@ -218,7 +235,7 @@ func (n *network) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		n.session.ServeHTTP(w, r)
 		return
 	}
-	for _, mux := range []*http.ServeMux{n.reads, n.localOnly, n.later} {
+	for _, mux := range []*http.ServeMux{n.reads, n.localOnly, n.owners, n.later} {
 		if _, pattern := mux.Handler(r); pattern != "" {
 			mux.ServeHTTP(w, r)
 			return
@@ -308,6 +325,28 @@ func (n *network) sessionAlive(ctx context.Context, id string) (bool, error) {
 	}
 	_, ok, err := n.live(ctx, sess, n.clock())
 	return ok, err
+}
+
+// authorizedKey marks a request a check before its first irreversible step authorized.
+type authorizedKey struct{}
+
+// authorize is a write's one session check, made before its first irreversible step: a
+// network session deleted or expired since authentication is store.ErrSessionEnded. The
+// returned context carries the authorization, so the write's commit does not check again.
+func (h *handler) authorize(ctx context.Context) (context.Context, error) {
+	sess, ok := sessionFrom(ctx)
+	if !ok || h.net == nil {
+		return ctx, nil
+	}
+	alive, err := h.net.sessionAlive(ctx, sess.ID)
+	if err != nil {
+		return ctx, err
+	}
+	if !alive {
+		return ctx, store.ErrSessionEnded
+	}
+	h.net.at(ctx, "authorized")
+	return context.WithValue(ctx, authorizedKey{}, true), nil
 }
 
 // peer is the TCP peer's address; forwarded headers are not trusted.

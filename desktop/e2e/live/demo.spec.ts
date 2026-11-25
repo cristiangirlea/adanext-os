@@ -165,6 +165,8 @@ test("the whole workflow through the app on a real backend", async () => {
     // 5. Ready, Start, and the run under its caps.
     await page.getByRole("button", { name: "Ready", exact: true }).click();
     await page.getByRole("button", { name: "Start", exact: true }).click();
+    // An auto start is above the project's readonly default: its actor allows it.
+    await page.getByRole("button", { name: "Allow", exact: true }).click();
     const began = Date.now();
     await expect(page.getByRole("contentinfo")).toContainText(`${backend}, default model, auto`);
     await shot(page, "running");
@@ -214,15 +216,31 @@ test("the whole workflow through the app on a real backend", async () => {
     passed = true;
   } finally {
     await app.close().catch(() => app.process().kill());
+    let cleanupError = "";
     if (await endpointPresent(socket).catch(() => false)) {
-      await call(socket, { method: "POST", path: "/v1/coordinator/stop", idempotent: true }).catch(() => {});
-      await waitForExit(socket);
+      // The stop confirms the count of other users' work it was shown; without the count it is
+      // not guessed: the cleanup failure is reported and the coordinator left for inspection.
+      let counts: { others_running: number; others_queued: number } | undefined;
+      try {
+        counts = (await call(socket, { method: "GET", path: "/v1/coordinator/stop" })) as { others_running: number; others_queued: number };
+      } catch (error) {
+        cleanupError = `the stop's counts could not be read: ${String(error)}; adad is still running on ${socket} with its state in ${scratch}`;
+        record.cleanup_error = cleanupError;
+        console.error(`live demonstration cleanup: ${cleanupError}`);
+      }
+      if (counts) {
+        await call(socket, { method: "POST", path: "/v1/coordinator/stop", body: { others: counts.others_running + counts.others_queued }, idempotent: true }).catch(() => {});
+        await waitForExit(socket);
+      }
     }
     record.finished = new Date().toISOString();
-    record.passed = passed;
+    // A coordinator left running is a failed run: its repository and state directory stay.
+    record.passed = passed && !cleanupError;
     await save();
     console.log(`live demonstration results: ${results}`);
     // The scratch stays for inspection when the run failed.
-    if (passed) await rm(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    if (record.passed) await rm(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    // A failure the run met first stays the one reported; the cleanup's is in the record and the log.
+    if (cleanupError && passed) throw new Error(`live demonstration cleanup: ${cleanupError}`);
   }
 });
