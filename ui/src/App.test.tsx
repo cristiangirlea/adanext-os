@@ -364,3 +364,66 @@ describe("the New task button", () => {
     expect(document.activeElement).toBe(screen.getByLabelText("Objective"));
   });
 });
+
+describe("the project list in the navigation", () => {
+  it("shows loading until projects() answers, never the empty message before it, and the refusal when it fails", async () => {
+    const client = new FakeClient([], "network");
+    let fail!: (e: Error) => void;
+    client.projects = () => new Promise((_resolve, reject) => (fail = reject));
+    render(<App client={client} />);
+    await flush();
+    await flush();
+    const nav = screen.getByRole("navigation", { name: "Projects and tasks" });
+    expect(client.calls).toContain("listTasks");
+    expect(within(nav).queryByText(/not a member of any project/)).toBeNull();
+    expect(within(nav).getByLabelText("Loading projects")).toBeTruthy();
+    await act(async () => fail(new AdaError("internal", 500, "internal error", "req-7")));
+    expect(within(nav).getByText("internal")).toBeTruthy();
+    expect(within(nav).queryByText(/not a member of any project/)).toBeNull();
+    expect(within(nav).queryByLabelText("Loading projects")).toBeNull();
+  });
+
+  it("says the account is in no project only once projects() answered an empty list", async () => {
+    const client = new FakeClient([], "network");
+    render(<App client={client} />);
+    const nav = screen.getByRole("navigation", { name: "Projects and tasks" });
+    expect(await within(nav).findByText("You are not a member of any project yet.")).toBeTruthy();
+  });
+});
+
+describe("the project read while the tasks are pending", () => {
+  it("shows the projects' refusal even while the task list still loads", async () => {
+    const client = new FakeClient([], "network");
+    client.listTasks = () => new Promise(() => {});
+    client.projects = async () => {
+      throw new AdaError("internal", 500, "internal error", "req-8");
+    };
+    render(<App client={client} />);
+    await flush();
+    await flush();
+    const nav = screen.getByRole("navigation", { name: "Projects and tasks" });
+    expect(within(nav).getByLabelText("Loading tasks")).toBeTruthy();
+    expect(within(nav).getByText("internal")).toBeTruthy();
+  });
+});
+
+describe("projects beside a pending or failed task read", () => {
+  it("shows the captions once projects() answers, and no 'No tasks yet.' until the task read succeeded", async () => {
+    const client = new FakeClient([], "network");
+    client.projectList = [{ id: "p1", name: "repo", role: "owner", created: "" }];
+    let fail!: (e: Error) => void;
+    client.listTasks = () => new Promise((_resolve, reject) => (fail = reject));
+    render(<App client={client} />);
+    await flush();
+    await flush();
+    const nav = screen.getByRole("navigation", { name: "Projects and tasks" });
+    expect(within(nav).getByText("repo")).toBeTruthy();
+    expect(within(nav).queryByText("No tasks yet.")).toBeNull();
+    await act(async () => fail(new AdaError("internal", 500, "internal error", "req-9")));
+    expect(within(nav).getByText("repo")).toBeTruthy();
+    // The refusal shows once, in the page's alert, not again in the navigation.
+    expect(screen.getByRole("alert").textContent).toContain("internal");
+    expect(within(nav).queryByText("internal")).toBeNull();
+    expect(within(nav).queryByText("No tasks yet.")).toBeNull();
+  });
+});

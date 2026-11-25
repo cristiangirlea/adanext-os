@@ -75,5 +75,6 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
     setListener: (setting) => invoke("setListener", [setting]),
     // Main opens the certificate and key dialogs; nothing the page passes here reaches it.
     installListenerCertificate: () => invoke("installListenerCertificate", []),
+    listProjects: () => invoke("listProjects", []),
   };
 }

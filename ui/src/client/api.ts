@@ -422,6 +422,47 @@ export interface ListenerSetting {
   name: string;
 }
 
+// The shell the app runs in: the desktop's preload bridge, or a browser on the network listener.
+export type Channel = "desktop" | "network";
+
+// GET /v1/projects: every project the user is a member of, those with no task yet included.
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  role: string;
+  created: string;
+}
+
+// The signed-in account (GET /v1/account), as sign-in and enrollment also answer it.
+export interface SignedInAccount {
+  id: string;
+  name: string;
+  owner: boolean;
+  password_allowed: boolean;
+}
+// One of the signed-in account's own sessions; current is the one this browser holds.
+export interface OwnSession {
+  id: string;
+  created: string;
+  last_used: string;
+  address: string;
+  current: boolean;
+}
+export interface OwnCredential {
+  id: string;
+  kind: "passkey" | "password" | string;
+  name: string;
+  created: string;
+  last_used: string;
+}
+// POST /v1/enrollment/options: the passkey ceremony for the code's account, and that account,
+// whose password_allowed says whether a password may be enrolled instead.
+export interface EnrollmentStart {
+  ceremony: string;
+  options: unknown;
+  account: SignedInAccount;
+}
+
 // The body of every refused request: adad's error code and message.
 export interface ErrorBody {
   error: string;
@@ -438,6 +479,8 @@ export interface ErrorDetails {
   path?: string;
   provider_changes?: ProviderChanges;
   findings?: SecretFinding[];
+  // The JSON event form's cursor_ahead names the attempt's last recorded sequence.
+  last_sequence?: number;
 }
 
 // adad's codes (internal/api writeError), plus the client's own for a coordinator it cannot
@@ -469,6 +512,13 @@ export type ErrorCode =
   | "certificate_expired"
   | "certificate_name"
   | "listener_unavailable"
+  | "unauthenticated"
+  | "not_on_network"
+  | "login_failed"
+  | "code_invalid"
+  | "password_not_allowed"
+  | "network_only"
+  | "passkey_unavailable"
   | "coordinator_unreachable"
   | "bridge_unavailable"
   | "malformed_call"
@@ -538,6 +588,25 @@ export interface AdaClient {
   setListener(setting: ListenerSetting): Promise<ListenerStatus>;
   // Opens the desktop's two file dialogs, certificate then key; null when the owner cancelled one.
   installListenerCertificate(): Promise<ListenerStatus | null>;
+  // Which shell this is; the browser offers no owner-channel or desktop-only control.
+  readonly channel: Channel;
+  projects(): Promise<ProjectSummary[]>;
+  // The network channel's own routes: the desktop answers them with network_only.
+  account(): Promise<SignedInAccount>;
+  ownSessions(): Promise<OwnSession[]>;
+  revokeOwnSession(id: string): Promise<void>;
+  ownCredentials(): Promise<OwnCredential[]>;
+  removeOwnCredential(id: string): Promise<void>;
+  logout(): Promise<void>;
+  // Called when a signed-in request finds the session gone (401); returns the unsubscribe.
+  onSessionEnded(listener: () => void): () => void;
+  // Asks for the options, has the browser's authenticator answer them, and sends the assertion.
+  passkeyLogin(): Promise<SignedInAccount>;
+  passwordLogin(account: string, password: string): Promise<SignedInAccount>;
+  enrollmentOptions(code: string): Promise<EnrollmentStart>;
+  // Has the authenticator create a passkey for start's ceremony and enrolls it under name.
+  enrollPasskey(code: string, start: EnrollmentStart, name: string): Promise<SignedInAccount>;
+  enrollPassword(code: string, password: string): Promise<SignedInAccount>;
 }
 
 // The preload bridge's shape, the `ada` global the desktop's preload exposes: the same methods,
@@ -582,4 +651,5 @@ export interface BridgeApi {
   listener(): Promise<BridgeResult<ListenerStatus>>;
   setListener(setting: ListenerSetting): Promise<BridgeResult<ListenerStatus>>;
   installListenerCertificate(): Promise<BridgeResult<ListenerStatus | null>>;
+  listProjects(): Promise<BridgeResult<ProjectSummary[]>>;
 }

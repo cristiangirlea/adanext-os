@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App";
 import { FakeClient, makeAccount, makeTask } from "./test/fakeClient";
 import { AdaError } from "./client/api";
+import { Root } from "./browser/Gate";
 
 // The accessibility pass of M4.4a: every control has a name and a role, the keyboard reaches
 // every control, focus is always visible, and the palette keeps focus in its input. Contrast is
@@ -160,5 +161,40 @@ describe("accessibility", () => {
     expect(row.tabIndex).toBe(0);
     fireEvent.keyDown(row, { key: "Enter" });
     expect(screen.getByRole("heading", { level: 2, name: "by keyboard" })).toBeTruthy();
+  });
+
+  it("names every control of the browser's sign-in, enrollment and account pages, and the browser workspace", async () => {
+    const check = () => {
+      const unnamed = Array.from(document.querySelectorAll(controls + ', form, [role="group"], [role="region"], input')).filter((el) => nameOf(el) === "");
+      expect(unnamed.map((el) => el.outerHTML.slice(0, 100))).toEqual([]);
+    };
+    const client = new FakeClient([makeTask({ id: "t1", objective: "remote task" })], "network");
+    const sam = { id: "u1", name: "sam", owner: false, password_allowed: true };
+    client.enrollCodes = { CODE: sam };
+    client.ownSessionList = [{ id: "s1", created: "2026-11-24T10:00:00Z", last_used: "2026-11-24T10:00:00Z", address: "192.0.2.1", current: true }];
+    client.credentialList = [{ id: "c1", kind: "passkey", name: "Laptop", created: "2026-11-24T10:00:00Z", last_used: "" }];
+    render(<Root client={client} />);
+    await flush();
+    await flush();
+    expect(screen.getByRole("main", { name: "Sign in" })).toBeTruthy();
+    check();
+    fireEvent.click(screen.getByRole("button", { name: "Enroll with a code" }));
+    check();
+    fireEvent.change(screen.getByLabelText("Enrollment code"), { target: { value: "CODE" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await flush();
+    await flush();
+    expect(screen.getByRole("main", { name: "Enroll with a code" })).toBeTruthy();
+    check();
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "a long enough secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Set the password and sign in" }));
+    await flush();
+    await flush();
+    check();
+    fireEvent.click(screen.getByRole("button", { name: "Your account" }));
+    await flush();
+    await flush();
+    expect(screen.getByRole("dialog", { name: "Your account: sam" })).toBeTruthy();
+    check();
   });
 });

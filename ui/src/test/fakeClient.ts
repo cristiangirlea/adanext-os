@@ -4,8 +4,14 @@ import type {
   Account,
   AccountChange,
   AccountSession,
+  Channel,
   CreatedAccount,
   EnrollmentCode,
+  EnrollmentStart,
+  OwnCredential,
+  OwnSession,
+  ProjectSummary,
+  SignedInAccount,
   NewAccount,
   Capabilities,
   Changes,
@@ -65,8 +71,106 @@ export class FakeClient implements AdaClient {
   // The pair the certificate dialogs choose; null as if the owner cancelled them.
   chosenCertificate: ListenerCertificate | null = makeCertificate();
 
-  constructor(tasks: Task[] = []) {
+  channel: Channel = "desktop";
+  projectList: ProjectSummary[] = [];
+  // The browser's signed-in account; null answers 401 as adad does without a session.
+  signedIn: SignedInAccount | null = null;
+  // The accounts the browser may sign in or enroll as: by name, and by enrollment code.
+  passwords: Record<string, { account: SignedInAccount; password: string }> = {};
+  enrollCodes: Record<string, SignedInAccount> = {};
+  // The account a passkey assertion signs in as; null when the authenticator has none.
+  passkeyAccount: SignedInAccount | null = null;
+  ownSessionList: OwnSession[] = [];
+  credentialList: OwnCredential[] = [];
+
+  constructor(tasks: Task[] = [], channel: Channel = "desktop") {
     this.tasks = tasks;
+    this.channel = channel;
+  }
+
+  async projects(): Promise<ProjectSummary[]> {
+    this.check("projects");
+    return this.projectList;
+  }
+  private session(): SignedInAccount {
+    if (this.signedIn === null) throw new AdaError("unauthenticated", 401, "sign in first");
+    return this.signedIn;
+  }
+  async account(): Promise<SignedInAccount> {
+    this.check("account");
+    return this.session();
+  }
+  async ownSessions(): Promise<OwnSession[]> {
+    this.check("ownSessions");
+    this.session();
+    return this.ownSessionList;
+  }
+  async revokeOwnSession(id: string): Promise<void> {
+    this.check("revokeOwnSession", id);
+    this.session();
+    const current = this.ownSessionList.find((s) => s.id === id)?.current;
+    this.ownSessionList = this.ownSessionList.filter((s) => s.id !== id);
+    if (current) this.signedIn = null;
+  }
+  async ownCredentials(): Promise<OwnCredential[]> {
+    this.check("ownCredentials");
+    this.session();
+    return this.credentialList;
+  }
+  async removeOwnCredential(id: string): Promise<void> {
+    this.check("removeOwnCredential", id);
+    this.session();
+    if (this.credentialList.length === 1) throw new AdaError("last_credential", 409, "the account's last credential cannot be removed");
+    this.credentialList = this.credentialList.filter((c) => c.id !== id);
+    // As adad does, a credential change ends every session of the account.
+    this.ownSessionList = [];
+    this.signedIn = null;
+  }
+  sessionListeners = new Set<() => void>();
+  onSessionEnded(listener: () => void): () => void {
+    this.sessionListeners.add(listener);
+    return () => this.sessionListeners.delete(listener);
+  }
+  async logout(): Promise<void> {
+    this.check("logout");
+    this.session();
+    this.signedIn = null;
+  }
+  async passkeyLogin(): Promise<SignedInAccount> {
+    this.check("passkeyLogin");
+    if (this.passkeyAccount === null) throw new AdaError("login_failed", 401, "sign-in failed");
+    this.signedIn = this.passkeyAccount;
+    return this.signedIn;
+  }
+  async passwordLogin(account: string, password: string): Promise<SignedInAccount> {
+    this.check("passwordLogin", account, password);
+    const entry = this.passwords[account];
+    if (!entry || entry.password !== password || !entry.account.password_allowed) throw new AdaError("login_failed", 401, "sign-in failed");
+    this.signedIn = entry.account;
+    return this.signedIn;
+  }
+  async enrollmentOptions(code: string): Promise<EnrollmentStart> {
+    this.check("enrollmentOptions", code);
+    const account = this.enrollCodes[code];
+    if (!account) throw new AdaError("code_invalid", 400, "the enrollment code is unknown, used or expired");
+    return { ceremony: `ceremony-${code}`, options: {}, account };
+  }
+  async enrollPasskey(code: string, start: EnrollmentStart, name: string): Promise<SignedInAccount> {
+    this.check("enrollPasskey", code, start.ceremony, name);
+    return this.enrolled(code);
+  }
+  async enrollPassword(code: string, password: string): Promise<SignedInAccount> {
+    this.check("enrollPassword", code, password);
+    const account = this.enrollCodes[code];
+    if (account && !account.password_allowed) throw new AdaError("password_not_allowed", 403, "the account does not allow a password");
+    return this.enrolled(code);
+  }
+  private enrolled(code: string): SignedInAccount {
+    const account = this.enrollCodes[code];
+    if (!account) throw new AdaError("code_invalid", 400, "the enrollment code is unknown, used or expired");
+    delete this.enrollCodes[code];
+    this.signedIn = account;
+    return account;
   }
 
   private check(method: keyof AdaClient, ...args: unknown[]): void {
@@ -221,21 +325,21 @@ export class FakeClient implements AdaClient {
   }
   async updateAccount(id: string, change: AccountChange): Promise<Account> {
     this.check("updateAccount", id, change);
-    const account = { ...this.account(id), ...change };
+    const account = { ...this.accountOf(id), ...change };
     // As adad does, disabling ends the account's sessions.
     if (change.disabled) this.endSessions(id);
     this.accountList = this.accountList.map((a) => (a.id === id ? { ...account, sessions: change.disabled ? 0 : account.sessions } : a));
-    return this.account(id);
+    return this.accountOf(id);
   }
   async removeAccount(id: string): Promise<void> {
     this.check("removeAccount", id);
-    this.account(id);
+    this.accountOf(id);
     this.endSessions(id);
     this.accountList = this.accountList.filter((a) => a.id !== id);
   }
   async issueEnrollmentCode(id: string): Promise<EnrollmentCode> {
     this.check("issueEnrollmentCode", id);
-    this.account(id);
+    this.accountOf(id);
     return this.code();
   }
   async recoverAccount(id: string): Promise<EnrollmentCode> {
@@ -271,7 +375,7 @@ export class FakeClient implements AdaClient {
     return this.listenerStatus;
   }
 
-  private account(id: string): Account {
+  private accountOf(id: string): Account {
     const account = this.accountList.find((a) => a.id === id);
     if (!account) throw new AdaError("not_found", 404, "no such account");
     return account;

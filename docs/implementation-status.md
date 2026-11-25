@@ -11,7 +11,7 @@ are in `docs/backlog.md`.
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); follow-ups #82, #88, #94, #96, #101, #103, #107 and #111 (the last 2026-10-25); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100; content several owners stored is read through each attempt that stored it, migration 0013 (#89, 2026-11-21) | Open: #83 (a repository in OneDrive with online-only metadata) |
 | M4 First local workflow | in progress | Slices in `docs/backlog.md` (#109, #117); M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) #115; M4.3 (#118) #122, M4.4a (#119) #121, M4.4b (#120) #123 and M4.5's opt-in demonstration (#124) #125, into `main` with #126 (`b36259f`); M4.6 (#130) #132; the experience card (#128) #129; check worktree removal through a linked parent refused, #134 (`aa72d93`, 2026-11-18); adad's children start without a console window on Windows, so a closed console no longer ends a git call (#145, 2026-11-20); the desktop waits for adad's launcher, so a cold Windows PowerShell broker no longer outlasts it (#138, 2026-11-21); M4.2 to M4.4b and M4.6 implemented, none of them verified | M4.5's demonstrations on Windows and Ubuntu (#124, open; owner action 13). The Windows CI job on `main` passes again at `763a797` (#127: #137 and #139, 2026-11-18). M4 stays in progress until the demonstrations are recorded |
-| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155); M4b.3 the TLS listener from files merged (#159; decisions log, 2026-11-24, M4b.3's listener details); M4b.1's boundary chosen by the owner, an OS account per user (decisions log, 2026-11-24) | M4b.1's account and Linux probes wait for the owner's scratch accounts and a Linux machine (owner action 16); evidence from a second computer (decisions log, 2026-10-13) |
+| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155); M4b.3 the TLS listener from files merged (#159; decisions log, 2026-11-24, M4b.3's listener details); M4b.4 the browser UI merged (#162; decisions log, 2026-11-25, M4b.4's browser shell); M4b.1's boundary chosen by the owner, an OS account per user (decisions log, 2026-11-24) | M4b.1's account and Linux probes wait for the owner's scratch accounts and a Linux machine (owner action 16); evidence from a second computer (decisions log, 2026-10-13) |
 | M4c Editor integration | not started | `docs/backlog.md` (#93); #91 and #92 open | After M4 (decisions log, 2026-10-18) |
 | M4d Headless server | not started | `docs/backlog.md` (#147) | After M4b; behind an access proxy first; its own gate (decisions log, 2026-11-23) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -2288,6 +2288,31 @@ Evidence, left for the supervisor:
 
   Reason: the backlog fixed what the listener must refuse, not where its files live or how a
   refused route answers. Fixing them once keeps the next slices from choosing again.
+
+- **2026-11-25, M4b.4's browser shell (#160).** These are the choices M4b.4 made where the
+  backlog left one.
+  - **Which adapter.** `AdaClient` carries a `channel`, `desktop` or `network`. `main.tsx` picks
+    the bridge adapter when the preload bridge exists, and the HTTPS adapter otherwise.
+    - In the HTTPS adapter, the owner channel's methods answer `local_only` without a request.
+    - In the bridge, the network's sign-in methods answer `network_only`.
+  - **What the browser shows.**
+    - It first asks for the signed-in account; without one it shows the sign-in page.
+    - It shows no experience card and makes no experience request.
+    - It offers no import, accounts, network access, or quitting the coordinator.
+    - Creating and starting a task are hidden until M4b.5 opens them for the owner. The other
+      writes stay visible, and their `not_on_network` refusal is shown as any refusal is.
+  - **Both shells' navigation** reads `GET /v1/projects`, so a project with no task yet is
+    listed too.
+  - **A session that ends, or changes in another tab, reloads the page.** That happens on a
+    signed-in request answered `401`, and on a focus check that finds another account. The
+    reload ends every request, stream and dialog at once, so nothing from the old session
+    outlives it.
+  - **The browser end-to-end test** drives Playwright's Chromium, which CI installs in one step
+    before `scripts/check.sh`. It signs in with a passkey through Chromium's virtual
+    authenticator.
+
+  Reason: a channel the UI can ask about keeps the desktop unchanged while the browser hides
+  what the network refuses for good.
 
 ## Owner actions pending
 

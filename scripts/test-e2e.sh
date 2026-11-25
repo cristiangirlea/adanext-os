@@ -27,6 +27,8 @@ go build -tags=fakeengine -o "$build/fakeengine$suffix" ./internal/executor/test
 go build -tags=fakeengine -o "$build/slowengine$suffix" ./desktop/e2e/slowengine
 go build -tags=fakeengine -o "$build/editengine$suffix" ./desktop/e2e/editengine
 go build -tags=fakeengine -o "$build/testseed$suffix" ./internal/store/testseed
+# testseed's own tests need its build tag, which the plain go test run leaves out.
+go test -tags=fakeengine -count=1 ./internal/store/testseed
 if [ -n "$suffix" ]; then
   export ADANEXT_E2E_BIN
   ADANEXT_E2E_BIN=$(cygpath -m "$build")

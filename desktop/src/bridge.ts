@@ -456,6 +456,9 @@ export function createBridge(options: BridgeOptions): Bridge {
         case "installListenerCertificate":
           if (args.length !== 0) return bad();
           return installCertificate(event);
+        case "listProjects":
+          if (args.length !== 0) return bad();
+          return forward({ method: "GET", path: "/v1/projects", limit: listingLimit });
         case "listTasks":
           if (args.length !== 0) return bad();
           return forward({ method: "GET", path: "/v1/tasks", limit: listingLimit });

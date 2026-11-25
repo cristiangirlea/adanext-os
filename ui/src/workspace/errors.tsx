@@ -17,6 +17,9 @@ const described: Record<string, string> = {
   local_only: "accounts and network access are managed only in the Ada desktop app on this computer",
   name_taken: "another account already has this name",
   code_shown: "an enrollment code is shown only once; issue a new code",
+  not_on_network: "this change is not available in the browser yet; make it in the Ada desktop app on the owner's computer",
+  network_only: "signing in and the account page are for the browser; the desktop is the owner's own channel",
+  login_failed: "sign-in failed: check the account name and password, or use a passkey; a password works only where the owner allowed one",
 };
 
 export function shown(error: unknown): Shown {

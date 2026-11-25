@@ -130,6 +130,12 @@ describe("preload api", () => {
     ]);
   });
 
+  it("forwards the project list under its own name with no argument", async () => {
+    const fake = ipc();
+    await createApi(fake, "doc").listProjects();
+    expect(fake.calls).toEqual([["listProjects", []]]);
+  });
+
   it("leaves no listener behind a refused subscription", async () => {
     const fake = ipc({ subscribe: { ok: false, error: { code: "coordinator_unreachable", status: 0, message: "no socket" } } });
     const received: StreamMessage[] = [];

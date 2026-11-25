@@ -587,7 +587,7 @@ assumes a desktop on the coordinator's host (decisions log, 2026-11-23, #147).
   pair; a restart at each step of a replacement ending on a complete pair; the project list
   showing a member's project that has no task yet, and no other user's; `GET /v1/experience`
   refused on the network.
-- [ ] **M4b.4 The browser UI.** The HTTPS `AdaClient` adapter (same-origin `fetch` with the session
+- [x] **M4b.4 The browser UI** (#160: #162, 2026-11-25). The HTTPS `AdaClient` adapter (same-origin `fetch` with the session
   cookie, `EventSource` for events with #4's `cursor_ahead` handling), and the pages the browser
   needs: login with a passkey (or a password where enabled), enrollment with a code, the user's
   sessions and credentials, and "Leave" (#9), which signs out and stops nothing; the project

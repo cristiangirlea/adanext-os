@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { AdaError, type AdaClient, type AttemptEvent, type Capabilities, type Changes, type ExecutionPolicy, type NewTask, type Task, type TaskState, type StopResult } from "./client/api";
+import { AdaError, type AdaClient, type AttemptEvent, type Capabilities, type Changes, type ExecutionPolicy, type NewTask, type ProjectSummary, type SignedInAccount, type Task, type TaskState, type StopResult } from "./client/api";
+import { AccountPage } from "./browser/AccountPage";
+import { signedOut } from "./browser/session";
 import { setMotion, useMotionOn } from "./motion/effects";
 import { BusyButton } from "./motion/parts";
 import { CommandPalette, type QuickAction } from "./palette/CommandPalette";
@@ -7,11 +9,11 @@ import { ResizeHandle } from "./resize/ResizeHandle";
 import { Accounts } from "./settings/Accounts";
 import { Listener } from "./settings/Listener";
 import { currentTheme, setTheme, themeNames, themes, type Theme } from "./theme/theme";
-import { PathText } from "./text/Marked";
+import { Marked, PathText } from "./text/Marked";
 import { Activity } from "./workspace/Activity";
 import { ErrorLine, shown, type Shown } from "./workspace/errors";
 import { ImportFlow } from "./workspace/ImportFlow";
-import { Nav } from "./workspace/Nav";
+import { Nav, type ProjectsRead } from "./workspace/Nav";
 import { defaultPolicy } from "./workspace/policy";
 import { PolicyPicker } from "./workspace/PolicyPicker";
 import { Review } from "./workspace/Review";
@@ -36,7 +38,11 @@ const refreshLimit = 4;
 const navWidth = { start: 300, min: 220, max: 520 };
 const workWidth = { start: 520, min: 320, max: 1100 };
 
-export function App({ client }: { client: AdaClient }) {
+// In the browser (the network channel) the app shows the signed-in account and "Leave", and
+// leaves out what only the owner's desktop does: import, accounts, network access, the experience
+// card, "Quit Ada and stop work", and the create and start controls adad refuses there.
+export function App({ client, account, onLeave }: { client: AdaClient; account?: SignedInAccount; onLeave?: () => void }) {
+  const browser = client.channel === "network";
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [attempts, setAttempts] = useState<Record<string, string>>({});
@@ -51,6 +57,9 @@ export function App({ client }: { client: AdaClient }) {
   const quitting = useRef(false);
   const [matrix, setMatrix] = useState<Capabilities | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsRead, setProjectsRead] = useState<ProjectsRead>({ state: "loading" });
+  const [accountOpen, setAccountOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [accounts, setAccounts] = useState(false);
   const [listener, setListener] = useState(false);
@@ -59,6 +68,7 @@ export function App({ client }: { client: AdaClient }) {
   const [formOpened, setFormOpened] = useState(0);
   const [reviewed, setReviewed] = useState<Changes | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [tasksError, setTasksError] = useState<Shown | null>(null);
   const [pressed, setPressed] = useState<string | null>(null);
   const [theme, setThemeShown] = useState<Theme>(currentTheme);
   const motionOn = useMotionOn();
@@ -138,11 +148,26 @@ export function App({ client }: { client: AdaClient }) {
           });
           return [...merged, ...current.filter((t) => !listed.some((task) => task.id === t.id))];
         });
+      } catch (e) {
+        setTasksError(shown(e));
+        throw e;
       } finally {
         setLoaded(true);
       }
     });
   }, [client, run]);
+
+  // Every project the user is a member of, those with no task yet included.
+  const readProjects = useCallback(() => {
+    client.projects().then(
+      (listed) => {
+        setProjects(listed);
+        setProjectsRead({ state: "ok" });
+      },
+      (e: unknown) => setProjectsRead({ state: "error", error: shown(e) }),
+    );
+  }, [client]);
+  useEffect(readProjects, [readProjects]);
 
   // The capability matrix feeds every policy picker; without it the pickers offer the modes
   // with no cells and readonly still preselected.
@@ -257,14 +282,37 @@ export function App({ client }: { client: AdaClient }) {
     setThemeShown(next);
   };
   const otherTheme = themes.find((t) => t !== theme) ?? "light";
-  const actions: QuickAction[] = [
-    { id: "import", label: "Import a repository", run: () => setImporting(true) },
-    { id: "new-task", label: "Create a task", run: () => newTask() },
-    { id: "accounts", label: "Manage accounts and sessions", run: () => setAccounts(true) },
-    { id: "listener", label: "Set up network access", run: () => setListener(true) },
+  const shared: QuickAction[] = [
     { id: "theme", label: `Switch to the ${themeNames[otherTheme].toLowerCase()} theme`, run: () => chooseTheme(otherTheme) },
     { id: "motion", label: motionOn ? "Turn motion off" : "Turn motion on", run: () => setMotion(!motionOn) },
   ];
+  const actions: QuickAction[] = browser
+    ? [{ id: "account", label: "Your account and sessions", run: () => setAccountOpen(true) }, ...shared]
+    : [
+        { id: "import", label: "Import a repository", run: () => setImporting(true) },
+        { id: "new-task", label: "Create a task", run: () => newTask() },
+        { id: "accounts", label: "Manage accounts and sessions", run: () => setAccounts(true) },
+        { id: "listener", label: "Set up network access", run: () => setListener(true) },
+        ...shared,
+      ];
+  const projectNames = { ...Object.fromEntries(projects.map((p) => [p.id, p.name])), ...names };
+  // Leave signs this browser out and stops nothing; a session already gone is signed out too.
+  const leaving = useRef(false);
+  const leave = () => {
+    if (leaving.current) return;
+    leaving.current = true;
+    void run(async () => {
+      try {
+        await client.logout();
+      } catch (e) {
+        if (!signedOut(e)) throw e;
+      }
+      onLeave?.();
+    }, undefined, "leave").finally(() => {
+      leaving.current = false;
+    });
+  };
+  const accountSignedOut = useCallback(() => onLeave?.(), [onLeave]);
   // The attempt's own policy, from adad; until the first read after a start, what this window sent.
   const fromAttempt = selected?.attempt?.backend ? selected.attempt : undefined;
   const used = fromAttempt ? { backend: fromAttempt.backend!, model: fromAttempt.model ?? "", effort: fromAttempt.effort ?? "", mode: fromAttempt.mode ?? "" } : attemptId ? ranWith[attemptId] : undefined;
@@ -272,7 +320,22 @@ export function App({ client }: { client: AdaClient }) {
   return (
     <div className="ada" style={{ "--tasks-width": `${width}px`, "--work-width": `${work}px` } as CSSProperties}>
       <div className="tasks-pane">
-        <Nav tasks={tasks} loaded={loaded} names={names} selectedId={selectedId} onSelect={select} onImport={() => setImporting(true)} onNewTask={newTask} onAccounts={() => setAccounts(true)} onListener={() => setListener(true)} />
+        <Nav
+          tasks={tasks}
+          loaded={loaded}
+          tasksError={tasksError}
+          names={projectNames}
+          projects={projects.map((p) => p.id)}
+          projectsRead={projectsRead}
+          browser={browser}
+          selectedId={selectedId}
+          onSelect={select}
+          onImport={() => setImporting(true)}
+          onNewTask={newTask}
+          onAccounts={() => setAccounts(true)}
+          onListener={() => setListener(true)}
+          onAccount={() => setAccountOpen(true)}
+        />
         <ResizeHandle
           side="e"
           size={{ width, height: 0 }}
@@ -318,28 +381,30 @@ export function App({ client }: { client: AdaClient }) {
               <BusyButton busy={pressed === "ready"} disabled={selected.state !== "draft"} onClick={() => void run(async () => replace(await client.ready(selected.id, selected.revision)), selected.id, "ready")}>
                 Ready
               </BusyButton>
-              <BusyButton
-                busy={pressed === "start"}
-                disabled={selected.state !== "ready"}
-                onClick={() =>
-                  void run(
-                    async () => {
-                      const result = await client.start(selected.id, selected.revision, policy);
-                      const { attempt_id, ...task } = result;
-                      started(task, attempt_id, policy);
-                    },
-                    selected.id,
-                    "start",
-                  )
-                }
-              >
-                Start
-              </BusyButton>
+              {!browser && (
+                <BusyButton
+                  busy={pressed === "start"}
+                  disabled={selected.state !== "ready"}
+                  onClick={() =>
+                    void run(
+                      async () => {
+                        const result = await client.start(selected.id, selected.revision, policy);
+                        const { attempt_id, ...task } = result;
+                        started(task, attempt_id, policy);
+                      },
+                      selected.id,
+                      "start",
+                    )
+                  }
+                >
+                  Start
+                </BusyButton>
+              )}
               <BusyButton busy={pressed === "cancel"} className="quiet" disabled={!cancellable} onClick={() => cancel(selected)}>
                 Cancel
               </BusyButton>
             </div>
-            {(selected.state === "draft" || selected.state === "ready") && (
+            {!browser && (selected.state === "draft" || selected.state === "ready") && (
               <PolicyPicker matrix={matrix} value={policy} onChange={(next) => setNextPolicy((current) => ({ ...current, [selected.id]: next }))} legend="Start with" />
             )}
             {reviewStates.has(selected.state) && selected.attempt && (
@@ -349,6 +414,11 @@ export function App({ client }: { client: AdaClient }) {
           </>
         ) : importing ? (
           <p className="empty">Importing a repository.</p>
+        ) : browser ? (
+          <div className="start">
+            <h2>Your projects</h2>
+            <p className="empty">Select a task to see it here. Creating and starting tasks is not available in the browser yet: use the Ada desktop app.</p>
+          </div>
         ) : (
           <div className="start">
             <h2>New task</h2>
@@ -368,7 +438,7 @@ export function App({ client }: { client: AdaClient }) {
           label="Resize the work area"
           controls="work-area"
         />
-        <WorkArea client={client} task={selected} matrix={matrix} onChanges={setReviewed} />
+        <WorkArea client={client} task={selected} matrix={matrix} onChanges={setReviewed} experience={!browser} />
       </div>
 
       <footer className="status">
@@ -406,16 +476,35 @@ export function App({ client }: { client: AdaClient }) {
             {stopResult.reason}: {stopResult.running} running cancellation requested, {stopResult.queued} queued canceled. Waiting for the coordinator to exit.
           </p>
         )}
-        <button type="button" className="quit" disabled={stopResult !== null} onClick={quit}>
-          Quit Ada and stop work
-        </button>
+        {browser ? (
+          <span className="status-item">
+            {account && (
+              <>
+                <span className="status-key">Signed in as</span> <Marked text={account.name} />{" "}
+              </>
+            )}
+            <BusyButton busy={pressed === "leave"} disabled={pressed === "leave"} className="quit" aria-describedby="leave-note" onClick={leave}>
+              Leave
+            </BusyButton>{" "}
+            <span id="leave-note" className="hint">
+              Signs this browser out; your tasks keep running.
+            </span>
+          </span>
+        ) : (
+          <button type="button" className="quit" disabled={stopResult !== null} onClick={quit}>
+            Quit Ada and stop work
+          </button>
+        )}
       </footer>
       {importing && (
         <ImportFlow
           client={client}
           matrix={matrix}
           onClose={() => setImporting(false)}
-          onProject={(id, name) => setNames((current) => ({ ...current, [id]: name }))}
+          onProject={(id, name) => {
+            setNames((current) => ({ ...current, [id]: name }));
+            readProjects();
+          }}
           onCreated={async (input, chosen) => {
             await created(input, chosen);
             setImporting(false);
@@ -424,6 +513,7 @@ export function App({ client }: { client: AdaClient }) {
       )}
       {accounts && <Accounts client={client} onClose={() => setAccounts(false)} />}
       {listener && <Listener client={client} onClose={() => setListener(false)} />}
+      {accountOpen && account && <AccountPage client={client} account={account} onClose={() => setAccountOpen(false)} onSignedOut={accountSignedOut} />}
       <CommandPalette client={client} actions={actions} onSelectTask={select} />
     </div>
   );
