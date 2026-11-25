@@ -38,6 +38,17 @@ jobs:
       - name: Electron virtual display
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y xvfb
+      # The browser end-to-end test drives Playwright's Chromium; the lockfile install first, so
+      # npx runs the pinned Playwright rather than fetching one.
+      - name: Playwright Chromium
+        working-directory: desktop
+        run: |
+          npm ci --ignore-scripts
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
       # Typecheck, Vitest and Playwright (workers capped), and both builds run inside check.sh,
       # after the Go steps and the two lockfile installs.
       - name: everything scripts/check.sh runs

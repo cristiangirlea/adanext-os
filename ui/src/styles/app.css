@@ -295,3 +295,26 @@ table.project tr[data-finished] td:first-child {
     display: none;
   }
 }
+
+/* The browser's sign-in and enrollment pages: one column, centred. */
+.sign-in {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.sign-in h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 600;
+}
+.sign-in h2 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.project-empty td {
+  color: var(--text-2);
+}

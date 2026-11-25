@@ -47,7 +47,8 @@ function useRead<T>(read: (() => Promise<T>) | null, key: string): Loaded<T> {
   return loaded;
 }
 
-export function WorkArea({ client, task, matrix, onChanges }: { client: AdaClient; task: Task | null; matrix: Capabilities | null; onChanges?: (changes: Changes | null) => void }) {
+// experience is false in the browser: the card reads the coordinator's own ledger, which stays local.
+export function WorkArea({ client, task, matrix, onChanges, experience = true }: { client: AdaClient; task: Task | null; matrix: Capabilities | null; onChanges?: (changes: Changes | null) => void; experience?: boolean }) {
   const [tab, setTab] = useState<Tab>("changes");
   const buttons = useRef<Record<string, HTMLButtonElement | null>>({});
   const commit = task?.attempt?.tested_commit ?? "";
@@ -95,7 +96,7 @@ export function WorkArea({ client, task, matrix, onChanges }: { client: AdaClien
 
   return (
     <section className="work-area" aria-label="Work area">
-      <ExperienceCard client={client} />
+      {experience && <ExperienceCard client={client} />}
       <div className="tabs" role="tablist" aria-label="Work area" onKeyDown={onKey}>
         {tabs.map((t) => (
           <button

@@ -43,6 +43,7 @@ function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
     listener: async () => ({ ok: true, value: listenerOff }),
     setListener: async () => ({ ok: false, error: { code: "name_invalid", status: 400, message: "the name must be a lowercase host name" } }),
     installListenerCertificate: async () => ({ ok: true, value: null }),
+    listProjects: async () => ({ ok: true, value: [{ id: "p", name: "repo", role: "owner", created: "" }] }),
     ...overrides,
   };
 }
@@ -54,6 +55,21 @@ function install(bridge?: BridgeApi): void {
 afterEach(() => install(undefined));
 
 describe("bridge adapter", () => {
+  it("is the desktop channel, reads the project list through the bridge, and refuses the network's own methods without a call", async () => {
+    const called: string[] = [];
+    const bridge = new Proxy(fakeBridge(), { get: (target, name: string) => (called.push(name), target[name as keyof BridgeApi]) });
+    install(bridge);
+    const client = createBridgeClient();
+    expect(client.channel).toBe("desktop");
+    expect(await client.projects()).toEqual([{ id: "p", name: "repo", role: "owner", created: "" }]);
+    expect(called).toEqual(["listProjects"]);
+    const start = { ceremony: "c", options: {}, account: { id: "u", name: "u", owner: false, password_allowed: false } };
+    for (const refused of [client.account(), client.ownSessions(), client.revokeOwnSession("s"), client.ownCredentials(), client.removeOwnCredential("c"), client.logout(), client.passkeyLogin(), client.passwordLogin("u", "p"), client.enrollmentOptions("c"), client.enrollPasskey("c", start, "n"), client.enrollPassword("c", "p")]) {
+      await expect(refused).rejects.toMatchObject({ code: "network_only" });
+    }
+    expect(called).toEqual(["listProjects"]);
+  });
+
   it("returns the bridge's values", async () => {
     install(fakeBridge());
     const client = createBridgeClient();

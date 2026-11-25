@@ -16,6 +16,16 @@ function bridge(): BridgeApi {
   return api;
 }
 
+// main.tsx's choice of shell: whether the desktop's preload bridge is present.
+export function hasBridge(): boolean {
+  return typeof window !== "undefined" && window.ada !== undefined;
+}
+
+// The network channel's own routes: the desktop is the owner's channel and never signs in.
+function networkOnly(): Promise<never> {
+  return Promise.reject(new AdaError("network_only", 0, "signing in and the account page are for the browser; the desktop is the owner's own channel"));
+}
+
 function unwrap<T>(result: BridgeResult<T>): T {
   if (result.ok) return result.value;
   throw new AdaError(result.error.code, result.error.status, result.error.message, result.error.request_id, result.error.details);
@@ -58,5 +68,20 @@ export function createBridgeClient(): AdaClient {
     listener: async () => unwrap(await bridge().listener()),
     setListener: async (setting) => unwrap(await bridge().setListener(setting)),
     installListenerCertificate: async () => unwrap(await bridge().installListenerCertificate()),
+    channel: "desktop",
+    projects: async () => unwrap(await bridge().listProjects()),
+    account: networkOnly,
+    ownSessions: networkOnly,
+    revokeOwnSession: networkOnly,
+    ownCredentials: networkOnly,
+    removeOwnCredential: networkOnly,
+    logout: networkOnly,
+    // The desktop's channel has no session to lose.
+    onSessionEnded: () => () => {},
+    passkeyLogin: networkOnly,
+    passwordLogin: networkOnly,
+    enrollmentOptions: networkOnly,
+    enrollPasskey: networkOnly,
+    enrollPassword: networkOnly,
   };
 }

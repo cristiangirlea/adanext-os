@@ -272,3 +272,16 @@ describe("the review routes through the bridge", () => {
     expect(result).toMatchObject({ ok: false, error: { code: "provider_configuration_changed", details: { provider_changes: changes } } });
   });
 });
+
+describe("the project list through the bridge", () => {
+  it("reads GET /v1/projects, an empty project included, and refuses an argument without reaching adad", async () => {
+    const projects = [
+      { id: "p1", name: "repo", role: "owner", created: "2026-11-24T00:00:00Z" },
+      { id: "p2", name: "empty", role: "owner", created: "2026-11-24T00:00:00Z" },
+    ];
+    const { bridge, seen } = await bridgeTo((s, res) => (s.url === "/v1/projects" && s.method === "GET" ? json(res, 200, projects) : json(res, 404, { error: "not_found", message: "not found" })));
+    expect(await bridge.handle(event(), "listProjects", [])).toEqual({ ok: true, value: projects });
+    expect(await bridge.handle(event(), "listProjects", ["p1"])).toMatchObject({ ok: false, error: { code: "malformed_call" } });
+    expect(seen.map((s) => `${s.method} ${s.url}`)).toEqual(["GET /v1/projects"]);
+  });
+});
