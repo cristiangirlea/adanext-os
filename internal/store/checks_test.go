@@ -374,7 +374,7 @@ func TestALeaseFromBeforeRefusalsWereKeptLoadsAndIsRecordedOnce(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	path := s.path
-	for _, q := range []string{"DROP TABLE enrollment_codes", "DROP TABLE sessions", "DROP TABLE credentials", "DROP INDEX users_webauthn_handle", "ALTER TABLE users DROP COLUMN webauthn_handle", "ALTER TABLE users DROP COLUMN password_allowed", "ALTER TABLE users DROP COLUMN disabled", "DROP TABLE artifact_refs", "ALTER TABLE check_worktrees DROP COLUMN refused", "DELETE FROM schema_migrations WHERE version>=12", "PRAGMA user_version=11"} {
+	for _, q := range []string{"DROP TABLE permission_decisions", "ALTER TABLE projects DROP COLUMN default_mode", "DROP TABLE enrollment_codes", "DROP TABLE sessions", "DROP TABLE credentials", "DROP INDEX users_webauthn_handle", "ALTER TABLE users DROP COLUMN webauthn_handle", "ALTER TABLE users DROP COLUMN password_allowed", "ALTER TABLE users DROP COLUMN disabled", "DROP TABLE artifact_refs", "ALTER TABLE check_worktrees DROP COLUMN refused", "DELETE FROM schema_migrations WHERE version>=12", "PRAGMA user_version=11"} {
 		execute(t, s, q)
 	}
 	execute(t, s, `INSERT INTO check_worktrees(project,attempt,run_id,admin_name,created) VALUES ('p','a','chk_old','chk_old','then')`)

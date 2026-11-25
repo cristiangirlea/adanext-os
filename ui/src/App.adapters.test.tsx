@@ -30,8 +30,8 @@ function seeded(): FakeAdad {
     makeTask({ id: "run", project: "p1", objective: "a running task", state: "running", attempt: { id: "a1", state: "running" } }),
   ]);
   adad.projectList = [
-    { id: "p1", name: "repo", role: "owner", created: "2026-11-24T00:00:00Z" },
-    { id: "p2", name: "empty project", role: "member", created: "2026-11-24T00:00:00Z" },
+    { id: "p1", name: "repo", role: "owner", created: "2026-11-24T00:00:00Z", default_mode: "readonly" },
+    { id: "p2", name: "empty project", role: "member", created: "2026-11-24T00:00:00Z", default_mode: "readonly" },
   ];
   return adad;
 }

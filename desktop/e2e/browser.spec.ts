@@ -1,5 +1,5 @@
 import { chromium, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { call, findOrStart } from "../src/adad";
@@ -7,7 +7,8 @@ import { exec, executable, fixtureTest } from "./fixture";
 
 // The browser shell against a real adad on its TLS listener: two seeded accounts, each with a
 // project holding a task and an empty project, each enrolling with its code in its own browser
-// context, signing in, and seeing only its own projects. No request goes to /v1/experience.
+// context, signing in, and seeing only its own projects. No request goes to /v1/experience. The
+// owner account also snapshots an imported project from the browser and starts a task on it.
 // The certificate is a test-only self-signed pair for localhost.
 
 const ui = path.resolve("..", "ui", "dist");
@@ -47,6 +48,19 @@ fixtureTest("two accounts enroll and sign in from their own browsers and each se
   const status = (await call(f.socket, { method: "PUT", path: "/v1/listener/certificate", body: { certificate: path.join(certs, "cert.pem"), key: path.join(certs, "key.pem") } })) as { state: string; origin: string; message: string };
   expect(status, status.message).toMatchObject({ state: "serving", origin });
 
+  // A repository the owner imports through the owner's channel: the seeded projects have no
+  // source to snapshot.
+  const repo = await mkdtemp(path.join(f.state, "repo-"));
+  const git = (...args: string[]) => exec("git", args, { cwd: repo, windowsHide: true });
+  await git("init", "-q", "-b", "main");
+  await git("config", "user.email", "fixture@example.invalid");
+  await git("config", "user.name", "Fixture");
+  await git("config", "core.autocrlf", "false");
+  await writeFile(path.join(repo, "README.md"), "# fixture\n");
+  await git("add", "-A");
+  await git("commit", "-q", "-m", "start");
+  const imported = (await call(f.socket, { method: "POST", path: "/v1/projects", body: { path: repo, name: "Repo project" }, idempotent: true })) as { id: string };
+
   // The accounts: sam may use a password; the owner's code comes from a recovery.
   await call(f.socket, { method: "PATCH", path: "/v1/accounts/sam", body: { password_allowed: true }, idempotent: true });
   const samCode = (await call(f.socket, { method: "POST", path: "/v1/accounts/sam/enrollment-codes", idempotent: true })) as Code;
@@ -83,6 +97,8 @@ fixtureTest("two accounts enroll and sign in from their own browsers and each se
     await sam.page.getByRole("button", { name: "Sign in with the password" }).click();
     await expectProjects(sam.page, ["Sam empty project", "Sam project"]);
     await expect(sam.page.getByText("Sam task")).toBeVisible();
+    // Creating, starting and stopping are the owner account's alone in the browser.
+    for (const name of ["New task", "Stop Ada's work", "Quit Ada and stop work"]) await expect(sam.page.getByRole("button", { name, exact: true })).toHaveCount(0);
 
     // The owner enrolls a passkey on Chromium's virtual authenticator, leaves, and signs in with it.
     const owner = await open();
@@ -94,9 +110,35 @@ fixtureTest("two accounts enroll and sign in from their own browsers and each se
     await expect(owner.page.getByText("Signed in as")).toBeVisible();
     await owner.page.getByRole("button", { name: "Leave" }).click();
     await owner.page.getByRole("button", { name: "Sign in with a passkey" }).click();
-    await expectProjects(owner.page, ["Owner empty project", "Test project"]);
+    await expectProjects(owner.page, ["Owner empty project", "Repo project", "Test project"]);
     await expect(owner.page.getByText("Owner task")).toBeVisible();
     await expect(owner.page.getByText("Sam task")).toHaveCount(0);
+    // The owner account has the create-task control back, and a stop that asks first.
+    await expect(owner.page.getByRole("button", { name: "New task", exact: true })).toBeVisible();
+    await owner.page.getByRole("button", { name: "Stop Ada's work", exact: true }).click();
+    const ask = owner.page.getByRole("group", { name: "Stop work" });
+    await expect(ask).toContainText("No task of other users is running or queued.");
+    await ask.getByRole("button", { name: "Keep working", exact: true }).click();
+    await expect(ask).toHaveCount(0);
+    // The owner snapshots the imported project, creates a task on it and starts it in readonly,
+    // the project's default, so no decision is asked for.
+    await owner.page.getByRole("button", { name: "New task", exact: true }).click();
+    const take = owner.page.getByRole("group", { name: "Snapshot" });
+    await take.getByLabel("Project").selectOption({ label: "Repo project" });
+    await take.getByRole("button", { name: "Take a snapshot", exact: true }).click();
+    const form = owner.page.getByRole("form", { name: "New task" });
+    await expect(form).toContainText("from snapshot");
+    await form.getByLabel("Objective", { exact: true }).fill("complete successfully");
+    await form.getByRole("button", { name: "Create", exact: true }).click();
+    await expect(owner.page.getByRole("heading", { level: 2, name: "complete successfully", exact: true })).toBeVisible();
+    await owner.page.getByRole("button", { name: "Ready", exact: true }).click();
+    await owner.page.getByRole("button", { name: "Start", exact: true }).click();
+    const started = async () => ((await call(f.socket, { method: "GET", path: "/v1/tasks" })) as { objective: string; project: string; snapshot?: string; state: string }[]).find((t) => t.objective === "complete successfully");
+    // With a snapshot the attempt runs in its worktree and its verification finishes.
+    await expect.poll(async () => (await started())?.state, { timeout: 30_000 }).toBe("awaiting_review");
+    expect(await started()).toMatchObject({ project: imported.id, snapshot: expect.any(String) });
+    await expect(owner.page.getByRole("region", { name: "Waiting for your decision" })).toHaveCount(0);
+    expect(requests.filter((url) => new URL(url).pathname === `/v1/projects/${imported.id}/snapshots`)).toHaveLength(1);
 
     // Each browser's own account page, with this browser's session marked.
     await sam.page.getByRole("button", { name: "Your account" }).click();

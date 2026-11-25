@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var ErrNotMember = errors.New("user is not a project member")
@@ -104,6 +105,9 @@ type TaskAttempt struct {
 	TestedCommit    string
 	Checks          *[]CheckResult
 	ChecksFailed    bool
+	// Decision is nil for anyone but the attempt's actor and the project's owners, and while
+	// the attempt neither waits for a decision nor has one recorded.
+	Decision *Decision
 }
 
 func (a TaskAttempt) CheckResults() []CheckResult {
@@ -170,6 +174,11 @@ func scanTask(row interface{ Scan(...any) error }) (Task, error) {
 }
 
 func (s *Store) ListTasks(ctx context.Context, userID string) ([]Task, error) {
+	return s.ListTasksAt(ctx, userID, time.Now())
+}
+
+// ListTasksAt is ListTasks with each decision's expiry judged at at, the clock the claim uses.
+func (s *Store) ListTasksAt(ctx context.Context, userID string, at time.Time) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT "+taskReadColumns+taskReadFrom+" WHERE t.project IN (SELECT project FROM project_members WHERE user=?) ORDER BY t.id", userID)
 	if err != nil {
 		return nil, err
@@ -191,11 +200,19 @@ func (s *Store) ListTasks(ctx context.Context, userID string) ([]Task, error) {
 		if err := s.populateAttemptChecks(ctx, &tasks[i]); err != nil {
 			return nil, err
 		}
+		if err := populateDecision(ctx, s.db, userID, &tasks[i], at); err != nil {
+			return nil, err
+		}
 	}
 	return tasks, nil
 }
 
 func (s *Store) Task(ctx context.Context, userID, taskID string) (Task, error) {
+	return s.TaskAt(ctx, userID, taskID, time.Now())
+}
+
+// TaskAt is Task with its decision's expiry judged at at, the clock the claim uses.
+func (s *Store) TaskAt(ctx context.Context, userID, taskID string, at time.Time) (Task, error) {
 	// A single query includes the access check, avoiding a write lock for reads.
 	var member bool
 	task, err := scanTaskRead(s.db.QueryRowContext(ctx, "SELECT "+taskReadColumns+",EXISTS(SELECT 1 FROM project_members WHERE project=t.project AND user=?)"+taskReadFrom+" WHERE t.id=?", userID, taskID), &member)
@@ -211,7 +228,23 @@ func (s *Store) Task(ctx context.Context, userID, taskID string) (Task, error) {
 	if err := s.populateAttemptChecks(ctx, &task); err != nil {
 		return Task{}, err
 	}
+	if err := populateDecision(ctx, s.db, userID, &task, at); err != nil {
+		return Task{}, err
+	}
 	return task, nil
+}
+
+// TaskWithAttempt reads the task with its newest attempt and that attempt's decision as the
+// transaction's user sees it at at, inside the transaction; its check results are left out.
+func (tx *Tx) TaskWithAttempt(ctx context.Context, taskID string, at time.Time) (Task, error) {
+	task, err := scanTaskRead(tx.tx.QueryRowContext(ctx, "SELECT "+taskReadColumns+taskReadFrom+" WHERE t.id=?", taskID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrNotFound
+	}
+	if err != nil {
+		return Task{}, err
+	}
+	return task, populateDecision(ctx, tx.tx, tx.userID, &task, at)
 }
 
 func (s *Store) populateAttemptChecks(ctx context.Context, task *Task) error {

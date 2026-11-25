@@ -23,14 +23,35 @@ describe("App", () => {
     await flush();
     expect(client.calls).toContain("cancel");
   });
-  it("shows the stop result before asking the shell to wait and quit", async () => {
+  it("asks with the counts first, then shows the stop result before asking the shell to wait and quit", async () => {
     const client = new FakeClient();
     render(<App client={client} />);
     await flush();
     fireEvent.click(screen.getByRole("button", { name: "Quit Ada and stop work" }));
     await flush();
-    expect(screen.getByText(/coordinator stopped by the owner/)).toBeTruthy();
-    expect(client.calls.indexOf("finishQuit")).toBeGreaterThan(client.calls.indexOf("stopCoordinator"));
+    expect(client.calls).toContain("stopCounts");
+    expect(client.calls).not.toContain("stop");
+    fireEvent.click(within(screen.getByRole("group", { name: "Stop work" })).getByRole("button", { name: "Stop work and quit" }));
+    await flush();
+    await flush();
+    expect(screen.getByText(/coordinator stopped by the owner: 1 running/)).toBeTruthy();
+    expect(client.args.stop).toEqual([[0]]);
+    expect(client.calls.indexOf("finishQuit")).toBeGreaterThan(client.calls.indexOf("stop"));
+  });
+  it("asks again on the shell's own quit request rather than stopping at once", async () => {
+    const client = new FakeClient();
+    let request: () => void = () => {};
+    client.onQuitRequested = (listener: () => void) => {
+      request = listener;
+      return () => {};
+    };
+    render(<App client={client} />);
+    await flush();
+    act(() => request());
+    await flush();
+    expect(screen.getByRole("group", { name: "Stop work" })).toBeTruthy();
+    expect(client.calls).not.toContain("stop");
+    expect(client.calls).not.toContain("finishQuit");
   });
   it("subscribes on selecting a task started before this window opened", async () => {
     const client = new FakeClient([makeTask({ id: "old", state: "running", attempt: { id: "old-attempt", state: "running" } })]);
@@ -410,7 +431,7 @@ describe("the project read while the tasks are pending", () => {
 describe("projects beside a pending or failed task read", () => {
   it("shows the captions once projects() answers, and no 'No tasks yet.' until the task read succeeded", async () => {
     const client = new FakeClient([], "network");
-    client.projectList = [{ id: "p1", name: "repo", role: "owner", created: "" }];
+    client.projectList = [{ id: "p1", name: "repo", role: "owner", created: "", default_mode: "readonly" }];
     let fail!: (e: Error) => void;
     client.listTasks = () => new Promise((_resolve, reject) => (fail = reject));
     render(<App client={client} />);

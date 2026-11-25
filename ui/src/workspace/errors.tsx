@@ -19,6 +19,8 @@ const described: Record<string, string> = {
   code_shown: "an enrollment code is shown only once; issue a new code",
   not_on_network: "this change is not available in the browser yet; make it in the Ada desktop app on the owner's computer",
   network_only: "signing in and the account page are for the browser; the desktop is the owner's own channel",
+  last_owner: "a project keeps at least one owner: make another member an owner before removing or demoting the last owner",
+  stop_count_changed: "the work of other users changed since you looked; read the new counts and confirm again",
   login_failed: "sign-in failed: check the account name and password, or use a passkey; a password works only where the owner allowed one",
 };
 

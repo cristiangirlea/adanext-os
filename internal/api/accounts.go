@@ -23,6 +23,10 @@ func (h *handler) ownerRoutes() map[string]http.HandlerFunc {
 		"GET /v1/listener":                        h.getListener,
 		"PUT /v1/listener":                        h.setListener,
 		"PUT /v1/listener/certificate":            h.installCertificate,
+		"GET /v1/projects/{id}/members":           h.listMembers,
+		"PUT /v1/projects/{id}/members/{user}":    h.setMember,
+		"DELETE /v1/projects/{id}/members/{user}": h.removeMember,
+		"PUT /v1/projects/{id}/default-mode":      h.setDefaultMode,
 	}
 }
 

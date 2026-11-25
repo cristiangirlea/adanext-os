@@ -56,7 +56,7 @@ func execute(t *testing.T, s *Store, query string, args ...any) {
 func seed(t *testing.T, s *Store) {
 	t.Helper()
 	execute(t, s, `INSERT INTO users(id,name,created) VALUES ('u', 'user', 'created')`)
-	execute(t, s, `INSERT INTO projects VALUES ('p', 'project', '/source', '2026-10-11T00:00:00Z')`)
+	execute(t, s, `INSERT INTO projects(id,name,source_path,created) VALUES ('p', 'project', '/source', '2026-10-11T00:00:00Z')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('p', 'u', 'owner', 'added')`)
 	execute(t, s, `INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated) VALUES ('t', 'p', 'u', 'objective', 'criteria', 'draft', 0, 'created', 'updated')`)
 	execute(t, s, `INSERT INTO attempts(id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,run_id,native_session,state,started,ended) VALUES ('a', 't', 'u', 'codex', 'model', 'low', 'local', 1, 'hash', 'run', 'session', 'running', 'started', NULL)`)
@@ -174,7 +174,7 @@ func TestConcurrentOpenersApplyTheInitialMigrationOnce(t *testing.T) {
 			}
 			defer s.Close()
 			var version int
-			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 14 {
+			if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 15 {
 				t.Errorf("version: %d %v", version, err)
 			}
 		}()
@@ -187,7 +187,7 @@ func TestMigrationsCreateSchemaAndRefuseANewerVersion(t *testing.T) {
 	s := openTestStore(t)
 	seed(t, s)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 14 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 15 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	path := s.path
@@ -238,14 +238,15 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 		"migrations/0012_check_cleanup.sql":       &fstest.MapFile{Data: mustMigration(t, "migrations/0012_check_cleanup.sql")},
 		"migrations/0013_artifact_refs.sql":       &fstest.MapFile{Data: mustMigration(t, "migrations/0013_artifact_refs.sql")},
 		"migrations/0014_accounts.sql":            &fstest.MapFile{Data: mustMigration(t, "migrations/0014_accounts.sql")},
-		"migrations/0015_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
-		"migrations/0016_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
+		"migrations/0015_decisions.sql":           &fstest.MapFile{Data: mustMigration(t, "migrations/0015_decisions.sql")},
+		"migrations/0016_good.sql":                &fstest.MapFile{Data: []byte("CREATE TABLE committed (id INTEGER);")},
+		"migrations/0017_bad.sql":                 &fstest.MapFile{Data: []byte("CREATE TABLE rolled_back (id INTEGER); INVALID SQL;")},
 	}
 	if err := s.migrate(ctx, migrations); err == nil {
 		t.Fatal("bad migration succeeded")
 	}
 	var version, count int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 15 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 16 {
 		t.Fatalf("version: %d, %v", version, err)
 	}
 	if err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='rolled_back'").Scan(&count); err != nil || count != 0 {
@@ -253,13 +254,13 @@ func TestEachMigrationAndItsVersionCommitTogether(t *testing.T) {
 	}
 	execute(t, s, "INSERT INTO committed VALUES(1)")
 	var recorded int
-	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 15 {
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&recorded); err != nil || recorded != 16 {
 		t.Fatalf("migration records: %d %v", recorded, err)
 	}
 }
 
 func TestAppliedMigrationChecksumsNeverChange(t *testing.T) {
-	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5", "migrations/0004_execution.sql": "74a497b8e4f143e143e0d32f99cd763a157ba1742c2b5929d363e50e17f140be", "migrations/0005_import.sql": "8d41f95ae741b9af1e052297892d0a785abae629d7959f5882002f650b5ad49c", "migrations/0006_workspaces.sql": "e64a38b34b8af8311a7859f632641a94185f4c34a4d3540a844bc378a0e6c2a1", "migrations/0007_drift.sql": "cf35501a79cf73c3c734802ed34be4b00b72ba6825a287fb4aa5bb4033846171", "migrations/0008_capabilities.sql": "2f999a7e21581bb2f6eabc588652a94445d88f5489cdd1bf78150f80ab050807", "migrations/0009_checks.sql": "1a7c2154c4bb81cf909c9606637c35346b9e6f94e50fab3a13bfd564828d66bf", "migrations/0010_review.sql": "f9f7bea38cfca4237a5afdfb147237990f58031a269991aa4978b6d93c456289", "migrations/0011_secrets.sql": "ac8327ac2c9db047c8a9d69a400d94d7c07e22445e0c0f19a42bed0740bac237", "migrations/0012_check_cleanup.sql": "ee509ef87b576d5637a1f1a72aea23625c4db9510b58ea634fe1a97554982e44", "migrations/0013_artifact_refs.sql": "7ffa94d51aa1e66884418c5b49a0a858d8a3e9bc8a03a71247727f5178a375e7", "migrations/0014_accounts.sql": "32c8d7edbf7e68491524c48a896e6918189a3ad12d132ddd19011187dcb46437"}
+	want := map[string]string{"migrations/0001_initial.sql": "8b5adf6848a04663e52bceea5dde5c31036ea5db07c6c11033e825b2ef61ba82", "migrations/0002_idempotency_project.sql": "9359f995f73c3c769c9023ace84cabde6b9919bf9a331a1ba051bf349f35c8d7", "migrations/0003_artifacts.sql": "311cf37d45794fb5659f5d66dd5dffff4579d1bf93b022f176c93b725f964fa5", "migrations/0004_execution.sql": "74a497b8e4f143e143e0d32f99cd763a157ba1742c2b5929d363e50e17f140be", "migrations/0005_import.sql": "8d41f95ae741b9af1e052297892d0a785abae629d7959f5882002f650b5ad49c", "migrations/0006_workspaces.sql": "e64a38b34b8af8311a7859f632641a94185f4c34a4d3540a844bc378a0e6c2a1", "migrations/0007_drift.sql": "cf35501a79cf73c3c734802ed34be4b00b72ba6825a287fb4aa5bb4033846171", "migrations/0008_capabilities.sql": "2f999a7e21581bb2f6eabc588652a94445d88f5489cdd1bf78150f80ab050807", "migrations/0009_checks.sql": "1a7c2154c4bb81cf909c9606637c35346b9e6f94e50fab3a13bfd564828d66bf", "migrations/0010_review.sql": "f9f7bea38cfca4237a5afdfb147237990f58031a269991aa4978b6d93c456289", "migrations/0011_secrets.sql": "ac8327ac2c9db047c8a9d69a400d94d7c07e22445e0c0f19a42bed0740bac237", "migrations/0012_check_cleanup.sql": "ee509ef87b576d5637a1f1a72aea23625c4db9510b58ea634fe1a97554982e44", "migrations/0013_artifact_refs.sql": "7ffa94d51aa1e66884418c5b49a0a858d8a3e9bc8a03a71247727f5178a375e7", "migrations/0014_accounts.sql": "32c8d7edbf7e68491524c48a896e6918189a3ad12d132ddd19011187dcb46437", "migrations/0015_decisions.sql": "339711c6cdd4f1135b8abb07e5cbb003933d0cbcabda4e0999115894e3b2cde4"}
 	files, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +395,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	var calls int
 	fn := func(tx *Tx) ([]byte, error) {
 		calls++
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('p','name','source','created')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('p','name','source','created')")
 		return []byte("response"), err
 	}
 	for range 2 {
@@ -419,7 +420,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 	}
 	failure := errors.New("callback failed")
 	if _, err := s.Do(ctx, "u", "retry", "hash", nil, func(tx *Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('q','name','source','created')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('q','name','source','created')")
 		if err != nil {
 			return nil, err
 		}
@@ -428,7 +429,7 @@ func TestIdempotencyStoresResponsesAndRollsBackFailedCallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := s.Do(ctx, "u", "retry", "hash", nil, func(tx *Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('q','name','source','created')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('q','name','source','created')")
 		return nil, err
 	}); err != nil {
 		t.Fatal(err)
@@ -554,7 +555,7 @@ func TestBackupRestoresAllCommittedRowsFromALiveWALDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES('pending','name','source','created')"); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('pending','name','source','created')"); err != nil {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(t.TempDir(), "backup's %#.sqlite")
@@ -678,7 +679,7 @@ func TestHelperInterruptedWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"crash-1", "crash-2"} {
-		if _, err := tx.ExecContext(ctx, "INSERT INTO projects VALUES(?,?,'source','created')", id, strings.Repeat("x", 128*1024)); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES(?,?,'source','created')", id, strings.Repeat("x", 128*1024)); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -34,7 +34,7 @@ const blockerNames: Record<string, string> = {
 // A snapshot takes at most this many untracked files (internal/api maxSelected).
 const maxUntracked = 1000;
 
-function BlockerList({ blockers }: { blockers: Blocker[] }) {
+export function BlockerList({ blockers }: { blockers: Blocker[] }) {
   return (
     <>
       {blockers.map((b) => (
@@ -42,6 +42,7 @@ function BlockerList({ blockers }: { blockers: Blocker[] }) {
           <p>
             <strong>{blockerNames[b.code] ?? b.code}</strong> <code>{b.code}</code>
           </p>
+          {b.paths.length === 0 && b.count > 0 && <p>{b.count === 1 ? "1 path" : `${b.count} paths`}</p>}
           {b.paths.length > 0 && (
             <ul>
               {b.paths.map((p) => (

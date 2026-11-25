@@ -77,7 +77,6 @@ describe("the HTTPS adapter's requests", () => {
     const https = createHttpsClient({ fetch: async () => (fetched++, new Response("{}")) });
     const refused = [
       https.experience(),
-      https.stopCoordinator(),
       https.finishQuit(),
       https.chooseFolder(),
       https.inspectFolder("h"),
@@ -94,6 +93,10 @@ describe("the HTTPS adapter's requests", () => {
       https.listener(),
       https.setListener({ enabled: true, address: "a", name: "n" }),
       https.installListenerCertificate(),
+      https.members("p1"),
+      https.setMember("p1", "u2", "member"),
+      https.removeMember("p1", "u2"),
+      https.setDefaultMode("p1", "auto"),
     ];
     for (const r of refused) await expect(r).rejects.toMatchObject({ code: "local_only" });
     expect(fetched).toBe(0);
@@ -433,5 +436,48 @@ describe("passkeys in the browser", () => {
     expect(new TextDecoder().decode(asked!.publicKey!.excludeCredentials![0]!.id as ArrayBuffer)).toBe("old");
     const sent = JSON.parse(adad.requests.at(-1)!.body);
     expect(sent).toEqual({ code: "CODE1", ceremony: "enroll-CODE1", name: "Laptop", credential: { id: "new", rawId: "Bw", type: "public-key", clientExtensionResults: {}, response: { clientDataJSON: "AQ", attestationObject: "Ag", transports: ["internal"] } } });
+  });
+});
+
+describe("the decision and the stop on the network channel", () => {
+  it("takes a project's snapshot through its network route with an idempotency key", async () => {
+    const adad = new FakeAdad();
+    adad.projectList = [{ id: "p1", name: "repo", role: "owner", created: "", default_mode: "readonly" }];
+    const taken = await client(adad).snapshotProject("p1", { untracked: [], include_sensitive: [], include_changes: false });
+    expect(taken.id).toBe("snap-1");
+    const sent = adad.requests.at(-1)!;
+    expect(sent).toMatchObject({ method: "POST", url: "/v1/projects/p1/snapshots", body: JSON.stringify({ untracked: [], include_sensitive: [], include_changes: false }) });
+    expect(sent.headers["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("sends a decision with an idempotency key and answers with the task", async () => {
+    const decision = { actor: "u1", required: true, scope: { backend: "claude", mode: "yolo", workspace: "w1" }, project_default: "readonly", allowed: false, denied: false };
+    const adad = new FakeAdad([makeTask({ id: "t1", state: "preparing", attempt: { id: "a1", state: "pending", decision } })]);
+    const https = client(adad);
+    const task = await https.decide("a1", "deny");
+    expect(task.id).toBe("t1");
+    const sent = adad.requests.at(-1)!;
+    expect(sent).toMatchObject({ method: "POST", url: "/v1/attempts/a1/decision", body: JSON.stringify({ decision: "deny" }) });
+    expect(sent.headers["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("reads the stop's counts with GET and stops with the confirmed count of other users' attempts", async () => {
+    const adad = new FakeAdad();
+    adad.stopCounts = { running: 2, queued: 1, others_running: 1, others_queued: 1 };
+    const https = client(adad);
+    expect(await https.stopCounts()).toEqual({ running: 2, queued: 1, others_running: 1, others_queued: 1 });
+    expect(await https.stop(2)).toMatchObject({ running: 2, queued: 1, reason: "coordinator stopped by the owner" });
+    const [read, stop] = adad.requests;
+    expect(read).toMatchObject({ method: "GET", url: "/v1/coordinator/stop", body: "" });
+    expect(stop).toMatchObject({ method: "POST", url: "/v1/coordinator/stop", body: JSON.stringify({ others: 2 }) });
+    expect(stop!.headers["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("hands back stop_count_changed with the new counts and stops nothing", async () => {
+    const adad = new FakeAdad();
+    adad.stopCounts = { running: 3, queued: 0, others_running: 2, others_queued: 0 };
+    const refused = await client(adad).stop(1).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "stop_count_changed", status: 409, details: { running: 3, queued: 0, others_running: 2, others_queued: 0 } });
+    expect(adad.stopped).toBe(false);
   });
 });

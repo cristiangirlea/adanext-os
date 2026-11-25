@@ -615,7 +615,7 @@ func TestConcurrencyAboveOneFillsSlotsAcrossProjectsAndKeepsOneWriterPerProject(
 	e.cfg.CancelGrace = naturalExitGrace
 	ctx := context.Background()
 	_, err := s.Do(ctx, "u", "project-q", "project-q", nil, func(tx *store.Tx) ([]byte, error) {
-		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created) VALUES('q','q','/never-use','now')")
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects(id,name,source_path,created,default_mode) VALUES('q','q','/never-use','now','yolo')")
 		return []byte("ok"), err
 	})
 	if err != nil {

@@ -461,7 +461,15 @@ func (c *config) liveRun(ctx context.Context, backend, fixture string, result ma
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		_, _ = cl.call(stopCtx, "POST", "/v1/coordinator/stop", "stop-"+randomID(), "", nil, nil)
+		// The stop confirms the count of other users' work it was shown.
+		var counts struct {
+			OthersRunning int `json:"others_running"`
+			OthersQueued  int `json:"others_queued"`
+		}
+		// Without the counts no count is guessed: the deadline below kills the coordinator.
+		if code, err := cl.call(stopCtx, "GET", "/v1/coordinator/stop", "", "", nil, &counts); err == nil && code == http.StatusOK {
+			_, _ = cl.call(stopCtx, "POST", "/v1/coordinator/stop", "stop-"+randomID(), "", map[string]int{"others": counts.OthersRunning + counts.OthersQueued}, nil)
+		}
 		select {
 		case <-exited:
 		case <-stopCtx.Done():

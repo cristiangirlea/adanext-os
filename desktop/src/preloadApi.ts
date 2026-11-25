@@ -45,7 +45,8 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
         void invoke("unsubscribe", [subId]);
       };
     },
-    stopCoordinator: () => invoke("stopCoordinator", []),
+    stopCounts: () => invoke("stopCounts", []),
+    stop: (others) => invoke("stop", [others]),
     finishQuit: () => invoke("finishQuit", []),
     onQuitRequested: (listener) => ipc.onQuitRequested?.(listener) ?? (() => {}),
     experience: () => invoke("experience", []),
@@ -63,6 +64,11 @@ export function createApi(ipc: Ipc, documentId: string): BridgeApi {
     addFinding: (taskId, body) => invoke("addFinding", [taskId, body]),
     accept: (taskId, revision, commit, generation, secrets) => invoke("accept", [taskId, revision, commit, generation, secrets]),
     refine: (taskId, revision, request) => invoke("refine", [taskId, revision, request]),
+    decide: (attemptId, decision) => invoke("decide", [attemptId, decision]),
+    members: (projectId) => invoke("members", [projectId]),
+    setMember: (projectId, user, role) => invoke("setMember", [projectId, user, role]),
+    removeMember: (projectId, user) => invoke("removeMember", [projectId, user]),
+    setDefaultMode: (projectId, mode) => invoke("setDefaultMode", [projectId, mode]),
     listAccounts: () => invoke("listAccounts", []),
     createAccount: (input) => invoke("createAccount", [input]),
     updateAccount: (id, change) => invoke("updateAccount", [id, change]),

@@ -63,9 +63,9 @@ func fastKey(password, salt []byte, _, _ uint32, _ uint8, keyLen uint32) []byte 
 
 // newNetFixture serves both channels over one store and hub: the owner account "local" with a
 // project, a task and an attempt, the network channel on a TLS test server.
-func newNetFixture(t *testing.T) *netFixture {
+func newNetFixture(t *testing.T, change ...func(*Execution)) *netFixture {
 	t.Helper()
-	f := newColdNetFixture(t)
+	f := newColdNetFixture(t, change...)
 	if err := f.n.hasher.calibrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func newNetFixture(t *testing.T) *netFixture {
 }
 
 // newColdNetFixture is newNetFixture as a coordinator first starts: nothing hashed yet.
-func newColdNetFixture(t *testing.T) *netFixture {
+func newColdNetFixture(t *testing.T, change ...func(*Execution)) *netFixture {
 	t.Helper()
 	ctx := context.Background()
 	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "store.db"))
@@ -107,6 +107,9 @@ func newColdNetFixture(t *testing.T) *netFixture {
 	hub.HeartbeatInterval = 5 * time.Millisecond
 	clock := &fakeClock{now: time.Now().UTC()}
 	exec := Execution{Owner: "local", Clock: clock.Now}
+	for _, c := range change {
+		c(&exec)
+	}
 	n, err := newNetwork(s, hub, NetworkConfig{RPID: testRPID, Origin: testOrigin, Owner: "local", Clock: clock.Now}, exec)
 	if err != nil {
 		t.Fatal(err)
@@ -1078,6 +1081,10 @@ var ownerChannelRoutes = []struct{ method, path string }{
 	{"GET", "/v1/listener"},
 	{"PUT", "/v1/listener"},
 	{"PUT", "/v1/listener/certificate"},
+	{"GET", "/v1/projects/p/members"},
+	{"PUT", "/v1/projects/p/members/local"},
+	{"DELETE", "/v1/projects/p/members/local"},
+	{"PUT", "/v1/projects/p/default-mode"},
 }
 
 func TestEveryOwnerChannelRouteIsRefusedOnTheNetworkToTheOwnersFreshSessionToo(t *testing.T) {

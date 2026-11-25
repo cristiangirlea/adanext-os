@@ -198,3 +198,26 @@ describe("accessibility", () => {
     check();
   });
 });
+
+describe("accessibility of the decision and the stop", () => {
+  it("names the decision's region and buttons, and the stop's group, with focus on the way out", async () => {
+    const client = new FakeClient([
+      makeTask({ id: "t1", objective: "edit the parser", state: "preparing", attempt: { id: "a1", state: "pending", backend: "claude", mode: "yolo", decision: { actor: "local", required: true, scope: { backend: "claude", mode: "yolo", workspace: "w1" }, project_default: "auto", allowed: false, denied: false } } }),
+    ]);
+    client.projectList = [{ id: "p1", name: "repo", role: "owner", created: "", default_mode: "auto" }];
+    render(<App client={client} />);
+    await flush();
+    fireEvent.click(screen.getByText("edit the parser"));
+    await flush();
+    await flush();
+    const region = screen.getByRole("region", { name: "Waiting for your decision" });
+    for (const button of Array.from(region.querySelectorAll("button"))) expect(nameOf(button)).not.toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "Quit Ada and stop work" }));
+    await flush();
+    const group = screen.getByRole("group", { name: "Stop work" });
+    for (const button of Array.from(group.querySelectorAll("button"))) expect(nameOf(button)).not.toBe("");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep working" }));
+    const unnamed = Array.from(document.querySelectorAll(controls)).filter((el) => nameOf(el) === "");
+    expect(unnamed.map((el) => el.outerHTML.slice(0, 80))).toEqual([]);
+  });
+});

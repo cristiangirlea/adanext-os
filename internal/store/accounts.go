@@ -211,7 +211,8 @@ func (tx *Tx) RemoveAccount(ctx context.Context, id string) ([]string, error) {
 	if err := tx.tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM project_members WHERE user=?1)
 		OR EXISTS(SELECT 1 FROM tasks WHERE created_by=?1) OR EXISTS(SELECT 1 FROM attempts WHERE actor=?1)
 		OR EXISTS(SELECT 1 FROM findings WHERE author=?1) OR EXISTS(SELECT 1 FROM reviews WHERE reviewer=?1)
-		OR EXISTS(SELECT 1 FROM source_snapshots WHERE created_by=?1) OR EXISTS(SELECT 1 FROM secret_allowlist WHERE author=?1)`, id).Scan(&used); err != nil {
+		OR EXISTS(SELECT 1 FROM source_snapshots WHERE created_by=?1) OR EXISTS(SELECT 1 FROM secret_allowlist WHERE author=?1)
+		OR EXISTS(SELECT 1 FROM permission_decisions WHERE decided_by=?1)`, id).Scan(&used); err != nil {
 		return nil, err
 	}
 	if used {
@@ -605,6 +606,12 @@ func (s *Store) DeleteUserSession(ctx context.Context, by Session, id string, li
 		}
 		return deleteSession(ctx, tx.tx, id, by.User)
 	})
+}
+
+// RequireSession is requireSession inside a write made for a network session: ErrSessionEnded
+// when the session was deleted or expired since the request was authenticated.
+func (tx *Tx) RequireSession(ctx context.Context, by Session, live func() Live) error {
+	return requireSession(ctx, tx.tx, by, live)
 }
 
 // requireSession checks, in the transaction of a change made for it, that the session making the

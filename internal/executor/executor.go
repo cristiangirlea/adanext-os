@@ -47,6 +47,7 @@ type Config struct {
 	PreparingDeadline                  time.Duration      // For hello and the start's answer; adad's -preparing-deadline, 0 is 2 minutes.
 	Env                                []string           // Extra controlled environment entries for helper-process tests.
 	Workspaces                         *source.Workspaces // nil when git is missing or too old: an imported project's attempt then fails.
+	Clock                              func() time.Time   // When a decision's expiry is judged; nil means time.Now.
 }
 
 type active struct {
@@ -63,6 +64,7 @@ type Executor struct {
 	beforeAccepted    func(*time.Timer, *atomic.Bool) // Test seam for the preparing deadline race.
 	afterAppend       func()                          // Set only by tests to simulate slow event storage.
 	beforeClaim       func(attemptID string)          // Test seam before the launch claim, for the cancel race.
+	afterClaim        func(attemptID string)          // Test seam between the launch claim and the engine's start.
 	beforeCancel      func()                          // Test seam that pauses the cancel handling of a run.
 	afterCancelCheck  func()                          // Test seam after the cancel handling first checks whether the engine is accepted.
 	afterRunning      func()                          // Test seam between storing the attempt running and accepting its events.
@@ -124,7 +126,7 @@ func (e *Executor) schedule() {
 		}
 		busy := e.busyProjects()
 		e.mu.Unlock()
-		next, ok, err := e.cfg.Store.NextPendingAttempt(context.Background(), e.cfg.Generation, func(project string) bool { return busy[project] })
+		next, ok, err := e.cfg.Store.NextPendingAttempt(context.Background(), e.cfg.Generation, e.now(), func(project string) bool { return busy[project] })
 		if err != nil || !ok {
 			return
 		}
@@ -148,6 +150,13 @@ func (e *Executor) schedule() {
 			e.schedule()
 		}(next.Attempt)
 	}
+}
+
+func (e *Executor) now() time.Time {
+	if e.cfg.Clock != nil {
+		return e.cfg.Clock()
+	}
+	return time.Now()
 }
 
 // busyProjects is called with e.mu held.
@@ -314,21 +323,19 @@ func (e *Executor) run(a store.Attempt, active *active) {
 	if e.beforeClaim != nil {
 		e.beforeClaim(a.ID)
 	}
+	// The claim also checks, in its transaction, that no decision is needed or a matching allow
+	// holds; the launch uses the attempt as the claim read it, never the queue's earlier copy.
+	var claimed store.Attempt
 	if err := e.owned(a.ID, func(tx *store.Tx) error {
-		result, err := tx.ExecContext(ctx, "UPDATE attempts SET state='launching' WHERE id=? AND state='pending'", a.ID)
-		if err != nil {
-			return err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return store.ErrStaleOwnership
-		}
-		return nil
+		var err error
+		claimed, err = tx.ClaimLaunch(ctx, a.ID, e.now())
+		return err
 	}); err != nil {
 		return
+	}
+	a = claimed
+	if e.afterClaim != nil {
+		e.afterClaim(a.ID)
 	}
 	if err := os.MkdirAll(base, 0700); err != nil {
 		e.fail(a, fmt.Errorf("attempt directory: %w", err))
@@ -425,14 +432,8 @@ func (e *Executor) run(a store.Attempt, active *active) {
 		providerBefore, providerUnknown, err = e.providerState(work, providerWalkLimit)
 		providerWalked, providerUnknown = true, providerUnknown || err != nil
 	}
-	maxTurns, timeout, err := e.cfg.Store.AttemptLimits(ctx, a.ID)
-	if err != nil {
-		stdin.Close()
-		stdout.Close()
-		stdoutWriter.Close()
-		e.fail(a, fmt.Errorf("attempt limits: %w", err))
-		return
-	}
+	// The limits are the claimed attempt's, as the claim read them.
+	maxTurns, timeout := a.MaxTurns, a.Timeout
 	// Checked last, so nothing slow sits between the hash and the launch.
 	if err := engine.Verify(enginePath, e.cfg.EngineSHA256); err != nil {
 		stdin.Close()

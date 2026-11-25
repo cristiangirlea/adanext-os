@@ -53,10 +53,11 @@ type handler struct {
 	readLast          func(context.Context, string, string) (int64, error)
 	attemptProject    func(context.Context, string, string) (string, error) // Test seam for the events route's membership lookup.
 	admission         *Admission
-	beforeStopHandoff func()      // Test seam between the stop's commit and the executor handoff.
-	capturing         atomic.Bool // Held by the one snapshot capturing and storing at a time.
-	refineMu          sync.Mutex  // One refine releases earlier work at a time.
-	net               *network    // the network channel's sign-in state; nil on the local channel
+	beforeStopHandoff func()   // Test seam between the stop's commit and the executor handoff.
+	afterStopCommit   func()   // Test seam as soon as the stop's transaction returns.
+	atRefineLock      func()   // Test seam as a refine reaches the shared refine lock.
+	guards            *Guards  // shared with every channel of the coordinator
+	net               *network // the network channel's sign-in state; nil on the local channel
 }
 
 // AttemptRunner is the narrow API-to-executor notification boundary.
@@ -126,6 +127,13 @@ func (a *Admission) Close() {
 	a.mu.Unlock()
 }
 
+// Guards are held across the coordinator's channels, like Admission: one refine
+// releases earlier work at a time, and one snapshot captures at a time.
+type Guards struct {
+	refine    sync.Mutex
+	capturing atomic.Bool // held by the one snapshot capturing and storing at a time
+}
+
 // CapabilityProber reports, per backend, what this host has of its CLI.
 type CapabilityProber interface {
 	Installed(ctx context.Context) map[string]engine.Installed
@@ -147,6 +155,8 @@ type Execution struct {
 	GitUnavailable string
 	// Admission is shared with the coordinator's signal-driven stop; New makes one when nil.
 	Admission *Admission
+	// Guards is shared by the local and network channels; New makes one when nil.
+	Guards *Guards
 	// Capabilities reports the installed CLIs for GET /v1/capabilities; *executor.Executor satisfies
 	// it. nil shows every CLI-dependent cell unverified.
 	Capabilities CapabilityProber
@@ -195,6 +205,10 @@ func newHandler(s *store.Store, hub *Hub, auth Authenticator, execution ...Execu
 	if h.admission == nil {
 		h.admission = &Admission{}
 	}
+	h.guards = h.exec.Guards
+	if h.guards == nil {
+		h.guards = &Guards{}
+	}
 	return h
 }
 
@@ -216,7 +230,9 @@ func (h *handler) localRoutes() map[string]http.HandlerFunc {
 		"POST /v1/tasks/{id}/findings":           h.addFinding,
 		"POST /v1/tasks/{id}/accept":             h.accept,
 		"POST /v1/tasks/{id}/refine":             h.refine,
+		"GET /v1/coordinator/stop":               h.stopCounts,
 		"POST /v1/coordinator/stop":              h.stop,
+		"POST /v1/attempts/{id}/decision":        h.decide,
 		"GET /v1/capabilities":                   h.capabilities,
 		"GET /v1/experience":                     h.experience,
 		"GET /v1/projects":                       h.listProjects,
@@ -301,7 +317,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func writeError(w http.ResponseWriter, status int, code string) {
-	message := map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "experience_unavailable": "experience unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit", "unauthenticated": "sign in first", "local_only": "only the owner's desktop can do this", "owner_account": "the owner's account can be neither disabled nor removed", "account_in_use": "the account has history; disable it instead", "last_credential": "the account's last credential cannot be removed", "name_taken": "an account has this name", "throttled": "too many failed attempts; try again later", "login_failed": "sign-in failed", "credential_invalid": "the credential was refused", "code_invalid": "the enrollment code is unknown, used or expired", "ceremony_invalid": "the passkey ceremony is unknown or expired", "password_invalid": "a password needs at least 12 characters and at most 1,024 bytes", "password_not_allowed": "the account does not allow a password", "code_shown": "the code was shown once; issue a new one", "listener_unavailable": "the network listener is not available", "host_invalid": "this host name is not the configured one", "origin_refused": "a change must come from the configured origin", "content_type_refused": "a change must be sent as application/json", "not_on_network": "not available on the network yet", "address_invalid": "the address must be an IP address and a port", "name_invalid": "the name must be a lowercase DNS host name", "certificate_invalid": "the certificate or key was refused", "certificate_expired": "the certificate is expired or not yet valid", "certificate_name": "the certificate does not name the configured host"}[code]
+	message := errorMessage(code)
 	if status == 500 {
 		writeInternalError(w, errors.New("unspecified internal error"))
 		return
@@ -311,6 +327,11 @@ func writeError(w http.ResponseWriter, status int, code string) {
 		Message string `json:"message"`
 	}{code, message})
 }
+
+// errorMessages are the plain messages of the error codes.
+var errorMessages = map[string]string{"bad_request": "invalid request", "too_large": "request body too large", "not_found": "not found", "method_not_allowed": "method not allowed", "stale_revision": "stale revision", "invalid_transition": "invalid transition", "idempotency_conflict": "idempotency conflict", "engine_unavailable": "engine unavailable", "experience_unavailable": "experience unavailable", "internal": "internal error", "cursor_ahead": "cursor ahead", "too_many_streams": "too many streams", "shutting_down": "shutting down", "busy": "server busy", "queue_full": "queue full", "forbidden": "forbidden", "snapshot_required": "the task is bound to no snapshot of its project's repository", "unborn_base": "the task's snapshot was taken on a branch with no commit", "unauthenticated": "sign in first", "local_only": "only the owner's desktop can do this", "owner_account": "the owner's account can be neither disabled nor removed", "account_in_use": "the account has history; disable it instead", "last_credential": "the account's last credential cannot be removed", "name_taken": "an account has this name", "throttled": "too many failed attempts; try again later", "login_failed": "sign-in failed", "credential_invalid": "the credential was refused", "code_invalid": "the enrollment code is unknown, used or expired", "ceremony_invalid": "the passkey ceremony is unknown or expired", "password_invalid": "a password needs at least 12 characters and at most 1,024 bytes", "password_not_allowed": "the account does not allow a password", "code_shown": "the code was shown once; issue a new one", "listener_unavailable": "the network listener is not available", "host_invalid": "this host name is not the configured one", "origin_refused": "a change must come from the configured origin", "content_type_refused": "a change must be sent as application/json", "not_on_network": "not available on the network yet", "address_invalid": "the address must be an IP address and a port", "name_invalid": "the name must be a lowercase DNS host name", "certificate_invalid": "the certificate or key was refused", "certificate_expired": "the certificate is expired or not yet valid", "certificate_name": "the certificate does not name the configured host", "last_owner": "a project keeps at least one owner", "stop_count_changed": "the work of other users changed since the count was shown; confirm the stop again"}
+
+func errorMessage(code string) string { return errorMessages[code] }
 
 // requestID is the id withRequestID gave the request, found through any writer wrapping it.
 func requestID(w http.ResponseWriter) string {
@@ -377,6 +398,10 @@ func storeError(w http.ResponseWriter, err error) {
 		writeError(w, 401, "unauthenticated")
 	case errors.Is(err, store.ErrHandleMismatch):
 		writeError(w, 400, "credential_invalid")
+	case errors.Is(err, store.ErrDecisionRefused):
+		writeError(w, 403, "forbidden")
+	case errors.Is(err, store.ErrLastOwner):
+		writeError(w, 409, "last_owner")
 	default:
 		writeInternalError(w, err)
 	}
@@ -480,6 +505,8 @@ type taskAttemptJSON struct {
 	TestedCommit    string                 `json:"tested_commit,omitempty"`
 	Checks          []store.CheckResult    `json:"checks,omitempty"`
 	ChecksFailed    bool                   `json:"checks_failed,omitempty"`
+	// Decision is null for anyone but the attempt's actor and the project's owners.
+	Decision *decisionJSON `json:"decision"`
 }
 
 type startedTaskJSON struct {
@@ -490,7 +517,7 @@ type startedTaskJSON struct {
 func taskValue(t store.Task) taskJSON {
 	v := taskJSON{ID: t.ID, Project: t.Project, CreatedBy: t.CreatedBy, Objective: t.Objective, Criteria: t.AcceptanceCriteria, State: t.State, Revision: t.Revision, Created: t.Created, Updated: t.Updated, Snapshot: t.Snapshot, ProviderConfiguration: t.ProviderConfiguration, Checks: t.CheckDefinitions()}
 	if a := t.Attempt; a.ID != "" {
-		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, Backend: a.Backend, Model: a.Model, Effort: a.Effort, Mode: a.Mode, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged(), TestedCommit: a.TestedCommit, Checks: a.CheckResults(), ChecksFailed: a.ChecksFailed}
+		v.Attempt = &taskAttemptJSON{ID: a.ID, State: a.State, QueuePosition: a.QueuePosition, Backend: a.Backend, Model: a.Model, Effort: a.Effort, Mode: a.Mode, ProviderChanges: a.ProviderChanges, ProviderFlagged: a.ProviderFlagged(), TestedCommit: a.TestedCommit, Checks: a.CheckResults(), ChecksFailed: a.ChecksFailed, Decision: decisionValue(a.Decision)}
 		// Keep the existing top-level field for /v1 clients.
 		v.QueuePosition = a.QueuePosition
 	}
@@ -512,9 +539,23 @@ func (h *handler) mutate(w http.ResponseWriter, r *http.Request, user, k string,
 }
 
 // commit is mutate's transaction, which returns the response to write.
+// A network session's write is authorized once, in its transaction, unless an earlier
+// irreversible step already authorized it (authorized); after that it completes.
 func (h *handler) commit(r *http.Request, user, k string, scope *store.Scope, revision string, fn func(*store.Tx) (int, any, error)) ([]byte, error) {
 	body := r.Context().Value(bodyKey{}).([]byte)
+	sess, network := sessionFrom(r.Context())
+	if network && r.Context().Value(authorizedKey{}) != nil {
+		network = false
+	}
+	if network {
+		h.net.at(r.Context(), "commit")
+	}
 	return h.store.Do(r.Context(), user, k, hash(r, body, revision), scope, func(tx *store.Tx) ([]byte, error) {
+		if network {
+			if err := tx.RequireSession(r.Context(), sess, h.live); err != nil {
+				return nil, err
+			}
+		}
 		status, value, err := fn(tx)
 		if err != nil {
 			return nil, err
@@ -639,7 +680,7 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tasks, err := h.store.ListTasks(r.Context(), user)
+	tasks, err := h.store.ListTasksAt(r.Context(), user, h.now())
 	if err != nil {
 		storeError(w, err)
 		return
@@ -656,7 +697,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	task, err := h.store.Task(r.Context(), user, r.PathValue("id"))
+	task, err := h.store.TaskAt(r.Context(), user, r.PathValue("id"), h.now())
 	if err != nil {
 		storeError(w, err)
 		return
@@ -788,7 +829,9 @@ type stopJSON struct {
 // the running attempts and exits. The counts say how much work the stop
 // ended. Start admission is closed from before the transaction until the
 // executor has been told, so no start commits in the window between the two,
-// and none after. A replay, or a stop that commits nothing, tells the
+// and none after. The body carries the count of other users' work the owner
+// confirmed (GET answers it); a different count at the stop stops nothing and
+// answers stop_count_changed with the new counts. A replay, or a stop that commits nothing, tells the
 // coordinator nothing: after a restart the key reaches a coordinator the
 // cached counts were never about.
 func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
@@ -808,7 +851,10 @@ func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if len(body) != 0 {
+	var input struct {
+		Others *int `json:"others"`
+	}
+	if err := decode(body, &input); err != nil || input.Others == nil || *input.Others < 0 {
 		writeError(w, 400, "bad_request")
 		return
 	}
@@ -819,7 +865,7 @@ func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 	h.admission.stopping = true
 	var result store.StopResult
 	stopped := false
-	ok = h.mutate(w, r, user, k, nil, "", func(tx *store.Tx) (int, any, error) {
+	cached, err := h.commit(r, user, k, nil, "", func(tx *store.Tx) (int, any, error) {
 		if h.exec.Stopper == nil {
 			return 0, nil, errEngineUnavailable
 		}
@@ -830,7 +876,14 @@ func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 		if generation != h.exec.Generation {
 			return 0, nil, store.ErrStaleOwnership
 		}
-		var err error
+		// The owner confirmed a count of other users' work; another count stops nothing.
+		counts, err := tx.StopCounts(r.Context(), h.exec.Generation, h.exec.Owner)
+		if err != nil {
+			return 0, nil, err
+		}
+		if counts.Others() != *input.Others {
+			return 0, nil, &staleStopError{counts}
+		}
 		result, err = tx.StopWork(r.Context(), h.exec.Generation, stopReason)
 		if err != nil {
 			return 0, nil, err
@@ -838,10 +891,21 @@ func (h *handler) stop(w http.ResponseWriter, r *http.Request) {
 		stopped = true
 		return 202, stopJSON{result.Running, result.Queued, stopReason}, nil
 	})
-	if !ok || !stopped {
+	if h.afterStopCommit != nil {
+		h.afterStopCommit()
+	}
+	if err != nil {
+		if !writeStaleStop(w, err) {
+			storeError(w, err)
+		}
+	} else {
+		ok = writeCached(w, cached)
+	}
+	if err != nil || !ok || !stopped {
 		h.admission.stopping = wasStopping
 		return
 	}
+	// Authorized at its commit, the stop completes: the session is not checked again.
 	for _, id := range result.Attempts {
 		h.hub.Notify(id)
 	}

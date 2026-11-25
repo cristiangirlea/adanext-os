@@ -4,7 +4,8 @@ import { createPasskey, getPasskey } from "./webauthn";
 // The browser adapter: same-origin fetch to adad's /v1 on the network listener, with the session
 // cookie, and EventSource for an attempt's events (decisions log, 2026-10-14, #4 and #5). The
 // owner's channel and the desktop's dialogs are not on the network: those methods answer
-// local_only without a request. This module and ./webauthn are the only ones that may reach
+// local_only without a request. The decision and the stop are network routes, which adad serves
+// to the owner account (and a decision to the attempt's actor). This module and ./webauthn are the only ones that may reach
 // fetch, EventSource or navigator.credentials (ui/src/boundary.test.ts).
 
 // The kinds an attempt's events carry (internal/api/doc.go): EventSource delivers a named event
@@ -13,7 +14,7 @@ export const eventKinds = ["text", "thinking", "tool_call", "tool_result", "info
 
 // What a check log read keeps, as the bridge does.
 const checkLogLimit = 1 << 20;
-const detailKeys = ["blockers", "project", "tasks", "path", "provider_changes", "findings", "last_sequence"] as const;
+const detailKeys = ["blockers", "project", "tasks", "path", "provider_changes", "findings", "last_sequence", "running", "queued", "others_running", "others_queued"] as const;
 // Sign-in and enrollment answer 401 for a refused credential, not for a lost session.
 const openRoutes = /^\/v1\/(session\/(passkey|password)|enrollment\/)/;
 
@@ -307,7 +308,8 @@ export function createHttpsClient(options: HttpsOptions = {}): AdaClient {
     start: (taskId, revision, policy) => call("POST", `/v1/tasks/${id(taskId)}/start`, { body: policy, revision, idempotent: true }),
     cancel: (taskId, revision) => call("POST", `/v1/tasks/${id(taskId)}/cancel`, { revision, idempotent: true }),
     subscribeEvents,
-    stopCoordinator: localOnly,
+    stopCounts: () => call("GET", "/v1/coordinator/stop"),
+    stop: (others) => call("POST", "/v1/coordinator/stop", { body: { others }, idempotent: true }),
     finishQuit: localOnly,
     onQuitRequested: () => () => {},
     capabilities: () => call("GET", "/v1/capabilities"),
@@ -315,6 +317,7 @@ export function createHttpsClient(options: HttpsOptions = {}): AdaClient {
     inspectFolder: localOnly,
     importFolder: localOnly,
     snapshot: localOnly,
+    snapshotProject: (projectId, selection) => call("POST", `/v1/projects/${id(projectId)}/snapshots`, { body: selection, idempotent: true }),
     changes: (taskId) => call("GET", `/v1/tasks/${id(taskId)}/changes`),
     files: (taskId, path) => call("GET", `/v1/tasks/${id(taskId)}/files?path=${encodeURIComponent(path)}`),
     checks: (taskId) => call("GET", `/v1/tasks/${id(taskId)}/checks`),
@@ -323,6 +326,11 @@ export function createHttpsClient(options: HttpsOptions = {}): AdaClient {
     addFinding: (taskId, body) => call("POST", `/v1/tasks/${id(taskId)}/findings`, { body: { body }, idempotent: true }),
     accept: (taskId, revision, commit, generation, secrets) => call("POST", `/v1/tasks/${id(taskId)}/accept`, { body: { commit, generation, secrets }, revision, idempotent: true }),
     refine: (taskId, revision, request) => call("POST", `/v1/tasks/${id(taskId)}/refine`, { body: request, revision, idempotent: true }),
+    decide: (attemptId, decision) => call("POST", `/v1/attempts/${id(attemptId)}/decision`, { body: { decision }, idempotent: true }),
+    members: localOnly,
+    setMember: localOnly,
+    removeMember: localOnly,
+    setDefaultMode: localOnly,
     listAccounts: localOnly,
     createAccount: localOnly,
     updateAccount: localOnly,

@@ -24,8 +24,8 @@ const kim: SignedInAccount = { id: "u2", name: "kim", owner: false, password_all
 function adad(): FakeAdad {
   const a = new FakeAdad([makeTask({ id: "t1", project: "p1", objective: "sam's task", state: "running", attempt: { id: "a1", state: "running" } })]);
   a.projectList = [
-    { id: "p1", name: "sam's repo", role: "owner", created: "" },
-    { id: "p2", name: "sam's empty project", role: "owner", created: "" },
+    { id: "p1", name: "sam's repo", role: "owner", created: "", default_mode: "readonly" },
+    { id: "p2", name: "sam's empty project", role: "owner", created: "", default_mode: "readonly" },
   ];
   a.passwords = { sam: { account: sam, password: "correct horse battery" }, kim: { account: kim, password: "correct horse battery" } };
   return a;

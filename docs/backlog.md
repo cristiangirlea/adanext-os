@@ -598,7 +598,7 @@ assumes a desktop on the coordinator's host (decisions log, 2026-11-23, #147).
   listener with a test certificate and two seeded users with their own projects, each signed in
   as its own account and seeing only its own projects, an empty one included; opening a browser
   workspace making no experience request.
-- [ ] **M4b.5 Membership, permission decisions and the owner's stop.** The `permission_decisions`
+- [x] **M4b.5 Membership, permission decisions and the owner's stop** (#163: #165, 2026-11-25). The `permission_decisions`
   migration and the scheduler gate in the claim, `POST /v1/attempts/{id}/decision` with its
   idempotency key, all as #7 specifies; membership added and removed through the owner's channel,
   a removal denying that user's pending decisions and cancelling their attempts in one

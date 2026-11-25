@@ -130,6 +130,28 @@ describe("preload api", () => {
     ]);
   });
 
+  it("forwards the decision, the stop and the membership methods under their own names", async () => {
+    const fake = ipc();
+    const api = createApi(fake, "doc");
+    await api.decide("a1", "allow");
+    await api.stopCounts();
+    await api.stop(3);
+    await api.members("p1");
+    await api.setMember("p1", "u2", "owner");
+    await api.removeMember("p1", "u2");
+    await api.setDefaultMode("p1", "yolo");
+    expect(fake.calls).toEqual([
+      ["decide", ["a1", "allow"]],
+      ["stopCounts", []],
+      ["stop", [3]],
+      ["members", ["p1"]],
+      ["setMember", ["p1", "u2", "owner"]],
+      ["removeMember", ["p1", "u2"]],
+      ["setDefaultMode", ["p1", "yolo"]],
+    ]);
+    expect((api as unknown as Record<string, unknown>).stopCoordinator).toBeUndefined();
+  });
+
   it("forwards the project list under its own name with no argument", async () => {
     const fake = ipc();
     await createApi(fake, "doc").listProjects();

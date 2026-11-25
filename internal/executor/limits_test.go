@@ -157,3 +157,21 @@ func TestAnAttemptWhoseProviderWalkFailsOrIsTruncatedIsFlagged(t *testing.T) {
 		})
 	}
 }
+
+func TestTheStartCarriesTheLimitsTheClaimRead(t *testing.T) {
+	e, s, _, marker := testExecutor(t, "with_limits")
+	setLimits(t, s, 3, "3m0s")
+	e.afterClaim = func(string) {
+		if _, err := s.Do(context.Background(), "u", "later", "later", nil, func(tx *store.Tx) ([]byte, error) {
+			_, err := tx.ExecContext(context.Background(), "UPDATE attempts SET max_turns=7,timeout='7m0s' WHERE id='attempt'")
+			return []byte("ok"), err
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	e.LaunchAttempt("attempt")
+	waitAttempt(t, s, "ended_ok")
+	if task := startTask(t, marker); task["max_turns"] != float64(3) || task["timeout"] != "3m0s" {
+		t.Fatalf("task = %v", task)
+	}
+}

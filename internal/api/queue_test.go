@@ -289,7 +289,7 @@ func TestStopIsRefusedForEveryAccountButTheOwner(t *testing.T) {
 	if code, body := do(t, owner, "POST", "/v1/coordinator/stop", "owner-stop-body", "", []byte(`{}`)); code != 400 {
 		t.Fatalf("stop with a body = %d %s", code, body)
 	}
-	code, body := do(t, owner, "POST", "/v1/coordinator/stop", "owner-stop", "", nil)
+	code, body := do(t, owner, "POST", "/v1/coordinator/stop", "owner-stop", "", []byte(`{"others":0}`))
 	if code != 202 || !bytes.Contains(body, []byte(`"running":0`)) || !bytes.Contains(body, []byte(`"queued":0`)) {
 		t.Fatalf("owner = %d %s", code, body)
 	}
@@ -334,11 +334,11 @@ func TestTheOwnersStopRecordsTheReasonOnRunningAndQueuedTasks(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	owner := asUser(f, "local", execution)
-	code, body := do(t, owner, "POST", "/v1/coordinator/stop", "owner-stop", "", nil)
+	code, body := do(t, owner, "POST", "/v1/coordinator/stop", "owner-stop", "", []byte(`{"others":2}`))
 	if code != 202 || !bytes.Contains(body, []byte(`"running":1`)) || !bytes.Contains(body, []byte(`"queued":1`)) {
 		t.Fatalf("stop = %d %s", code, body)
 	}
-	code, replay := do(t, owner, "POST", "/v1/coordinator/stop", "owner-stop", "", nil)
+	code, replay := do(t, owner, "POST", "/v1/coordinator/stop", "owner-stop", "", []byte(`{"others":2}`))
 	if code != 202 || !bytes.Equal(body, replay) {
 		t.Fatalf("replay = %d %s", code, replay)
 	}
@@ -388,7 +388,7 @@ func TestStopWithoutACoordinatorToStopIsUnavailable(t *testing.T) {
 	if err := f.s.CreateUser(context.Background(), "local", "Local"); err != nil {
 		t.Fatal(err)
 	}
-	if code, body := do(t, asUser(f, "local", Execution{Owner: "local"}), "POST", "/v1/coordinator/stop", "stop", "", nil); code != 503 {
+	if code, body := do(t, asUser(f, "local", Execution{Owner: "local"}), "POST", "/v1/coordinator/stop", "stop", "", []byte(`{"others":0}`)); code != 503 {
 		t.Fatalf("stop = %d %s", code, body)
 	}
 }
@@ -401,7 +401,7 @@ func TestAReplayedStopAfterARestartDoesNotStopTheNewCoordinator(t *testing.T) {
 	if err := f.s.CreateUser(ctx, "local", "Local"); err != nil {
 		t.Fatal(err)
 	}
-	code, body := do(t, asUser(f, "local", execution), "POST", "/v1/coordinator/stop", "quit", "", nil)
+	code, body := do(t, asUser(f, "local", execution), "POST", "/v1/coordinator/stop", "quit", "", []byte(`{"others":0}`))
 	if code != 202 || stopper.calls.get() != 1 {
 		t.Fatalf("stop = %d %s, %d calls", code, body, stopper.calls.get())
 	}
@@ -422,7 +422,7 @@ func TestAReplayedStopAfterARestartDoesNotStopTheNewCoordinator(t *testing.T) {
 		t.Fatalf("fresh start = %d %s", code, body)
 	}
 	// The old key replayed answers as it did, and stops nothing.
-	code, replay := do(t, asUser(f, "local", restarted), "POST", "/v1/coordinator/stop", "quit", "", nil)
+	code, replay := do(t, asUser(f, "local", restarted), "POST", "/v1/coordinator/stop", "quit", "", []byte(`{"others":0}`))
 	if code != 202 || !bytes.Equal(body, replay) {
 		t.Fatalf("replay = %d %s", code, replay)
 	}
@@ -486,7 +486,7 @@ func TestAStartArrivingBetweenTheStopsCommitAndTheExecutorHandoffIsRefused(t *te
 		<-handoff
 	}
 	stopped := make(chan reply, 1)
-	go func() { stopped <- call(h.stop, "/v1/coordinator/stop", "quit", "", nil) }()
+	go func() { stopped <- call(h.stop, "/v1/coordinator/stop", "quit", "", []byte(`{"others":0}`)) }()
 	<-committed
 	// The stop has committed but the executor does not know yet: a start now
 	// must wait, and then be refused.

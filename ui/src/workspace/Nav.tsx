@@ -7,8 +7,9 @@ export type ProjectsRead = { state: "loading" } | { state: "ok" } | { state: "er
 
 // The left navigation: each project with its tasks, the active ones first in the order adad
 // listed them, then the finished ones. The projects come from adad's list, those with no task yet
-// included; a project known only from a task shows its id. The browser has no import, new task,
-// accounts or network access controls, and opens the signed-in account instead.
+// included; a project known only from a task shows its id. The browser has no import, accounts,
+// network access or project settings controls, and opens the signed-in account instead; it
+// offers new tasks only to the owner account.
 
 const finished = new Set(["accepted", "canceled", "failed"]);
 
@@ -20,6 +21,7 @@ export function Nav({
   projectsRead = { state: "ok" },
   tasksError = null,
   browser = false,
+  canCreate = !browser,
   selectedId,
   onSelect,
   onImport,
@@ -27,6 +29,7 @@ export function Nav({
   onAccounts,
   onListener,
   onAccount,
+  onProjectSettings,
 }: {
   tasks: Task[];
   loaded: boolean;
@@ -36,6 +39,8 @@ export function Nav({
   // The task read's refusal; null while it is pending or once it succeeded.
   tasksError?: Shown | null;
   browser?: boolean;
+  // Whether this viewer may create tasks: the desktop, and the owner account in the browser.
+  canCreate?: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onImport: () => void;
@@ -43,6 +48,8 @@ export function Nav({
   onAccounts: () => void;
   onListener: () => void;
   onAccount?: () => void;
+  // Opens a project's members and default mode; the desktop's only.
+  onProjectSettings?: (project: string) => void;
 }) {
   const projects: string[] = [...listed];
   for (const task of tasks) if (!projects.includes(task.project)) projects.push(task.project);
@@ -53,9 +60,16 @@ export function Nav({
       <div className="nav-head">
         <span className="wordmark">Ada</span>
         {browser ? (
-          <button type="button" className="quiet" onClick={onAccount}>
-            Your account
-          </button>
+          <>
+            <button type="button" className="quiet" onClick={onAccount}>
+              Your account
+            </button>
+            {canCreate && (
+              <button type="button" className="quiet" onClick={() => onNewTask()}>
+                New task
+              </button>
+            )}
+          </>
         ) : (
           <>
             <button type="button" onClick={onImport}>
@@ -88,9 +102,14 @@ export function Nav({
             <table key={project} className="project">
               <caption>
                 <span className="project-name">{names[project] ?? project}</span>
-                {!browser && (
+                {canCreate && (
                   <button type="button" className="link add" onClick={() => onNewTask(project)} aria-label={`New task in ${names[project] ?? project}`}>
                     New
+                  </button>
+                )}
+                {!browser && onProjectSettings && listed.includes(project) && (
+                  <button type="button" className="link add" onClick={() => onProjectSettings(project)} aria-label={`Settings for ${names[project] ?? project}`}>
+                    Settings
                   </button>
                 )}
               </caption>

@@ -13,7 +13,7 @@ async function flush(): Promise<void> {
 }
 
 // The methods AdaClient has today; the palette may call none but these.
-const clientMethods: (keyof AdaClient)[] = ["createTask", "listTasks", "getTask", "ready", "start", "cancel", "subscribeEvents", "stopCoordinator", "finishQuit", "onQuitRequested"];
+const clientMethods: (keyof AdaClient)[] = ["createTask", "listTasks", "getTask", "ready", "start", "cancel", "subscribeEvents", "stopCounts", "stop", "finishQuit", "onQuitRequested"];
 
 function setup(options: { actions?: QuickAction[]; client?: FakeClient } = {}) {
   const client =

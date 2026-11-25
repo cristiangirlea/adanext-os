@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { AdaError, type Account, type BridgeApi, type ListenerStatus, type StreamMessage, type Task } from "../api";
+import { AdaError, type Account, type BridgeApi, type Member, type ListenerStatus, type StreamMessage, type Task } from "../api";
 import { createBridgeClient } from "./bridge";
 
 const account: Account = { id: "u1", name: "sam", owner: false, disabled: false, password_allowed: false, credentials: 0, sessions: 0, created: "" };
 const listenerOff: ListenerStatus = { enabled: false, address: "", name: "", origin: "", state: "off", reason: "disabled", message: "The network listener is turned off.", certificate: null };
+const member: Member = { user: "u1", name: "sam", role: "owner", added: "" };
 const task: Task = { id: "t1", project: "p", created_by: "local", objective: "o", criteria: "", state: "draft", revision: 0, created: "", updated: "", attempt: null };
 
 function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
@@ -15,7 +16,13 @@ function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
     start: async () => ({ ok: true, value: { ...task, attempt_id: "a1" } }),
     cancel: async () => ({ ok: true, value: task }),
     subscribeEvents: () => () => {},
-    stopCoordinator: async () => ({ ok: true, value: { running: 0, queued: 0, reason: "coordinator stopped by the owner" } }),
+    stopCounts: async () => ({ ok: true, value: { running: 1, queued: 0, others_running: 1, others_queued: 0 } }),
+    stop: async () => ({ ok: false, error: { code: "stop_count_changed", status: 409, message: "the count changed", details: { running: 2, queued: 0, others_running: 2, others_queued: 0 } } }),
+    decide: async () => ({ ok: true, value: task }),
+    members: async () => ({ ok: true, value: [member] }),
+    setMember: async () => ({ ok: true, value: [member, { ...member, user: "u2", name: "kim", role: "member" }] }),
+    removeMember: async () => ({ ok: false, error: { code: "last_owner", status: 409, message: "the last owner cannot be removed" } }),
+    setDefaultMode: async () => ({ ok: true, value: { id: "p", default_mode: "auto" } }),
     finishQuit: async () => ({ ok: true, value: null }),
     onQuitRequested: () => () => {},
     experience: async () => ({ ok: true, value: { version: 1, enabled: false } }),
@@ -43,7 +50,7 @@ function fakeBridge(overrides: Partial<BridgeApi> = {}): BridgeApi {
     listener: async () => ({ ok: true, value: listenerOff }),
     setListener: async () => ({ ok: false, error: { code: "name_invalid", status: 400, message: "the name must be a lowercase host name" } }),
     installListenerCertificate: async () => ({ ok: true, value: null }),
-    listProjects: async () => ({ ok: true, value: [{ id: "p", name: "repo", role: "owner", created: "" }] }),
+    listProjects: async () => ({ ok: true, value: [{ id: "p", name: "repo", role: "owner", created: "", default_mode: "readonly" }] }),
     ...overrides,
   };
 }
@@ -61,7 +68,7 @@ describe("bridge adapter", () => {
     install(bridge);
     const client = createBridgeClient();
     expect(client.channel).toBe("desktop");
-    expect(await client.projects()).toEqual([{ id: "p", name: "repo", role: "owner", created: "" }]);
+    expect(await client.projects()).toEqual([{ id: "p", name: "repo", role: "owner", created: "", default_mode: "readonly" }]);
     expect(called).toEqual(["listProjects"]);
     const start = { ceremony: "c", options: {}, account: { id: "u", name: "u", owner: false, password_allowed: false } };
     for (const refused of [client.account(), client.ownSessions(), client.revokeOwnSession("s"), client.ownCredentials(), client.removeOwnCredential("c"), client.logout(), client.passkeyLogin(), client.passwordLogin("u", "p"), client.enrollmentOptions("c"), client.enrollPasskey("c", start, "n"), client.enrollPassword("c", "p")]) {
@@ -181,6 +188,36 @@ describe("bridge adapter", () => {
     expect((refused as AdaError).message).toBe("the name must be a lowercase host name");
     install(fakeBridge());
     expect(await createBridgeClient().installListenerCertificate()).toBeNull();
+  });
+
+  it("forwards the decision, the stop and the membership methods with their arguments", async () => {
+    const seen: [string, unknown[]][] = [];
+    const base = fakeBridge();
+    const bridge = new Proxy(base, {
+      get: (target, name: string) => {
+        const fn = target[name as keyof BridgeApi] as (...args: unknown[]) => unknown;
+        return (...args: unknown[]) => (seen.push([name, args]), fn(...args));
+      },
+    });
+    install(bridge);
+    const client = createBridgeClient();
+    expect(await client.decide("a1", "allow")).toEqual(task);
+    expect(await client.stopCounts()).toEqual({ running: 1, queued: 0, others_running: 1, others_queued: 0 });
+    const changed = await client.stop(1).catch((e: unknown) => e);
+    expect(changed).toMatchObject({ code: "stop_count_changed", status: 409, details: { others_running: 2 } });
+    expect(await client.members("p")).toEqual([member]);
+    expect(await client.setMember("p", "u2", "member")).toHaveLength(2);
+    expect(await client.removeMember("p", "u1").catch((e: unknown) => e)).toMatchObject({ code: "last_owner", status: 409 });
+    expect(await client.setDefaultMode("p", "auto")).toEqual({ id: "p", default_mode: "auto" });
+    expect(seen).toEqual([
+      ["decide", ["a1", "allow"]],
+      ["stopCounts", []],
+      ["stop", [1]],
+      ["members", ["p"]],
+      ["setMember", ["p", "u2", "member"]],
+      ["removeMember", ["p", "u1"]],
+      ["setDefaultMode", ["p", "auto"]],
+    ]);
   });
 
   it("reports a missing bridge as bridge_unavailable", async () => {

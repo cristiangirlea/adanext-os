@@ -352,6 +352,8 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT id,user,kind,name,credential_id,public_key,sign_count,aaguid,flags,transports,password_hash,created,last_used FROM credentials LIMIT 0",
 		"SELECT id,token_hash,user,credential,created,last_used,address FROM sessions LIMIT 0",
 		"SELECT code_hash,user,created,expires,used FROM enrollment_codes LIMIT 0",
+		"SELECT default_mode FROM projects LIMIT 0",
+		"SELECT id,attempt,task_revision,snapshot,backend,mode,workspace,policy_version,generation,decision,decided_by,decided,expires,idempotency_key FROM permission_decisions LIMIT 0",
 	} {
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {

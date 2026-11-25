@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // seedQueue leaves task t preparing with attempt a pending, as a start records.
@@ -12,7 +13,7 @@ func seedQueue(t *testing.T, s *Store) {
 	t.Helper()
 	seed(t, s)
 	execute(t, s, "UPDATE tasks SET state='preparing',revision=2 WHERE id='t'")
-	execute(t, s, "UPDATE attempts SET state='pending',ownership_generation=0,started='2026-10-15T10:00:00Z' WHERE id='a'")
+	execute(t, s, "UPDATE attempts SET state='pending',mode='readonly',ownership_generation=0,started='2026-10-15T10:00:00Z' WHERE id='a'")
 }
 
 func TestCancelQueuedClosesThePendingAttemptAndTheTaskInOneTransaction(t *testing.T) {
@@ -166,7 +167,7 @@ func seedSecondUserAndTasks(t *testing.T, s *Store) {
 	t.Helper()
 	execute(t, s, `INSERT INTO users(id,name,created) VALUES ('v', 'other', 'created')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('p', 'v', 'member', 'added')`)
-	execute(t, s, `INSERT INTO projects VALUES ('q', 'other project', '/other', '2026-10-11T00:00:00Z')`)
+	execute(t, s, `INSERT INTO projects(id,name,source_path,created) VALUES ('q', 'other project', '/other', '2026-10-11T00:00:00Z')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('q', 'u', 'owner', 'added')`)
 	execute(t, s, `INSERT INTO project_members VALUES ('q', 'v', 'member', 'added')`)
 	for _, row := range [][3]string{{"t2", "p", "u"}, {"t3", "q", "v"}, {"t4", "p", "u"}} {
@@ -175,7 +176,7 @@ func seedSecondUserAndTasks(t *testing.T, s *Store) {
 	// Three more pending attempts: the second created in the same instant as
 	// the first, so the row order breaks the tie; one by the other user.
 	for _, row := range [][4]string{{"b", "t2", "v", "2026-10-15T10:00:00Z"}, {"c", "t3", "v", "2026-10-15T10:00:01Z"}, {"d", "t4", "u", "2026-10-15T10:00:02Z"}} {
-		execute(t, s, `INSERT INTO attempts(id,task,actor,backend,model,effort,executor,ownership_generation,engine_sha256,state,started) VALUES (?, ?, ?, 'codex', '', '', 'local', 0, 'hash', 'pending', ?)`, row[0], row[1], row[2], row[3])
+		execute(t, s, `INSERT INTO attempts(id,task,actor,backend,model,effort,mode,executor,ownership_generation,engine_sha256,state,started) VALUES (?, ?, ?, 'codex', '', '', 'readonly', 'local', 0, 'hash', 'pending', ?)`, row[0], row[1], row[2], row[3])
 	}
 }
 
@@ -206,7 +207,7 @@ func TestNextPendingAttemptFollowsCreationOrderAndSkipsBusyProjects(t *testing.T
 	seedSecondUserAndTasks(t, s)
 	var order []string
 	for {
-		a, ok, err := s.NextPendingAttempt(ctx, 0, func(string) bool { return false })
+		a, ok, err := s.NextPendingAttempt(ctx, 0, time.Now(), func(string) bool { return false })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,11 +221,11 @@ func TestNextPendingAttemptFollowsCreationOrderAndSkipsBusyProjects(t *testing.T
 		t.Fatalf("launch order = %v", order)
 	}
 	execute(t, s, "UPDATE attempts SET state='pending'")
-	a, ok, err := s.NextPendingAttempt(ctx, 0, func(project string) bool { return project == "p" })
+	a, ok, err := s.NextPendingAttempt(ctx, 0, time.Now(), func(project string) bool { return project == "p" })
 	if err != nil || !ok || a.ID != "c" {
 		t.Fatalf("next outside the busy project = %+v, %v, %v", a, ok, err)
 	}
-	if _, ok, err := s.NextPendingAttempt(ctx, 1, func(string) bool { return false }); err != nil || ok {
+	if _, ok, err := s.NextPendingAttempt(ctx, 1, time.Now(), func(string) bool { return false }); err != nil || ok {
 		t.Fatalf("another generation's attempt offered: %v, %v", ok, err)
 	}
 }
@@ -241,7 +242,7 @@ func TestTheQueueFollowsInsertionOrderWhateverTheFractionalSecondsOfStarted(t *t
 	}
 	var order []string
 	for {
-		a, ok, err := s.NextPendingAttempt(ctx, 0, nil)
+		a, ok, err := s.NextPendingAttempt(ctx, 0, time.Now(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -327,7 +328,7 @@ func TestRestartRecoversAQueuedAttemptBehindARunningOneWithoutRelaunch(t *testin
 	if err != nil || len(events) != 1 || events[0].Kind != "recovery" || !strings.Contains(string(events[0].Payload), `"attempt_state":"pending"`) {
 		t.Fatalf("queued attempt's recovery event = %+v: %v", events, err)
 	}
-	if _, ok, err := s.NextPendingAttempt(ctx, generation, func(string) bool { return false }); err != nil || ok {
+	if _, ok, err := s.NextPendingAttempt(ctx, generation, time.Now(), func(string) bool { return false }); err != nil || ok {
 		t.Fatalf("a recovered attempt is offered for launch: %v, %v", ok, err)
 	}
 }
