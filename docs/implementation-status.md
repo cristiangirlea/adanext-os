@@ -11,7 +11,7 @@ are in `docs/backlog.md`.
 | M2 Durable coordinator | implemented | M2.1 to M2.4c merged, the last as #76 (`4ef4e5c`, 2026-10-16); follow-ups #82, #88, #94, #96, #101, #103, #107 and #111 (the last 2026-10-25); M2.1 verified | The open follow-up issues from the M2 reviews |
 | M3 Project workspaces | implemented | Slices in `docs/backlog.md` (#78); M3.1 #81, M3.2 #85, M3.3 #97, M3.4 #100; content several owners stored is read through each attempt that stored it, migration 0013 (#89, 2026-11-21) | Open: #83 (a repository in OneDrive with online-only metadata) |
 | M4 First local workflow | in progress | Slices in `docs/backlog.md` (#109, #117); M4.1 (#112) verified: #113, live runs in #116; M4.2 (#114, #108) #115; M4.3 (#118) #122, M4.4a (#119) #121, M4.4b (#120) #123 and M4.5's opt-in demonstration (#124) #125, into `main` with #126 (`b36259f`); M4.6 (#130) #132; the experience card (#128) #129; check worktree removal through a linked parent refused, #134 (`aa72d93`, 2026-11-18); adad's children start without a console window on Windows, so a closed console no longer ends a git call (#145, 2026-11-20); the desktop waits for adad's launcher, so a cold Windows PowerShell broker no longer outlasts it (#138, 2026-11-21); M4.2 to M4.4b and M4.6 implemented, none of them verified | M4.5's demonstrations on Windows and Ubuntu (#124, open; owner action 13). The Windows CI job on `main` passes again at `763a797` (#127: #137 and #139, 2026-11-18). M4 stays in progress until the demonstrations are recorded |
-| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155); M4b.3 the TLS listener from files merged (#159; decisions log, 2026-11-24, M4b.3's listener details); M4b.4 the browser UI merged (#162; decisions log, 2026-11-25, M4b.4's browser shell); M4b.5 membership, permission decisions and the owner's stop merged (#165; decisions log, 2026-11-25, M4b.5: what needs a permission decision); M4b.1's boundary chosen by the owner, an OS account per user (decisions log, 2026-11-24) | M4b.1's account and Linux probes wait for the owner's scratch accounts and a Linux machine (owner action 16); evidence from a second computer (decisions log, 2026-10-13) |
+| M4b Web access | in progress | Nine slices in `docs/backlog.md` (decisions log, 2026-11-23); M4b.2 accounts, credentials and sessions merged (#155); M4b.3 the TLS listener from files merged (#159; decisions log, 2026-11-24, M4b.3's listener details); M4b.4 the browser UI merged (#162; decisions log, 2026-11-25, M4b.4's browser shell); M4b.5 membership, permission decisions and the owner's stop merged (#165; decisions log, 2026-11-25, M4b.5: what needs a permission decision); M4b.7 import roots and the chooser merged (#168; decisions log, 2026-11-25, M4b.7: import roots must be the owner's alone); M4b.1's boundary chosen by the owner, an OS account per user (decisions log, 2026-11-24) | M4b.1's account and Linux probes wait for the owner's scratch accounts and a Linux machine (owner action 16); evidence from a second computer (decisions log, 2026-10-13) |
 | M4c Editor integration | not started | `docs/backlog.md` (#93); #91 and #92 open | After M4 (decisions log, 2026-10-18) |
 | M4d Headless server | not started | `docs/backlog.md` (#147) | After M4b; behind an access proxy first; its own gate (decisions log, 2026-11-23) |
 | M5 VMware execution | not started | | Packer and VM storage location, see below |
@@ -2338,6 +2338,49 @@ Evidence, left for the supervisor:
 
   Reason: a per-project default lets the owner trust a project with write runs without making
   every start wait, while a new project stays readonly until the owner says otherwise.
+
+- **2026-11-25, M4b.7: import roots must be the owner's alone (#166).** The chooser checks every
+  path statically. It refuses:
+  - `..`, an absolute path, a drive or a UNC path
+  - a link or junction that leaves the root
+  - a `.git` pointer, alternates or config file outside the root
+  - a mapped network drive
+
+  It compares directories by their handles' identity, not their names.
+
+  A narrower limit remains. A process on the host that swaps a folder below a root, between Ada's
+  check and git's read, can redirect what a browser user sees. Git cannot be bound to an opened
+  directory handle, so the race cannot be closed in Ada. Only an OS account with write access
+  below the root can do it.
+
+  The owner chose (2026-11-25, "Record the limit") to enforce that premise rather than copy every
+  chosen folder:
+  - Ada refuses a root, and any directory on the path to the chosen one, that an account other
+    than the owner's can write to. On Windows that means another account than SYSTEM or
+    Administrators; on Unix, a group or other write bit, or another owner.
+  - It checks at registration and on every chooser request.
+  - The refusal names the fix, which is the owner's: remove other accounts' write access.
+
+  Many Windows data drives give Authenticated Users Modify on their folders by default, so the
+  owner tightens such a folder before granting it.
+
+  **What is checked.** Ada does not check every file git reads.
+  - **The root:** it must be owned by the owner's account, SYSTEM or Administrators. It must give no
+    other account a write-type right, including inherit-only entries.
+  - **Below it:** then only those trusted accounts can make anything below it writable by another
+    account. So only the walked path to the chosen directory is checked.
+  - **Its ancestors:** they must not let another account replace the root. On no ancestor may
+    another account hold delete-child or permission-changing rights, or own it. On an ancestor
+    below the volume root, it must not hold delete rights either.
+  - **The volume root itself:** it can't be renamed, so other rights there are accepted, such as the
+    create and modify rights Windows gives every signed-in account. Folders below it usually
+    inherit that Modify, with its delete right, and are refused until the owner tightens them.
+  - **Windows ancestors** may be owned by TrustedInstaller.
+  - **Pointers out of the root:** a `.git` pointer, common directory, alternates and included
+    config are checked only for leaving the root.
+
+  Reason: copying every chosen folder before git reads it would cost a full copy per inspection.
+  Refusing folders that other accounts can write to removes the race's only actor.
 
 ## Owner actions pending
 
