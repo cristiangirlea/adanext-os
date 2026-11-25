@@ -105,11 +105,12 @@ describe("bridge", () => {
     bridges.push(bridge);
     const s = sender();
     expect((await bridge.handle(s.event(), "finishQuit", [])).ok).toBe(false);
-    for (const method of ["stopCoordinator", "finishQuit", "subscribe"]) {
-      expect((await bridge.handle(s.event({ url: "https://elsewhere.invalid", parent: null }), method, [])).ok).toBe(false);
+    for (const [method, args] of [["stopCounts", []], ["stop", [0]], ["finishQuit", []], ["subscribe", []]] as const) {
+      expect((await bridge.handle(s.event({ url: "https://elsewhere.invalid", parent: null }), method, [...args])).ok).toBe(false);
     }
-    expect((await bridge.handle(s.event(), "stopCoordinator", [])).ok).toBe(true);
-    expect((await bridge.handle(s.event(), "stopCoordinator", [])).ok).toBe(true);
+    expect(fake.requests).toHaveLength(0);
+    expect((await bridge.handle(s.event(), "stop", [0])).ok).toBe(true);
+    expect((await bridge.handle(s.event(), "stop", [0])).ok).toBe(true);
     expect(fake.requests).toHaveLength(1);
     expect((await bridge.handle(s.event(), "finishQuit", [])).ok).toBe(true);
     expect(finishes).toBe(1);
@@ -120,13 +121,13 @@ describe("bridge", () => {
     const bridge = createBridge({ socketPath: fake.socketPath, pageUrl, finishQuit: async () => { throw new Error("timed out waiting for adad to stop"); } });
     bridges.push(bridge);
     const s = sender();
-    expect(await bridge.handle(s.event(), "stopCoordinator", [])).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await bridge.handle(s.event(), "stop", [0])).toMatchObject({ ok: false, error: { code: "forbidden" } });
     expect((await bridge.handle(s.event(), "finishQuit", [])).ok).toBe(false);
     const stopped = await listenFake((_req, res) => json(res, 202, { running: 0, queued: 0, reason: "coordinator stopped by the owner" }));
     fakes.push(stopped);
     const waiting = createBridge({ socketPath: stopped.socketPath, pageUrl, finishQuit: async () => { throw new Error("timed out waiting for adad to stop"); } });
     bridges.push(waiting);
-    await waiting.handle(s.event(), "stopCoordinator", []);
+    await waiting.handle(s.event(), "stop", [0]);
     expect(await waiting.handle(s.event(), "finishQuit", [])).toMatchObject({ ok: false, error: { code: "stop_timeout" } });
   });
   it("refuses a call from an unexpected frame before touching adad", async () => {
@@ -163,7 +164,7 @@ describe("bridge", () => {
     expect(await bridge.handle(s.event(), "getTask", ["t1"])).toEqual({ ok: true, value: task });
     const policy = { backend: "claude", model: "", effort: "", mode: "readonly" };
     expect(await bridge.handle(s.event(), "start", ["t1", 1, policy])).toEqual({ ok: true, value: { ...task, state: "preparing", revision: 2, attempt_id: "a1" } });
-    expect(await bridge.handle(s.event(), "stopCoordinator", [])).toEqual({ ok: true, value: {} });
+    expect(await bridge.handle(s.event(), "stop", [0])).toEqual({ ok: true, value: {} });
     expect(bodies[0]).toBe(JSON.stringify({ project: "repo", objective: "add a test" }));
     expect(bodies[2]).toBe(JSON.stringify(policy));
     // The caps pass through as the owner chose them.

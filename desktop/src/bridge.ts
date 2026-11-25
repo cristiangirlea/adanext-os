@@ -58,6 +58,8 @@ export interface Bridge {
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/;
 const commitPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const modes = new Set<ExecutionPolicy["mode"]>(["readonly", "auto", "yolo"]);
+const roles = new Set(["owner", "member"]);
+const decisions = new Set(["allow", "deny"]);
 // A chosen folder's handle lives this long, for the inspect, import, snapshot and create calls.
 const folderTtlMs = 15 * 60 * 1000;
 // The most of a check log the renderer is sent; the whole log stays an artifact in adad.
@@ -82,6 +84,9 @@ function isId(value: unknown): value is string {
   return typeof value === "string" && idPattern.test(value);
 }
 function isRevision(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function isCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -472,17 +477,37 @@ export function createBridge(options: BridgeOptions): Bridge {
         case "start":
           if (args.length !== 3 || !isId(args[0]) || !isRevision(args[1]) || !isPolicy(args[2])) return bad();
           return forward({ method: "POST", path: `/v1/tasks/${args[0]}/start`, revision: args[1], body: args[2], idempotent: true });
-        case "stopCoordinator": {
+        case "stopCounts":
           if (args.length !== 0) return bad();
-          // Repeated clicks share the accepted stop; a refusal permits a retry.
+          return forward({ method: "GET", path: "/v1/coordinator/stop" });
+        case "stop": {
+          if (args.length !== 1 || !isCount(args[0])) return bad();
+          const others = args[0];
+          // Repeated clicks share the stop in flight or accepted; a refusal, a changed count
+          // among them, permits the owner's next confirmation.
           stopRequest ??= (async () => {
-            const result = await forward({ method: "POST", path: "/v1/coordinator/stop", idempotent: true });
+            const result = await forward({ method: "POST", path: "/v1/coordinator/stop", body: { others }, idempotent: true });
             if (result.ok) stopAccepted = true;
             else stopRequest = undefined;
             return result;
           })();
           return stopRequest;
         }
+        case "decide":
+          if (args.length !== 2 || !isId(args[0]) || typeof args[1] !== "string" || !decisions.has(args[1])) return bad();
+          return forward({ method: "POST", path: `/v1/attempts/${args[0]}/decision`, body: { decision: args[1] }, idempotent: true });
+        case "members":
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          return forward({ method: "GET", path: `/v1/projects/${args[0]}/members`, limit: listingLimit });
+        case "setMember":
+          if (args.length !== 3 || !isId(args[0]) || !isId(args[1]) || typeof args[2] !== "string" || !roles.has(args[2])) return bad();
+          return forward({ method: "PUT", path: `/v1/projects/${args[0]}/members/${args[1]}`, body: { role: args[2] }, idempotent: true, limit: listingLimit });
+        case "removeMember":
+          if (args.length !== 2 || !isId(args[0]) || !isId(args[1])) return bad();
+          return forward({ method: "DELETE", path: `/v1/projects/${args[0]}/members/${args[1]}`, idempotent: true, limit: listingLimit });
+        case "setDefaultMode":
+          if (args.length !== 2 || !isId(args[0]) || typeof args[1] !== "string" || !modes.has(args[1] as ExecutionPolicy["mode"])) return bad();
+          return forward({ method: "PUT", path: `/v1/projects/${args[0]}/default-mode`, body: { mode: args[1] }, idempotent: true });
         case "finishQuit":
           if (args.length !== 0 || !stopAccepted || !options.finishQuit) return bad();
           try {

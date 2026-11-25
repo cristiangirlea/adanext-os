@@ -8,7 +8,7 @@ import { openEventStream } from "../src/sse";
 import { exec, executable, fixtureTest, type Holder } from "./fixture";
 
 // A task without an imported repository, through the navigation's "New task" form.
-async function createAndStart(page: Page, objective: string) {
+async function createAndStart(page: Page, objective: string, mode?: "auto" | "yolo") {
   await page.getByRole("button", { name: "New task", exact: true }).click();
   await page.getByLabel("Project", { exact: true }).fill("project");
   await page.getByLabel("Objective", { exact: true }).fill(objective);
@@ -16,7 +16,15 @@ async function createAndStart(page: Page, objective: string) {
   // The created task is selected: its heading names it.
   await expect(page.getByRole("heading", { level: 2, name: objective, exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Ready", exact: true }).click();
+  if (mode) await page.getByRole("radiogroup", { name: "Mode" }).getByRole("radio", { name: new RegExp(`^${mode}`) }).check();
   await page.getByRole("button", { name: "Start", exact: true }).click();
+}
+
+// The stop asks first with the counts; the owner confirms, and only then is anything stopped.
+async function confirmQuit(page: Page, others = "No task of other users is running or queued.") {
+  const ask = page.getByRole("group", { name: "Stop work" });
+  await expect(ask).toContainText(others);
+  await ask.getByRole("button", { name: "Stop work and quit", exact: true }).click();
 }
 
 fixtureTest("closing the window keeps adad and events alive; reopening replays every event", async ({ fixture: f }) => {
@@ -59,8 +67,15 @@ fixtureTest("Quit cancels running and queued work, shows its reason, and exits; 
   await expect.poll(async () => (await f.tasks()).find((t) => t.objective === "running task")?.state).toBe("running");
   await createAndStart(page, "queued task");
   await expect(page.getByText("Queue position 1", { exact: true })).toBeVisible();
+  // Asking stops nothing: keeping on leaves both tasks as they were.
+  await page.getByRole("button", { name: "Quit Ada and stop work", exact: true }).click();
+  await expect(page.getByRole("group", { name: "Stop work" })).toContainText("Your own work: 1 running and 1 queued");
+  await page.getByRole("button", { name: "Keep working", exact: true }).click();
+  await expect(page.getByRole("group", { name: "Stop work" })).toHaveCount(0);
+  expect((await f.tasks()).find((t) => t.objective === "running task")?.state).toBe("running");
   const closed = app.waitForEvent("close");
   await page.getByRole("button", { name: "Quit Ada and stop work", exact: true }).click();
+  await confirmQuit(page);
   await expect(page.getByRole("status")).toContainText("coordinator stopped by the owner: 1 running cancellation requested, 1 queued canceled");
   await closed;
   f.apps = f.apps.filter((a) => a !== app);
@@ -91,6 +106,7 @@ fixtureTest("a second app finds the same coordinator; the menu uses the explicit
     const item = Menu.getApplicationMenu()!.items[0]!.submenu!.items.find((entry) => entry.label === "Quit Ada and stop work")!;
     item.click();
   });
+  await confirmQuit(second.page);
   await expect(second.page.getByRole("status")).toContainText("coordinator stopped by the owner");
   await closed;
   f.apps = f.apps.filter((a) => a !== second.app);
@@ -161,6 +177,7 @@ fixtureTest("Quit keeps Electron and the endpoint alive until the delayed engine
     }
   });
   await page.getByRole("button", { name: "Quit Ada and stop work", exact: true }).click();
+  await confirmQuit(page);
   await expect(page.getByRole("status")).toContainText("coordinator stopped by the owner");
   await page.waitForTimeout(2000);
   expect(exited).toBe(false);
@@ -170,6 +187,27 @@ fixtureTest("Quit keeps Electron and the endpoint alive until the delayed engine
   await closed;
   expect(markerAtClose).toEqual(started);
   f.apps = f.apps.filter((a) => a !== app);
+});
+
+fixtureTest("a start above the project's default waits for its actor's decision, then launches once allowed", async ({ fixture: f }) => {
+  const { page } = await f.launch();
+  await createAndStart(page, "needs a decision", "auto");
+  const panel = page.getByRole("region", { name: "Waiting for your decision" });
+  await expect(panel).toContainText("auto");
+  await expect(panel).toContainText("readonly");
+  await page.waitForTimeout(1500);
+  const waiting = (await f.tasks()).find((t) => t.objective === "needs a decision")!;
+  expect(waiting.attempt?.state).toBe("pending");
+  expect(await f.events(waiting.attempt!.id)).toEqual([]);
+  await panel.getByRole("button", { name: "Allow", exact: true }).click();
+  await expect(panel).toHaveCount(0);
+  await expect.poll(async () => (await f.tasks()).find((t) => t.objective === "needs a decision")?.attempt?.state).not.toBe("pending");
+  // A denied one closes canceled and never launches.
+  await createAndStart(page, "denied", "auto");
+  await page.getByRole("region", { name: "Waiting for your decision" }).getByRole("button", { name: "Deny", exact: true }).click();
+  await expect(page.getByRole("row").filter({ hasText: "denied" })).toContainText("canceled");
+  const denied = (await f.tasks()).find((t) => t.objective === "denied")!;
+  expect((await f.events(denied.attempt!.id)).map((e) => e.kind)).not.toContain("session");
 });
 
 fixtureTest("the UI shows queue_full and withdraws a queued task before it launches", async ({ fixture: f }) => {

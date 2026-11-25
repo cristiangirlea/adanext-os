@@ -91,8 +91,11 @@ void app.whenReady().then(async () => {
     }
   } });
   ipcMain.handle("ada:call", (event, method: unknown, args: unknown) => bridge!.handle(event, method, args));
+  // The menu item stops nothing itself: the page shows what a stop would end and asks first.
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: "Ada", submenu: [{ label: "Quit Ada and stop work", click: () => {
     const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    if (window?.isMinimized()) window.restore();
+    window?.focus();
     window?.webContents.send("ada:quit-requested");
   } }] }]));
   // Only an app launch starts adad. Existing windows reconnect without restarting
@@ -105,7 +108,7 @@ void app.whenReady().then(async () => {
 }).catch((error: unknown) => { console.error("ada:", error); app.quit(); });
 
 // Closing the window stops nothing: adad runs on its own and keeps the work going. Only
-// "Quit Ada and stop work" on the page asks adad to stop.
+// "Quit Ada and stop work", once the owner confirms the counts, asks adad to stop.
 app.on("window-all-closed", () => {
   bridge?.close();
   app.quit();

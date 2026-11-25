@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { AdaError, type AdaClient, type AttemptEvent, type Capabilities, type Changes, type ExecutionPolicy, type NewTask, type ProjectSummary, type SignedInAccount, type Task, type TaskState, type StopResult } from "./client/api";
+import { AdaError, type AdaClient, type AttemptEvent, type Capabilities, type Changes, type ExecutionPolicy, type NewTask, type ProjectSummary, type SignedInAccount, type StopCounts, type StopResult, type Task, type TaskState } from "./client/api";
 import { AccountPage } from "./browser/AccountPage";
 import { signedOut } from "./browser/session";
 import { setMotion, useMotionOn } from "./motion/effects";
@@ -8,15 +8,19 @@ import { CommandPalette, type QuickAction } from "./palette/CommandPalette";
 import { ResizeHandle } from "./resize/ResizeHandle";
 import { Accounts } from "./settings/Accounts";
 import { Listener } from "./settings/Listener";
+import { ProjectSettings } from "./settings/ProjectSettings";
 import { currentTheme, setTheme, themeNames, themes, type Theme } from "./theme/theme";
 import { Marked, PathText } from "./text/Marked";
 import { Activity } from "./workspace/Activity";
+import { DecisionPanel } from "./workspace/Decision";
 import { ErrorLine, shown, type Shown } from "./workspace/errors";
 import { ImportFlow } from "./workspace/ImportFlow";
 import { Nav, type ProjectsRead } from "./workspace/Nav";
 import { defaultPolicy } from "./workspace/policy";
 import { PolicyPicker } from "./workspace/PolicyPicker";
 import { Review } from "./workspace/Review";
+import { SnapshotTask } from "./workspace/SnapshotTask";
+import { changedCounts, StopAsk } from "./workspace/StopAsk";
 import { TaskForm } from "./workspace/TaskForm";
 import { WorkArea } from "./workspace/WorkArea";
 
@@ -29,6 +33,9 @@ import { WorkArea } from "./workspace/WorkArea";
 // back (getTask) whenever its stream delivers or reconnects, after a stale-revision refusal, and
 // on a poll while any task is in a state the executor advances by itself.
 
+// The desktop's own account id: not read yet, being read, known, or a failed read to show.
+type OwnerLookup = { state: "unknown" } | { state: "reading" } | { state: "known"; id: string } | { state: "failed"; attempt: string; error: Shown };
+
 // The states the coordinator leaves on its own; the others change only on a request from here.
 const activeStates = new Set<TaskState>(["preparing", "running", "verifying", "cancel_requested", "interrupted"]);
 const reviewStates = new Set<TaskState>(["awaiting_review", "accepted", "failed", "canceled"]);
@@ -39,10 +46,14 @@ const navWidth = { start: 300, min: 220, max: 520 };
 const workWidth = { start: 520, min: 320, max: 1100 };
 
 // In the browser (the network channel) the app shows the signed-in account and "Leave", and
-// leaves out what only the owner's desktop does: import, accounts, network access, the experience
-// card, "Quit Ada and stop work", and the create and start controls adad refuses there.
+// leaves out what only the owner's desktop does: import, accounts, network access, project
+// settings, the experience card and "Quit Ada and stop work". The owner account keeps the create
+// and start controls and its own stop there; adad refuses those to every other account.
 export function App({ client, account, onLeave }: { client: AdaClient; account?: SignedInAccount; onLeave?: () => void }) {
   const browser = client.channel === "network";
+  const ownerBrowser = browser && account?.owner === true;
+  // Who may create, start and stop: the desktop (the owner's channel) and the owner account.
+  const owner = !browser || ownerBrowser;
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [attempts, setAttempts] = useState<Record<string, string>>({});
@@ -54,7 +65,14 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
   const [stream, setStream] = useState<string>("");
   const [error, setError] = useState<Shown | null>(null);
   const [stopResult, setStopResult] = useState<StopResult | null>(null);
+  // The counts the owner is asked to confirm; changed once they moved under a confirmation.
+  const [stopAsk, setStopAsk] = useState<{ counts: StopCounts; changed: boolean } | null>(null);
   const quitting = useRef(false);
+  const asking = useRef(false);
+  const [settingsOf, setSettingsOf] = useState<string | null>(null);
+  // The owner account's id, read on the desktop only when a decision needs it.
+  const [ownerLookup, setOwnerLookup] = useState<OwnerLookup>({ state: "unknown" });
+  const [deciding, setDeciding] = useState<"" | "allow" | "deny">("");
   const [matrix, setMatrix] = useState<Capabilities | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -182,23 +200,44 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
     };
   }, [client]);
 
+  // The stop asks first: the counts, then a stop with the count of other users' work the owner
+  // confirmed. A count that moved meanwhile is shown and asked again; nothing stopped.
   const quit = useCallback(() => {
-    if (quitting.current) return;
-    quitting.current = true;
+    if (asking.current || quitting.current) return;
+    asking.current = true;
     void run(async () => {
       try {
-        setStopResult(await client.stopCoordinator());
+        setStopAsk({ counts: await client.stopCounts(), changed: false });
+      } finally {
+        asking.current = false;
+      }
+    }, undefined, "stop-read");
+  }, [client, run]);
+  const confirmStop = () => {
+    if (!stopAsk || quitting.current) return;
+    quitting.current = true;
+    const others = stopAsk.counts.others_running + stopAsk.counts.others_queued;
+    void run(async () => {
+      try {
+        const result = await client.stop(others);
+        setStopAsk(null);
+        setStopResult(result);
       } catch (e) {
         quitting.current = false;
+        if (e instanceof AdaError && e.code === "stop_count_changed") {
+          setStopAsk({ counts: changedCounts(e.details) ?? (await client.stopCounts()), changed: true });
+          return;
+        }
         throw e;
       }
-    });
-  }, [client, run]);
+    }, undefined, "stop");
+  };
   useEffect(() => client.onQuitRequested(quit), [client, quit]);
-  // The result has been rendered before main waits for exit and closes the shell.
+  // The result has been rendered before main waits for exit and closes the shell; the browser
+  // has no shell to close.
   useEffect(() => {
-    if (stopResult) void run(() => client.finishQuit());
-  }, [client, stopResult, run]);
+    if (stopResult && !browser) void run(() => client.finishQuit());
+  }, [client, stopResult, run, browser]);
 
   useEffect(() => {
     if (!attemptId || selectedId === null) return;
@@ -275,6 +314,43 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
       task.id,
       "cancel",
     );
+  // A pending attempt's decision, which adad shows only to its actor and the project's owners:
+  // its actor may allow or deny it, anyone else adad shows it to may only deny it.
+  const decision = selected?.attempt?.state === "pending" ? (selected.attempt.decision ?? null) : null;
+  // The desktop's viewer is the owner account; no local route names the caller, so its id comes
+  // from the accounts list, read only while a decision is shown.
+  // A failed read is kept apart from a known id: it is shown, and read again on "Try again" or
+  // when another attempt's decision is shown.
+  const decisionAttempt = !browser && decision?.required === true ? selected!.attempt!.id : null;
+  useEffect(() => {
+    if (decisionAttempt === null) return;
+    if (ownerLookup.state === "failed" && ownerLookup.attempt !== decisionAttempt) {
+      setOwnerLookup({ state: "unknown" });
+      return;
+    }
+    if (ownerLookup.state !== "unknown") return;
+    setOwnerLookup({ state: "reading" });
+    client.listAccounts().then(
+      (listed) => {
+        const found = listed.find((a) => a.owner);
+        setOwnerLookup(found ? { state: "known", id: found.id } : { state: "failed", attempt: decisionAttempt, error: { code: "internal", message: "the accounts list names no owner account" } });
+      },
+      (e: unknown) => setOwnerLookup({ state: "failed", attempt: decisionAttempt, error: shown(e) }),
+    );
+  }, [client, decisionAttempt, ownerLookup]);
+  const viewer = browser ? account?.id : ownerLookup.state === "known" ? ownerLookup.id : undefined;
+  const isActor = decision !== null && !!viewer && viewer === decision.actor;
+  const decide = (task: Task, attempt: string, choice: "allow" | "deny") => {
+    if (deciding !== "") return;
+    setDeciding(choice);
+    void run(
+      async () => {
+        replace(await client.decide(attempt, choice));
+        await refresh(task.id);
+      },
+      task.id,
+    ).finally(() => setDeciding(""));
+  };
   const cancellable = selected !== null && (selected.state === "running" || selected.state === "verifying" || selected.attempt?.state === "pending");
 
   const chooseTheme = (next: Theme) => {
@@ -295,6 +371,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
         { id: "listener", label: "Set up network access", run: () => setListener(true) },
         ...shared,
       ];
+  if (ownerBrowser) actions.splice(1, 0, { id: "new-task", label: "Create a task", run: () => newTask() });
   const projectNames = { ...Object.fromEntries(projects.map((p) => [p.id, p.name])), ...names };
   // Leave signs this browser out and stops nothing; a session already gone is signed out too.
   const leaving = useRef(false);
@@ -328,6 +405,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
           projects={projects.map((p) => p.id)}
           projectsRead={projectsRead}
           browser={browser}
+          canCreate={owner}
           selectedId={selectedId}
           onSelect={select}
           onImport={() => setImporting(true)}
@@ -335,6 +413,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
           onAccounts={() => setAccounts(true)}
           onListener={() => setListener(true)}
           onAccount={() => setAccountOpen(true)}
+          onProjectSettings={browser ? undefined : setSettingsOf}
         />
         <ResizeHandle
           side="e"
@@ -349,6 +428,9 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
 
       <main className="detail" aria-label="Selected task">
         {error && <ErrorLine error={error} />}
+        {stopAsk && !stopResult && (
+          <StopAsk counts={stopAsk.counts} changed={stopAsk.changed} quits={!browser} busy={pressed === "stop"} onConfirm={confirmStop} onCancel={() => setStopAsk(null)} />
+        )}
         {selected ? (
           <>
             <header className="task-head">
@@ -381,7 +463,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
               <BusyButton busy={pressed === "ready"} disabled={selected.state !== "draft"} onClick={() => void run(async () => replace(await client.ready(selected.id, selected.revision)), selected.id, "ready")}>
                 Ready
               </BusyButton>
-              {!browser && (
+              {owner && (
                 <BusyButton
                   busy={pressed === "start"}
                   disabled={selected.state !== "ready"}
@@ -404,7 +486,10 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
                 Cancel
               </BusyButton>
             </div>
-            {!browser && (selected.state === "draft" || selected.state === "ready") && (
+            {decision && selected.attempt && (
+              <DecisionPanel decision={decision} canAllow={isActor && owner} canDeny={owner} lookupError={!browser && ownerLookup.state === "failed" ? ownerLookup.error : null} onRetry={() => setOwnerLookup({ state: "unknown" })} identityKnown={browser ? viewer !== undefined : ownerLookup.state === "known"} busy={deciding} onDecide={(choice) => decide(selected, selected.attempt!.id, choice)} />
+            )}
+            {owner && (selected.state === "draft" || selected.state === "ready") && (
               <PolicyPicker matrix={matrix} value={policy} onChange={(next) => setNextPolicy((current) => ({ ...current, [selected.id]: next }))} legend="Start with" />
             )}
             {reviewStates.has(selected.state) && selected.attempt && (
@@ -414,7 +499,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
           </>
         ) : importing ? (
           <p className="empty">Importing a repository.</p>
-        ) : browser ? (
+        ) : browser && !ownerBrowser ? (
           <div className="start">
             <h2>Your projects</h2>
             <p className="empty">Select a task to see it here. Creating and starting tasks is not available in the browser yet: use the Ada desktop app.</p>
@@ -422,8 +507,12 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
         ) : (
           <div className="start">
             <h2>New task</h2>
-            <p className="empty">Import a repository to give a task its own workspace, or add a task to a project here.</p>
-            <TaskForm key={`${formProject}:${formOpened}`} matrix={matrix} defaultProject={formProject} busy={pressed === "create"} autoFocus={formOpened > 0} onCreate={(input, chosen) => void run(() => created(input, chosen), undefined, "create")} />
+            <p className="empty">{browser ? "Take a snapshot of an imported project and add a task to it here. Importing a repository is done in the Ada desktop app." : "Import a repository to give a task its own workspace, or add a task to a project here."}</p>
+            {ownerBrowser ? (
+              <SnapshotTask key={`${formProject}:${formOpened}`} client={client} projects={projects} matrix={matrix} defaultProject={formProject} busy={pressed === "create"} onCreate={(input, chosen) => void run(() => created(input, chosen), undefined, "create")} />
+            ) : (
+              <TaskForm key={`${formProject}:${formOpened}`} matrix={matrix} defaultProject={formProject} busy={pressed === "create"} autoFocus={formOpened > 0} onCreate={(input, chosen) => void run(() => created(input, chosen), undefined, "create")} />
+            )}
           </div>
         )}
       </main>
@@ -473,7 +562,7 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
         </label>
         {stopResult && (
           <p role="status">
-            {stopResult.reason}: {stopResult.running} running cancellation requested, {stopResult.queued} queued canceled. Waiting for the coordinator to exit.
+            {stopResult.reason}: {stopResult.running} running cancellation requested, {stopResult.queued} queued canceled. {browser ? "Ada stops once the work has; this page then loses its connection." : "Waiting for the coordinator to exit."}
           </p>
         )}
         {browser ? (
@@ -489,11 +578,19 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
             <span id="leave-note" className="hint">
               Signs this browser out; your tasks keep running.
             </span>
+            {ownerBrowser && (
+              <>
+                {" "}
+                <BusyButton busy={pressed === "stop-read"} className="quit" disabled={stopResult !== null || stopAsk !== null} onClick={quit}>
+                  Stop Ada's work
+                </BusyButton>
+              </>
+            )}
           </span>
         ) : (
-          <button type="button" className="quit" disabled={stopResult !== null} onClick={quit}>
+          <BusyButton busy={pressed === "stop-read"} className="quit" disabled={stopResult !== null} onClick={quit}>
             Quit Ada and stop work
-          </button>
+          </BusyButton>
         )}
       </footer>
       {importing && (
@@ -513,6 +610,9 @@ export function App({ client, account, onLeave }: { client: AdaClient; account?:
       )}
       {accounts && <Accounts client={client} onClose={() => setAccounts(false)} />}
       {listener && <Listener client={client} onClose={() => setListener(false)} />}
+      {settingsOf !== null && projects.some((p) => p.id === settingsOf) && (
+        <ProjectSettings client={client} project={projects.find((p) => p.id === settingsOf)!} onClose={() => setSettingsOf(null)} onChanged={readProjects} />
+      )}
       {accountOpen && account && <AccountPage client={client} account={account} onClose={() => setAccountOpen(false)} onSignedOut={accountSignedOut} />}
       <CommandPalette client={client} actions={actions} onSelectTask={select} />
     </div>

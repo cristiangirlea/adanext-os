@@ -50,6 +50,21 @@ export interface TaskAttempt {
   tested_commit?: string;
   checks?: CheckResult[];
   checks_failed?: boolean;
+  // The permission decision a start above its project's default mode waits for; null when none
+  // is needed or the viewer is neither the attempt's actor nor a project owner.
+  decision?: AttemptDecision | null;
+}
+
+export type Mode = "readonly" | "auto" | "yolo";
+
+export interface AttemptDecision {
+  // The attempt's actor: the only user who may allow it.
+  actor: string;
+  required: boolean;
+  scope: { backend: string; mode: string; workspace: string };
+  project_default: string;
+  allowed: boolean;
+  denied: boolean;
 }
 
 export interface ProviderConfiguration {
@@ -130,6 +145,24 @@ export interface StopResult {
   running: number;
   queued: number;
   reason: string;
+}
+
+// GET /v1/coordinator/stop: what a stop would end, without stopping anything. "others" are the
+// attempts whose actor is not the owner account; running and queued count every attempt.
+export interface StopCounts {
+  running: number;
+  queued: number;
+  others_running: number;
+  others_queued: number;
+}
+
+// A project's member (GET /v1/projects/{id}/members).
+export type MemberRole = "owner" | "member";
+export interface Member {
+  user: string;
+  name: string;
+  role: MemberRole;
+  added: string;
 }
 
 // The execution policy body of POST /v1/tasks/{id}/start.
@@ -431,6 +464,7 @@ export interface ProjectSummary {
   name: string;
   role: string;
   created: string;
+  default_mode: Mode;
 }
 
 // The signed-in account (GET /v1/account), as sign-in and enrollment also answer it.
@@ -481,6 +515,11 @@ export interface ErrorDetails {
   findings?: SecretFinding[];
   // The JSON event form's cursor_ahead names the attempt's last recorded sequence.
   last_sequence?: number;
+  // stop_count_changed carries the counts as they are now.
+  running?: number;
+  queued?: number;
+  others_running?: number;
+  others_queued?: number;
 }
 
 // adad's codes (internal/api writeError), plus the client's own for a coordinator it cannot
@@ -501,6 +540,9 @@ export type ErrorCode =
   | "too_many_streams"
   | "shutting_down"
   | "queue_full"
+  | "forbidden"
+  | "last_owner"
+  | "stop_count_changed"
   | "account_in_use"
   | "owner_account"
   | "local_only"
@@ -558,7 +600,10 @@ export interface AdaClient {
   start(id: string, revision: number, policy: ExecutionPolicy): Promise<StartedTask>;
   cancel(id: string, revision: number): Promise<Task>;
   subscribeEvents(attemptId: string, onMessage: (message: StreamMessage) => void): () => void;
-  stopCoordinator(): Promise<StopResult>;
+  // What a stop would end; then the stop itself, with the count of other users' attempts the
+  // owner confirmed. adad refuses it with stop_count_changed when that count moved.
+  stopCounts(): Promise<StopCounts>;
+  stop(others: number): Promise<StopResult>;
   finishQuit(): Promise<void>;
   onQuitRequested(listener: () => void): () => void;
   capabilities(): Promise<Capabilities>;
@@ -567,6 +612,9 @@ export interface AdaClient {
   inspectFolder(handle: string): Promise<Inspection>;
   importFolder(handle: string, name: string): Promise<Project>;
   snapshot(handle: string, selection: SnapshotSelection): Promise<Snapshot>;
+  // A snapshot of an imported project by its id, for the browser's owner account; the desktop
+  // takes one only through the folder it chose (snapshot).
+  snapshotProject(projectId: string, selection: SnapshotSelection): Promise<Snapshot>;
   changes(taskId: string): Promise<Changes>;
   // A path inside the task's agent-changes commit, "" for its root; never a host path.
   files(taskId: string, path: string): Promise<FileView>;
@@ -576,6 +624,13 @@ export interface AdaClient {
   addFinding(taskId: string, body: string): Promise<Finding>;
   accept(taskId: string, revision: number, commit: string, generation: number, secrets: SecretAck[]): Promise<Accepted>;
   refine(taskId: string, revision: number, request: RefineRequest): Promise<Refined>;
+  // Answers a pending attempt's permission decision; adad answers with the task.
+  decide(attemptId: string, decision: "allow" | "deny"): Promise<Task>;
+  // A project's membership and default mode: the owner's channel only.
+  members(projectId: string): Promise<Member[]>;
+  setMember(projectId: string, user: string, role: MemberRole): Promise<Member[]>;
+  removeMember(projectId: string, user: string): Promise<Member[]>;
+  setDefaultMode(projectId: string, mode: Mode): Promise<{ id: string; default_mode: Mode }>;
   listAccounts(): Promise<Account[]>;
   createAccount(input: NewAccount): Promise<CreatedAccount>;
   updateAccount(id: string, change: AccountChange): Promise<Account>;
@@ -624,7 +679,8 @@ export interface BridgeApi {
   start(id: string, revision: number, policy: ExecutionPolicy): Promise<BridgeResult<StartedTask>>;
   cancel(id: string, revision: number): Promise<BridgeResult<Task>>;
   subscribeEvents(attemptId: string, onMessage: (message: StreamMessage) => void): () => void;
-  stopCoordinator(): Promise<BridgeResult<StopResult>>;
+  stopCounts(): Promise<BridgeResult<StopCounts>>;
+  stop(others: number): Promise<BridgeResult<StopResult>>;
   finishQuit(): Promise<BridgeResult<null>>;
   onQuitRequested(listener: () => void): () => void;
   capabilities(): Promise<BridgeResult<Capabilities>>;
@@ -640,6 +696,11 @@ export interface BridgeApi {
   addFinding(taskId: string, body: string): Promise<BridgeResult<Finding>>;
   accept(taskId: string, revision: number, commit: string, generation: number, secrets: SecretAck[]): Promise<BridgeResult<Accepted>>;
   refine(taskId: string, revision: number, request: RefineRequest): Promise<BridgeResult<Refined>>;
+  decide(attemptId: string, decision: "allow" | "deny"): Promise<BridgeResult<Task>>;
+  members(projectId: string): Promise<BridgeResult<Member[]>>;
+  setMember(projectId: string, user: string, role: MemberRole): Promise<BridgeResult<Member[]>>;
+  removeMember(projectId: string, user: string): Promise<BridgeResult<Member[]>>;
+  setDefaultMode(projectId: string, mode: Mode): Promise<BridgeResult<{ id: string; default_mode: Mode }>>;
   listAccounts(): Promise<BridgeResult<Account[]>>;
   createAccount(input: NewAccount): Promise<BridgeResult<CreatedAccount>>;
   updateAccount(id: string, change: AccountChange): Promise<BridgeResult<Account>>;

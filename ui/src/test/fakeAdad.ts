@@ -1,4 +1,4 @@
-import type { BridgeApi, BridgeResult, OwnCredential, OwnSession, ProjectSummary, SignedInAccount, StreamMessage, Task } from "../client/api";
+import type { Account, BridgeApi, BridgeResult, ErrorDetails, OwnCredential, StopCounts, OwnSession, ProjectSummary, SignedInAccount, StreamMessage, Task } from "../client/api";
 import { capabilities } from "./fakeClient";
 
 // One fake adad that both adapters talk to: the desktop adapter through a fake preload bridge,
@@ -49,6 +49,13 @@ export class FakeAdad {
   history: Record<string, { seq: number; kind: string; payload: unknown }[]> = {};
   pageSize = 2;
   credentialList: OwnCredential[] = [];
+  // The owner channel's accounts list, which the desktop reads for the owner account's id.
+  accountList: Account[] = [];
+  // What a stop would end now; stopped once a stop was accepted, finished once the shell quit.
+  stopCounts: StopCounts = { running: 0, queued: 0, others_running: 0, others_queued: 0 };
+  stopped = false;
+  snapshots = 0;
+  finished = false;
   private bridgeListeners = new Map<string, Set<(message: StreamMessage) => void>>();
 
   constructor(tasks: Task[] = []) {
@@ -70,8 +77,22 @@ export class FakeAdad {
       if (after > last) return { status: 409, body: { error: "cursor_ahead", message: "cursor ahead", last_sequence: last } };
       return { status: 200, body: all.filter((e) => e.seq > after).slice(0, this.pageSize).map((e) => ({ attempt: events[1], time: "", ...e })) };
     }
+    if (path === "/v1/coordinator/stop") return this.stop(method, body);
+    const snapshot = /^\/v1\/projects\/([^/]+)\/snapshots$/.exec(path);
+    if (method === "POST" && snapshot) {
+      const project = decodeURIComponent(snapshot[1]!);
+      if (!this.projectList.some((p) => p.id === project)) return notFound;
+      this.snapshots++;
+      return { status: 201, body: { id: `snap-${this.snapshots}`, project, base_commit: "b".repeat(40), untracked: [], provider_configuration: null } };
+    }
+    if (method === "POST" && path === "/v1/tasks") return this.create(body);
+    const start = /^\/v1\/tasks\/([^/]+)\/start$/.exec(path);
+    if (method === "POST" && start) return this.start(decodeURIComponent(start[1]!), headers, body);
+    const decision = /^\/v1\/attempts\/([^/]+)\/decision$/.exec(path);
+    if (method === "POST" && decision) return this.decide(decodeURIComponent(decision[1]!), body);
     if (method === "GET") {
       if (path === "/v1/tasks") return { status: 200, body: this.tasks };
+      if (path === "/v1/accounts") return { status: 200, body: this.accountList };
       if (path === "/v1/projects") return { status: 200, body: this.projectList };
       if (path === "/v1/capabilities") return { status: 200, body: this.matrix };
       if (path === "/v1/experience") return { status: 200, body: { version: 1, enabled: false } };
@@ -92,6 +113,58 @@ export class FakeAdad {
       return { status: 200, body: updated };
     }
     return notFound;
+  }
+
+  // A new task, created as the signed-in account (the owner account on the desktop).
+  private create(body: string): Answer {
+    const input = JSON.parse(body) as { project: string; objective: string; snapshot?: string };
+    const task = { ...this.newTask(input), created_by: this.signedIn?.id ?? "local" };
+    this.tasks = [...this.tasks, task];
+    return { status: 201, body: task };
+  }
+  private newTask(input: { project: string; objective: string; snapshot?: string }): Task {
+    const id = `t-new-${this.tasks.length + 1}`;
+    return { id, project: input.project, created_by: "", objective: input.objective, criteria: "", state: "draft", revision: 0, created: "", updated: "", attempt: null, ...(input.snapshot ? { snapshot: input.snapshot } : {}) };
+  }
+  // A start: a pending attempt, which waits for its actor's decision above the project's default.
+  private start(taskId: string, headers: Record<string, string>, body: string): Answer {
+    const found = this.tasks.find((t) => t.id === taskId);
+    if (!found) return notFound;
+    if (headers["if-match"] !== `"${found.revision}"`) return { status: 409, body: { error: "stale_revision", message: "stale revision" } };
+    const policy = JSON.parse(body) as { backend: string; mode: string };
+    const rank = ["readonly", "auto", "yolo"];
+    const fallback = this.projectList.find((p) => p.id === found.project)?.default_mode ?? "readonly";
+    const required = rank.indexOf(policy.mode) > rank.indexOf(fallback);
+    const actor = this.signedIn?.id ?? "local";
+    const attempt = { id: `a-${taskId}`, state: "pending", ...policy, decision: required ? { actor, required, scope: { backend: policy.backend, mode: policy.mode, workspace: "w" }, project_default: fallback, allowed: false, denied: false } : null };
+    const updated: Task = { ...found, state: "preparing", revision: found.revision + 1, attempt };
+    this.tasks = this.tasks.map((t) => (t.id === taskId ? updated : t));
+    return { status: 200, body: { ...updated, attempt_id: attempt.id } };
+  }
+
+  // The owner's stop: the counts, then a stop only with the count of others the owner saw.
+  private stop(method: string, body: string): Answer {
+    const counts = this.stopCounts;
+    if (method === "GET") return { status: 200, body: counts };
+    const others = (JSON.parse(body === "" ? "{}" : body) as { others?: unknown }).others;
+    if (typeof others !== "number") return { status: 400, body: { error: "bad_request", message: "invalid request" } };
+    if (others !== counts.others_running + counts.others_queued) return { status: 409, body: { error: "stop_count_changed", message: "the count of other users' work changed", ...counts } };
+    this.stopped = true;
+    return { status: 202, body: { running: counts.running, queued: counts.queued, reason: "coordinator stopped by the owner" } };
+  }
+
+  // A decision on a pending attempt: an allow marks it allowed, a deny cancels it.
+  private decide(attemptId: string, body: string): Answer {
+    const found = this.tasks.find((t) => t.attempt?.id === attemptId);
+    if (!found || !found.attempt) return notFound;
+    const current = found.attempt.decision;
+    if (found.attempt.state !== "pending" || !current?.required) return { status: 409, body: { error: "invalid_transition", message: "invalid transition" } };
+    const allow = (JSON.parse(body) as { decision: string }).decision === "allow";
+    const updated: Task = allow
+      ? { ...found, revision: found.revision + 1, attempt: { ...found.attempt, decision: { ...current, allowed: true } } }
+      : { ...found, state: "canceled", revision: found.revision + 1, attempt: { ...found.attempt, state: "canceled", decision: { ...current, denied: true } } };
+    this.tasks = this.tasks.map((t) => (t.id === found.id ? updated : t));
+    return { status: 200, body: updated };
   }
 
   private serve(method: string, url: string, headers: Record<string, string>, body = ""): Answer {
@@ -184,8 +257,10 @@ export class FakeAdad {
     const result = async (method: string, url: string, headers: Record<string, string> = {}, body?: unknown): Promise<BridgeResult<never>> => {
       const a = this.serve(method, url, headers, body === undefined ? "" : JSON.stringify(body));
       if (a.status >= 200 && a.status < 300) return { ok: true, value: (a.body ?? null) as never };
-      const b = a.body as { error: string; message: string };
-      return { ok: false, error: { code: b.error, status: a.status, message: b.message } };
+      const { error, message, ...rest } = a.body as { error: string; message: string } & Record<string, unknown>;
+      const refused: BridgeResult<never> = { ok: false, error: { code: error, status: a.status, message } };
+      if (Object.keys(rest).length) refused.error.details = rest as ErrorDetails;
+      return refused;
     };
     const routes: Partial<Record<keyof BridgeApi, (...args: never[]) => unknown>> = {
       listTasks: () => result("GET", "/v1/tasks"),
@@ -198,6 +273,14 @@ export class FakeAdad {
       ready: (id: string, revision: number) => result("POST", `/v1/tasks/${id}/ready`, { "if-match": `"${revision}"`, "idempotency-key": "bridge" }),
       cancel: (id: string, revision: number) => result("POST", `/v1/tasks/${id}/cancel`, { "if-match": `"${revision}"`, "idempotency-key": "bridge" }),
       onQuitRequested: () => () => {},
+      listAccounts: () => result("GET", "/v1/accounts"),
+      stopCounts: () => result("GET", "/v1/coordinator/stop"),
+      stop: (others: number) => result("POST", "/v1/coordinator/stop", { "idempotency-key": "bridge" }, { others }),
+      decide: (attemptId: string, decision: string) => result("POST", `/v1/attempts/${attemptId}/decision`, { "idempotency-key": "bridge" }, { decision }),
+      finishQuit: async () => {
+        this.finished = true;
+        return { ok: true, value: null };
+      },
       subscribeEvents: (attemptId: string, onMessage: (message: StreamMessage) => void) => {
         this.requests.push({ method: "GET", url: `/v1/attempts/${attemptId}/events`, headers: {}, body: "" });
         const set = this.bridgeListeners.get(attemptId) ?? new Set();

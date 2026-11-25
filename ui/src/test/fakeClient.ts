@@ -25,7 +25,11 @@ import type {
   ListenerCertificate,
   ListenerSetting,
   ListenerStatus,
+  Member,
+  MemberRole,
+  Mode,
   NewTask,
+  StopCounts,
   Project,
   RefineRequest,
   SecretAck,
@@ -73,6 +77,9 @@ export class FakeClient implements AdaClient {
 
   channel: Channel = "desktop";
   projectList: ProjectSummary[] = [];
+  // Each project's members, by project id.
+  memberList: Record<string, Member[]> = {};
+  stopCountList: StopCounts = { running: 1, queued: 1, others_running: 0, others_queued: 0 };
   // The browser's signed-in account; null answers 401 as adad does without a session.
   signedIn: SignedInAccount | null = null;
   // The accounts the browser may sign in or enroll as: by name, and by enrollment code.
@@ -234,14 +241,20 @@ export class FakeClient implements AdaClient {
       this.unsubscribed.push(attemptId);
     };
   }
-  async stopCoordinator() {
-    this.check("stopCoordinator");
-    return { running: 1, queued: 1, reason: "coordinator stopped by the owner" };
+  async stopCounts(): Promise<StopCounts> {
+    this.check("stopCounts");
+    return this.stopCountList;
+  }
+  async stop(others: number) {
+    this.check("stop", others);
+    const counts = this.stopCountList;
+    if (others !== counts.others_running + counts.others_queued) throw new AdaError("stop_count_changed", 409, "the count of other users' work changed", undefined, { ...counts });
+    return { running: counts.running, queued: counts.queued, reason: "coordinator stopped by the owner" };
   }
   async finishQuit(): Promise<void> {
     this.check("finishQuit");
   }
-  onQuitRequested(): () => void {
+  onQuitRequested(_listener: () => void): () => void {
     return () => {};
   }
 
@@ -269,6 +282,10 @@ export class FakeClient implements AdaClient {
   async snapshot(handle: string, selection: SnapshotSelection): Promise<Snapshot> {
     this.check("snapshot", handle, selection);
     return { id: "snap1", project: this.project.id, base_commit: "b".repeat(40), untracked: selection.untracked.map((path) => ({ path })), provider_configuration: null };
+  }
+  async snapshotProject(projectId: string, selection: SnapshotSelection): Promise<Snapshot> {
+    this.check("snapshotProject", projectId, selection);
+    return { id: "snap1", project: projectId, base_commit: "b".repeat(40), untracked: [], provider_configuration: null };
   }
   async changes(taskId: string): Promise<Changes> {
     this.check("changes", taskId);
@@ -311,6 +328,40 @@ export class FakeClient implements AdaClient {
     const task = { ...this.update(taskId, revision, "preparing"), attempt };
     this.tasks = this.tasks.map((t) => (t.id === taskId ? task : t));
     return { ...task, attempt_id: attempt.id, findings: this.findingList.map((f) => f.id) };
+  }
+
+  async decide(attemptId: string, decision: "allow" | "deny"): Promise<Task> {
+    this.check("decide", attemptId, decision);
+    const task = this.tasks.find((t) => t.attempt?.id === attemptId);
+    if (!task?.attempt?.decision) throw new AdaError("invalid_transition", 409, "invalid transition");
+    const decided = { ...task.attempt.decision, allowed: decision === "allow", denied: decision === "deny" };
+    const updated: Task = { ...task, state: decision === "deny" ? "canceled" : task.state, revision: task.revision + 1, attempt: { ...task.attempt, state: decision === "deny" ? "canceled" : task.attempt.state, decision: decided } };
+    this.tasks = this.tasks.map((t) => (t.id === task.id ? updated : t));
+    return updated;
+  }
+  async members(projectId: string): Promise<Member[]> {
+    this.check("members", projectId);
+    return this.memberList[projectId] ?? [];
+  }
+  async setMember(projectId: string, user: string, role: MemberRole): Promise<Member[]> {
+    this.check("setMember", projectId, user, role);
+    const list = this.memberList[projectId] ?? [];
+    const name = this.accountOf(user).name;
+    this.memberList[projectId] = list.some((m) => m.user === user) ? list.map((m) => (m.user === user ? { ...m, role } : m)) : [...list, { user, name, role, added: "2026-11-25T00:00:00Z" }];
+    return this.memberList[projectId];
+  }
+  async removeMember(projectId: string, user: string): Promise<Member[]> {
+    this.check("removeMember", projectId, user);
+    const list = this.memberList[projectId] ?? [];
+    const owners = list.filter((m) => m.role === "owner");
+    if (owners.length === 1 && owners[0]!.user === user) throw new AdaError("last_owner", 409, "the project's last owner cannot be removed");
+    this.memberList[projectId] = list.filter((m) => m.user !== user);
+    return this.memberList[projectId];
+  }
+  async setDefaultMode(projectId: string, mode: Mode): Promise<{ id: string; default_mode: Mode }> {
+    this.check("setDefaultMode", projectId, mode);
+    this.projectList = this.projectList.map((p) => (p.id === projectId ? { ...p, default_mode: mode } : p));
+    return { id: projectId, default_mode: mode };
   }
 
   async listAccounts(): Promise<Account[]> {

@@ -76,7 +76,13 @@ export class Fixture {
     // Close every window first, so no subscription can restart the test's coordinator.
     for (const app of this.apps.splice(0)) await this.closeWindow(app).catch(() => { app.process().kill(); });
     if (await endpointPresent(this.socket).catch(() => false)) {
-      await call(this.socket, { method: "POST", path: "/v1/coordinator/stop", idempotent: true }).catch(() => {});
+      // The stop takes the count of other users' work as it stands; a moved count is read again.
+      for (let tries = 0; tries < 3; tries++) {
+        const counts = (await call(this.socket, { method: "GET", path: "/v1/coordinator/stop" }).catch(() => null)) as { others_running: number; others_queued: number } | null;
+        if (counts === null) break;
+        const stopped = await call(this.socket, { method: "POST", path: "/v1/coordinator/stop", body: { others: counts.others_running + counts.others_queued }, idempotent: true }).then(() => true, () => false);
+        if (stopped) break;
+      }
       await waitForExit(this.socket);
     }
     await expect.poll(() => this.holder(), { timeout: 30_000 }).toBeNull();
