@@ -635,7 +635,7 @@ assumes a desktop on the coordinator's host (decisions log, 2026-11-23, #147).
   state, its pipe or socket and token, the TLS key or the DNS token (a user's own tasks may read
   that user's own login; decisions log, 2026-11-24, M4b.1: the owner chose the execution
   boundary).
-- [ ] **M4b.7 Import roots and the server-side chooser.** Roots granted per user through the
+- [x] **M4b.7 Import roots and the server-side chooser** (#166: #168, 2026-11-25). Roots granted per user through the
   owner's channel and kept in the store (a forward migration), so they survive a restart;
   browsing below a root, inspecting the chosen directory by root id and relative path before
   import (blockers, provider configuration, the untracked files the snapshot may take), and

@@ -796,3 +796,7 @@ func TestASnapshotWhoseClientLeavesRemovesWhatItWrote(t *testing.T) {
 		t.Fatalf("the first blob opens: %v", err)
 	}
 }
+
+func (f *countingInspector) InspectInRoot(ctx context.Context, path, root string) (source.Inspection, error) {
+	return f.in.InspectInRoot(ctx, path, root)
+}

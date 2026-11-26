@@ -99,6 +99,8 @@ type Inspection struct {
 	Blockers    []Blocker `json:"blockers"`
 	// Findings are reported and do not block an import.
 	Findings []Finding `json:"findings"`
+	// SnapshotCandidates are the regular untracked files within capture's per-file limit.
+	SnapshotCandidates []string `json:"-"`
 	// Paths are the fingerprint's per-path entries, which a snapshot keeps for drift.
 	Paths []PathEntry `json:"-"`
 	// ProviderPaths are every provider configuration path, tracked or untracked, which a snapshot keeps.
@@ -127,6 +129,11 @@ type Inspector struct {
 // Inspect reads the repository whose work tree root is path. Blockers are
 // part of the result; an error means the repository could not be inspected.
 func (in *Inspector) Inspect(ctx context.Context, path string) (Inspection, error) {
+	return in.InspectInRoot(ctx, path, "")
+}
+
+// InspectInRoot confines repository-owned git metadata to the granted root.
+func (in *Inspector) InspectInRoot(ctx context.Context, path, boundary string) (Inspection, error) {
 	if err := os.MkdirAll(in.MirrorRoot, 0o700); err != nil {
 		return Inspection{}, err
 	}
@@ -135,14 +142,15 @@ func (in *Inspector) Inspect(ctx context.Context, path string) (Inspection, erro
 		return Inspection{}, err
 	}
 	defer os.RemoveAll(mirror)
-	return in.inspect(ctx, path, mirror)
+	r, _, err := in.inspectMirror(ctx, path, mirror, boundary)
+	return r, err
 }
 
 func newInspection() Inspection {
 	return Inspection{
 		Identity: Identity{Remotes: []Remote{}},
 		Status:   Status{Staged: []Change{}, Unstaged: []Change{}, Untracked: []string{}, Unmerged: []string{}},
-		History:  []Commit{}, Files: []string{}, Blockers: []Blocker{}, Findings: []Finding{}, Paths: []PathEntry{},
+		History:  []Commit{}, Files: []string{}, Blockers: []Blocker{}, Findings: []Finding{}, Paths: []PathEntry{}, SnapshotCandidates: []string{},
 	}
 }
 
@@ -170,44 +178,64 @@ func (r *Inspection) stopped() bool {
 }
 
 func (in *Inspector) inspect(ctx context.Context, path, mirror string) (Inspection, error) {
-	r, _, err := in.inspectMirror(ctx, path, mirror)
+	r, _, err := in.inspectMirror(ctx, path, mirror, "")
 	return r, err
 }
 
 // inspectMirror is inspect that also returns what the mirror was built from;
 // nil when a blocker stopped the inspection before the mirror was written.
-func (in *Inspector) inspectMirror(ctx context.Context, path, mirror string) (Inspection, *mirrorSource, error) {
+func (in *Inspector) inspectMirror(ctx context.Context, path, mirror, boundary string) (Inspection, *mirrorSource, error) {
 	r := newInspection()
 	if !filepath.IsAbs(path) {
 		return r, nil, fmt.Errorf("path %q is not absolute", path)
 	}
-	root, err := filepath.EvalSymlinks(filepath.Clean(path))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			r.Identity.Path = filepath.Clean(path)
-			r.block(BlockNotRepository, r.Identity.Path)
+	var root string
+	var err error
+	if boundary != "" {
+		root, err = resolveImportDirectory(boundary, path, true)
+		if err != nil {
+			r.Identity.Path = path
+			blocker := importPathBlocker(path, err)
+			r.block(blocker.Code, blocker.Paths...)
 			return r, nil, nil
 		}
-		return r, nil, err
+	} else {
+		root, err = filepath.EvalSymlinks(filepath.Clean(path))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				r.Identity.Path = filepath.Clean(path)
+				r.block(BlockNotRepository, r.Identity.Path)
+				return r, nil, nil
+			}
+			return r, nil, err
+		}
 	}
 	r.Identity.Path = root
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		r.block(BlockNotRepository, root)
 		return r, nil, nil
 	}
-	l, b := readLayout(root)
+	l, b := readLayout(root, boundary)
 	r.Identity.GitDir, r.Identity.CommonDir = l.gitDir, l.commonDir
 	if b != nil {
 		r.block(b.Code, b.Paths...)
 		return r, nil, nil
 	}
 
-	repo, err := readConfigFile(l.commonDir, filepath.Join(l.commonDir, "config"))
+	repo, blocker, err := in.Config.readRepoConfig(l.commonDir, "config", boundary)
+	if blocker != nil {
+		r.block(blocker.Code, blocker.Paths...)
+		return r, nil, nil
+	}
 	if err != nil {
 		return r, nil, err
 	}
 	if repo.boolean("extensions.worktreeConfig") {
-		wt, err := readConfigFile(l.gitDir, filepath.Join(l.gitDir, "config.worktree"))
+		wt, blocker, err := in.Config.readRepoConfig(l.gitDir, "config.worktree", boundary)
+		if blocker != nil {
+			r.block(blocker.Code, blocker.Paths...)
+			return r, nil, nil
+		}
 		if err != nil {
 			return r, nil, err
 		}
@@ -265,7 +293,7 @@ func (in *Inspector) inspectMirror(ctx context.Context, path, mirror string) (In
 		return r, nil, err
 	}
 	r.Files = instructionFiles(root)
-	r.Fingerprint, r.Paths = fingerprint(root, r.Identity.Head, idx, r.Status, links)
+	r.Fingerprint, r.Paths, r.SnapshotCandidates = fingerprint(root, r.Identity.Head, idx, r.Status, links)
 	return r, &src, nil
 }
 
@@ -731,7 +759,7 @@ func instructionFiles(root string) []string {
 // each changed or untracked path's mode, size and content as Lstat sees it.
 // It also returns each of those paths' entries, its index entries and its
 // state hashed apart, in path order.
-func fingerprint(root, head string, idx *index, st Status, links map[string]bool) (string, []PathEntry) {
+func fingerprint(root, head string, idx *index, st Status, links map[string]bool) (string, []PathEntry, []string) {
 	seen, untracked := map[string]bool{}, map[string]bool{}
 	var paths []string
 	add := func(p string) {
@@ -761,11 +789,17 @@ func fingerprint(root, head string, idx *index, st Status, links map[string]bool
 			own[e.path] = append(own[e.path], f)
 		}
 	}
+	candidates := []string{}
 	entries := make([]PathEntry, 0, len(paths))
 	for _, p := range paths {
 		state := []string{"under a link"}
 		if !underLink(links, path.Dir(p)) {
 			state = pathState(filepath.Join(root, filepath.FromSlash(p)))
+		}
+		if untracked[p] && (state[0] == "file" || state[0] == "exec") && ValidSelectionPath(p) && badPath(p) == "" {
+			if size, err := strconv.ParseInt(state[1], 10, 64); err == nil && size <= maxFileSize {
+				candidates = append(candidates, p)
+			}
 		}
 		f := append([]string{"path", p}, state...)
 		field(h, f...)
@@ -776,7 +810,7 @@ func fingerprint(root, head string, idx *index, st Status, links map[string]bool
 		field(one, f...)
 		entries = append(entries, PathEntry{Path: p, Untracked: untracked[p], Entry: hex.EncodeToString(one.Sum(nil))})
 	}
-	return hex.EncodeToString(h.Sum(nil)), entries
+	return hex.EncodeToString(h.Sum(nil)), entries, candidates
 }
 
 // field writes each part to h with its length before it.

@@ -330,7 +330,7 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT attempt,seq,time,kind,payload FROM events LIMIT 0",
 		"SELECT user,key,request_hash,response,created,project FROM idempotency LIMIT 0",
 		"SELECT hash,size,origin,created FROM artifacts LIMIT 0",
-		"SELECT project,canonical_path,common_dir,fingerprint,imported FROM project_sources LIMIT 0",
+		"SELECT project,canonical_path,common_dir,fingerprint,imported,import_root FROM project_sources LIMIT 0",
 		"SELECT id,project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created FROM source_snapshots LIMIT 0",
 		"SELECT snapshot,path,mode,artifact FROM snapshot_untracked LIMIT 0",
 		"SELECT snapshot,checks_json FROM tasks LIMIT 0",
@@ -352,6 +352,8 @@ func (s *Store) validateSchema(ctx context.Context) error {
 		"SELECT id,user,kind,name,credential_id,public_key,sign_count,aaguid,flags,transports,password_hash,created,last_used FROM credentials LIMIT 0",
 		"SELECT id,token_hash,user,credential,created,last_used,address FROM sessions LIMIT 0",
 		"SELECT code_hash,user,created,expires,used FROM enrollment_codes LIMIT 0",
+		"SELECT id,path,label,created FROM import_roots LIMIT 0",
+		"SELECT root,user,granted FROM import_root_grants LIMIT 0",
 		"SELECT default_mode FROM projects LIMIT 0",
 		"SELECT id,attempt,task_revision,snapshot,backend,mode,workspace,policy_version,generation,decision,decided_by,decided,expires,idempotency_key FROM permission_decisions LIMIT 0",
 	} {
@@ -366,12 +368,14 @@ func (s *Store) validateSchema(ctx context.Context) error {
 	return nil
 }
 
-// Scope names the project a request touches. The trusted coordinator must
-// derive it from the request's target, including for cached responses.
-type Scope struct{ ProjectID string }
+// Scope gates fresh mutations and cached replies on the target's current authorization.
+type Scope struct {
+	ProjectID    string
+	ImportRootID string
+}
 
 // Do commits a callback's writes and its response atomically. When scope is
-// non-nil, membership is checked in the transaction before reading the cache or
+// non-nil, membership or the root grant is checked before reading the cache or
 // running fn. Use nil only for requests touching no project, such as creating a
 // user or project. Repeats with the same user, key and hash return the original
 // bytes without running fn, provided the user is still authorized. The callback must be
@@ -387,7 +391,13 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 		return nil, err
 	}
 	defer tx.Rollback()
-	if scope != nil {
+	checkProject := scope != nil && (scope.ImportRootID == "" || scope.ProjectID != "")
+	if scope != nil && scope.ImportRootID != "" {
+		if _, err := grantedRootPath(ctx, tx, userID, scope.ImportRootID); err != nil {
+			return nil, err
+		}
+	}
+	if checkProject {
 		if err := requireMember(ctx, tx, userID, scope.ProjectID); err != nil {
 			return nil, err
 		}
@@ -397,7 +407,7 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 	var cachedProject sql.NullString
 	err = tx.QueryRowContext(ctx, "SELECT request_hash,response,project FROM idempotency WHERE user=? AND key=?", userID, key).Scan(&hash, &response, &cachedProject)
 	if err == nil {
-		if hash != requestHash || cachedProject.Valid != (scope != nil) || (scope != nil && cachedProject.String != scope.ProjectID) {
+		if hash != requestHash || cachedProject.Valid != checkProject || (checkProject && cachedProject.String != scope.ProjectID) {
 			return nil, ErrIdempotencyConflict
 		}
 		return response, nil
@@ -413,7 +423,7 @@ func (s *Store) Do(ctx context.Context, userID, key, requestHash string, scope *
 		response = []byte{}
 	}
 	var project any
-	if scope != nil {
+	if checkProject {
 		project = scope.ProjectID
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO idempotency(user,key,request_hash,response,created,project) VALUES(?,?,?,?,?,?)", userID, key, requestHash, response, now(), project); err != nil {

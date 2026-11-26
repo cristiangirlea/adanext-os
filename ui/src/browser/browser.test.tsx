@@ -143,12 +143,50 @@ describe("the signed-in browser", () => {
     await signInWithPassword(a);
     fireEvent.click(await screen.findByText("sam's task"));
     await screen.findByRole("tablist", { name: "Work area" });
-    for (const name of ["Import a repository", "New task", "Accounts", "Network access", "Quit Ada and stop work", "Start"]) expect(screen.queryByRole("button", { name })).toBeNull();
+    for (const name of ["Import roots", "New task", "Accounts", "Network access", "Quit Ada and stop work", "Start"]) expect(screen.queryByRole("button", { name })).toBeNull();
     expect(screen.queryByRole("region", { name: "Experience" })).toBeNull();
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(a.requests.filter((r) => r.url.startsWith("/v1/experience"))).toEqual([]);
+  });
+
+  it("inspects a granted folder and imports it without offering a URL", async () => {
+    const a = adad();
+    a.refusals["GET /v1/import-roots"] = { status: 200, body: [{ id: "r", label: "Source folders" }] };
+    a.refusals["GET /v1/import-roots/r/browse"] = { status: 200, body: [{ name: "repo", path: "repo" }] };
+    a.refusals["POST /v1/import-roots/r/inspect"] = { status: 200, body: { blockers: [], findings: [{ code: "provider_configuration", paths: [".mcp.json"], count: 1 }], untracked: ["notes.txt"] } };
+    a.refusals["POST /v1/import-roots/r/import"] = { status: 201, body: { id: "p3", name: "repo", role: "owner" } };
+    await signInWithPassword(a);
+    fireEvent.click(await screen.findByRole("button", { name: "Import a repository" }));
+    const d = within(await screen.findByRole("dialog", { name: "Import a repository" }));
+    expect(d.queryByRole("textbox")).toBeNull();
+    fireEvent.click(await d.findByRole("button", { name: "Source folders" }));
+    fireEvent.click(await d.findByRole("button", { name: "repo" }));
+    await waitFor(() => expect(a.requests.some(r => r.url.endsWith("browse?path=repo"))).toBe(true));
+    fireEvent.click(d.getByRole("button", { name: "Inspect" }));
+    expect(await d.findByText("notes.txt")).toBeTruthy();
+    expect(d.getByText(".mcp.json")).toBeTruthy();
+    expect(d.getAllByRole("textbox")).toEqual([d.getByLabelText("Project name")]);
+    fireEvent.click(d.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(a.requests.filter(r => r.url.endsWith("/r/import")).map(r => JSON.parse(r.body))).toEqual([{ path: "repo", name: "repo" }]));
+  });
+
+  it("edits a root's grants and removes it through the desktop adapter", async () => {
+    const a = adad();
+    a.accountList = [{ id: "u1", name: "Member" } as typeof a.accountList[number]];
+    window.ada = a.bridge();
+    render(<Root client={createBridgeClient()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Import roots" }));
+    const d = within(await screen.findByRole("dialog", { name: "Import roots" }));
+    fireEvent.change(d.getByLabelText("Folder label"), { target: { value: "Projects" } });
+    fireEvent.click(d.getByRole("button", { name: "Add folder" }));
+    fireEvent.click(await d.findByRole("checkbox", { name: "Member" }));
+    await waitFor(() => expect((d.getByRole("checkbox", { name: "Member" }) as HTMLInputElement).checked).toBe(true));
+    fireEvent.click(d.getByRole("checkbox", { name: "Member" }));
+    await waitFor(() => expect((d.getByRole("checkbox", { name: "Member" }) as HTMLInputElement).checked).toBe(false));
+    fireEvent.click(d.getByRole("button", { name: "Remove Projects" }));
+    await waitFor(() => expect(d.queryByRole("checkbox")).toBeNull());
   });
 
   it("the desktop, by contrast, reads the experience card through the bridge", async () => {

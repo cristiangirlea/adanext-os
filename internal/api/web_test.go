@@ -321,7 +321,7 @@ func TestEveryLocalRouteIsInExactlyOneNetworkList(t *testing.T) {
 		}
 	}
 	count := map[string]int{}
-	for _, list := range [][]string{networkReads, networkLocalOnly, networkOwner, networkLater} {
+	for _, list := range [][]string{networkChooser, networkReads, networkLocalOnly, networkOwner, networkLater} {
 		for _, pattern := range list {
 			count[pattern]++
 		}

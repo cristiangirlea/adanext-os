@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 )
 
 // Refusal codes for a selected untracked path.
@@ -83,6 +84,11 @@ type Capture struct {
 // inspects it again: a different fingerprint, or a selected file that no
 // longer holds what was read, is ErrSourceChanged and nothing is returned.
 func (in *Inspector) Capture(ctx context.Context, path string, sel Selection) (Capture, error) {
+	return in.CaptureInRoot(ctx, path, "", sel)
+}
+
+// CaptureInRoot applies the import boundary to both reads of the repository.
+func (in *Inspector) CaptureInRoot(ctx context.Context, path, boundary string, sel Selection) (Capture, error) {
 	if err := os.MkdirAll(in.MirrorRoot, 0o700); err != nil {
 		return Capture{}, err
 	}
@@ -91,7 +97,7 @@ func (in *Inspector) Capture(ctx context.Context, path string, sel Selection) (C
 		return Capture{}, err
 	}
 	defer os.RemoveAll(mirror)
-	first, err := in.inspect(ctx, path, mirror)
+	first, _, err := in.inspectMirror(ctx, path, mirror, boundary)
 	if err != nil {
 		return Capture{}, err
 	}
@@ -127,9 +133,12 @@ func (in *Inspector) Capture(ctx context.Context, path string, sel Selection) (C
 	if in.beforeRecheck != nil {
 		in.beforeRecheck()
 	}
-	second, err := in.Inspect(ctx, path)
+	second, err := in.InspectInRoot(ctx, path, boundary)
 	if err != nil {
 		return Capture{}, err
+	}
+	if boundary != "" && len(second.Blockers) > 0 {
+		return Capture{}, &BlockedError{Blockers: second.Blockers}
 	}
 	if second.Fingerprint != first.Fingerprint || second.Identity.Path != root || second.Identity.CommonDir != first.Identity.CommonDir || len(second.Blockers) > 0 {
 		return Capture{}, ErrSourceChanged
@@ -232,6 +241,11 @@ func init() {
 			reserved[prefix+digit] = true
 		}
 	}
+}
+
+// ValidSelectionPath checks whether a single path can be sent in a snapshot selection.
+func ValidSelectionPath(path string) bool {
+	return path != "" && len(path) <= 4096 && utf8.ValidString(path) && !strings.ContainsRune(path, 0)
 }
 
 // badPath is why p cannot name a work-tree file on every system Ada runs

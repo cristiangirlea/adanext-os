@@ -47,6 +47,45 @@ func mustPrepare(t *testing.T, w *Workspaces, dir string, c Capture, id string) 
 	return m
 }
 
+func TestChooserWorkspaceRechecksAlternateBoundary(t *testing.T) {
+	trustImportRoots(t)
+	root := tempDir(t)
+	git(t, root, "init", "-q", "-b", "main")
+	git(t, root, "commit", "-q", "--allow-empty", "-m", "start")
+	w := newWorkspaces(t)
+	c, err := w.Inspector.CaptureInRoot(t.Context(), root, root, Selection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(root, ".git", "objects", "info", "alternates"),
+		filepath.ToSlash(filepath.Join(newRepo(t, nil), ".git", "objects"))+"\n")
+	m := Manifest{Project: "p", Task: "t", Attempt: "a", Snapshot: "s", BaseCommit: c.Inspection.Identity.Head, Executor: "local", Policy: "auto"}
+	_, err = w.PrepareInRoot(t.Context(), root, root, m, changesOf(c))
+	blocked, ok := errors.AsType[*BlockedError](err)
+	if !ok || len(blocked.Blockers) != 1 || blocked.Blockers[0].Code != BlockEscapingLink {
+		t.Fatalf("workspace did not refuse the outside alternate: %v", err)
+	}
+}
+
+func TestChooserWorkspaceRefusesBlockerAfterBuildingMirror(t *testing.T) {
+	trustImportRoots(t)
+	root := tempDir(t)
+	git(t, root, "init", "-q", "-b", "main")
+	git(t, root, "commit", "-q", "--allow-empty", "-m", "start")
+	w := newWorkspaces(t)
+	c, err := w.Inspector.CaptureInRoot(t.Context(), root, root, Selection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(root, ".gitattributes"), "*.bin filter=lfs\n")
+	m := Manifest{Project: "p", Task: "t", Attempt: "a", Snapshot: "s", BaseCommit: c.Inspection.Identity.Head, Executor: "local", Policy: "auto"}
+	_, err = w.PrepareInRoot(t.Context(), root, root, m, changesOf(c))
+	blocked, ok := errors.AsType[*BlockedError](err)
+	if !ok || len(blocked.Blockers) != 1 || blocked.Blockers[0].Code != BlockLFS {
+		t.Fatalf("workspace did not refuse the LFS attributes: %v", err)
+	}
+}
+
 // files lists the regular files under dir.
 func files(t *testing.T, dir string) []string {
 	t.Helper()

@@ -43,7 +43,7 @@ export interface BridgeOptions {
   finishQuit?: () => Promise<void>;
   // Opens the native folder dialog for the calling window: the chosen path, or null. A path
   // enters only this way (decisions log, 2026-10-20).
-  chooseFolder?: (event: BridgeEvent) => Promise<string | null>;
+  chooseFolder?: (event: BridgeEvent, title: string) => Promise<string | null>;
   // Opens the native file dialogs for the listener's certificate and key: their paths, or null
   // when the owner cancelled one. The paths go to adad and never to the renderer.
   chooseCertificate?: (event: BridgeEvent) => Promise<{ certificate: string; key: string } | null>;
@@ -190,6 +190,11 @@ function isListenerSetting(value: unknown): boolean {
     value.name.length <= maxListenerField
   );
 }
+function isChooserPath(value: unknown): value is string {
+  return isCommitPath(value) && !/[\uD800-\uDFFF]/u.test(value) && (value === "" ||
+    (!/[:\\\0]/.test(value) && value.split("/").every(part => part !== "" && part !== "." && part !== "..")));
+}
+
 // A path inside a commit, as the files route takes it: never a host path, which it cannot reach.
 function isCommitPath(value: unknown): value is string {
   return typeof value === "string" && value.length <= maxCommitPath && !value.includes("\u0000");
@@ -311,7 +316,7 @@ export function createBridge(options: BridgeOptions): Bridge {
 
   const chooseFolder = async (event: BridgeEvent): Promise<BridgeResult<unknown>> => {
     if (!options.chooseFolder) return refused("malformed_call", "this shell has no folder dialog");
-    const chosen = await options.chooseFolder(event);
+    const chosen = await options.chooseFolder(event, "Import a repository");
     if (chosen === null) return { ok: true, value: null };
     if (!isLocalFolder(chosen)) return refused("malformed_call", "the folder must be a local absolute path");
     for (const [h, entry] of folders) if (entry.expires <= now()) folders.delete(h);
@@ -373,6 +378,47 @@ export function createBridge(options: BridgeOptions): Bridge {
           }
           return result;
         }
+        case "importRoots":
+          if (args.length !== 0) return bad();
+          return forward({ method: "GET", path: "/v1/import-roots", limit: listingLimit });
+        case "browseRoot": {
+          if (args.length !== 2 || !isId(args[0]) || !isChooserPath(args[1])) return bad();
+          const path = `/v1/import-roots/${args[0]}/browse?path=${encodeURIComponent(args[1])}`;
+          return send(async (socket) => {
+            let truncated = false;
+            const directories = await call(socket, { method: "GET", path, limit: listingLimit, onHeaders: (h) => { truncated = h["x-ada-truncated"] === "true"; } });
+            return { directories, truncated };
+          });
+        }
+        case "inspectInRoot":
+          if (args.length !== 2 || !isId(args[0]) || !isChooserPath(args[1])) return bad();
+          return forward({ method: "POST", path: `/v1/import-roots/${args[0]}/inspect`, body: { path: args[1] }, limit: changesLimit });
+        case "importFromRoot":
+          if ((args.length !== 2 && args.length !== 3) || !isId(args[0]) || !isChooserPath(args[1]) || (args.length === 3 && (typeof args[2] !== "string" || args[2].length > 200))) return bad();
+          return forward({ method: "POST", path: `/v1/import-roots/${args[0]}/import`, body: { path: args[1], name: args[2] }, idempotent: true });
+        case "projectUntracked":
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          return forward({ method: "GET", path: `/v1/projects/${args[0]}/untracked`, limit: changesLimit });
+        case "allImportRoots":
+          if (args.length !== 0) return bad();
+          return send(async (socket) => {
+            const roots = await call(socket, { method: "GET", path: "/v1/import-roots/all", limit: listingLimit }) as { id: string; label: string; grants: string[] }[];
+            return roots.map(({ id, label, grants }) => ({ id, label, grants }));
+          });
+        case "addImportRoot": {
+          if (!options.chooseFolder || args.length > 1 || (args.length === 1 && (typeof args[0] !== "string" || args[0].length > 200))) return bad();
+          const chosen = await options.chooseFolder(event, "Add an import root");
+          if (chosen === null) return { ok: true, value: null };
+          if (!isLocalFolder(chosen)) return bad();
+          return forward({ method: "POST", path: "/v1/import-roots", body: { path: chosen, label: args[0] }, idempotent: true });
+        }
+        case "removeImportRoot":
+          if (args.length !== 1 || !isId(args[0])) return bad();
+          return forward({ method: "DELETE", path: `/v1/import-roots/${args[0]}`, idempotent: true });
+        case "grantImportRoot":
+        case "revokeImportRoot":
+          if (args.length !== 2 || !isId(args[0]) || !isId(args[1])) return bad();
+          return forward({ method: method === "grantImportRoot" ? "PUT" : "DELETE", path: `/v1/import-roots/${args[0]}/grants/${args[1]}`, idempotent: true });
         case "chooseFolder":
           if (args.length !== 0) return bad();
           return chooseFolder(event);

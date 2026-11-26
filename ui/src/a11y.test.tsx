@@ -42,6 +42,15 @@ async function renderWithPalette() {
 }
 
 describe("accessibility", () => {
+  it("labels the import root settings and folder dialog action", async () => {
+    render(<App client={new FakeClient()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Import roots" }));
+    await flush();
+    expect(screen.getByRole("dialog", { name: "Import roots" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add folder" })).toBeTruthy();
+    expect(Array.from(document.querySelectorAll(controls)).filter(el => !nameOf(el))).toEqual([]);
+  });
+
   it("names every control", async () => {
     await renderWithPalette();
     const unnamed = Array.from(document.querySelectorAll(controls)).filter((el) => nameOf(el) === "");

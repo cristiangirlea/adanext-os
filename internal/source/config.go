@@ -97,6 +97,66 @@ func readConfigFile(base, path string) (*config, error) {
 	return c, nil
 }
 
+func (cf ConfigFiles) readRepoConfig(base, name, boundary string) (*config, *Blocker, error) {
+	file := filepath.Join(base, name)
+	if boundary != "" {
+		var b *Blocker
+		if file, b = resolveWithinImportRoot(boundary, file, false, true); b != nil {
+			return nil, b, nil
+		}
+	}
+	c, err := readConfigFile(base, file)
+	if err != nil || boundary == "" {
+		return c, nil, err
+	}
+	for i := range c.entries {
+		entry := &c.entries[i]
+		if entry.section != "core" || entry.subsection != "" ||
+			(entry.name != "excludesfile" && entry.name != "attributesfile") {
+			continue
+		}
+		path := entry.value
+		if tail, ok := strings.CutPrefix(path, "~/"); ok && cf.Home != "" {
+			path = filepath.Join(cf.Home, filepath.FromSlash(tail))
+		}
+		if !filepath.IsAbs(path) {
+			return nil, &Blocker{Code: BlockEscapingLink, Paths: []string{entry.value}}, nil
+		}
+		path, b := importPointerPath(base, path, boundary)
+		if b != nil {
+			return nil, b, nil
+		}
+		target, b := resolveWithinImportRoot(boundary, path, false, true)
+		if b != nil {
+			return nil, b, nil
+		}
+		entry.value = target
+	}
+	for _, entry := range c.entries {
+		if (entry.section != "include" && entry.section != "includeif") || entry.name != "path" || !entry.hasValue {
+			continue
+		}
+		value := entry.value
+		if tail, ok := strings.CutPrefix(value, "~/"); ok {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, nil, err
+			}
+			value = filepath.Join(home, filepath.FromSlash(tail))
+		} else if strings.HasPrefix(value, "~") || strings.HasPrefix(value, "%(") {
+			return nil, &Blocker{Code: BlockEscapingLink, Paths: []string{value}}, nil
+		}
+		path, b := importPointerPath(base, value, boundary)
+		if b != nil {
+			return nil, b, nil
+		}
+		if _, b := resolveWithinImportRoot(boundary, path, false, true); b != nil {
+			return nil, b, nil
+		}
+	}
+	return c, nil, nil
+}
+
 func isKeyChar(b byte) bool {
 	return b == '-' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }

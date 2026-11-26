@@ -559,9 +559,11 @@ func ResolveWorkdirNoFollow(worktree, rel string) (string, error) {
 			}
 		}
 	}
-	if err := openDirNoFollow(worktree, rel); err != nil {
+	dir, err := holdDirNoFollow(worktree, rel)
+	if err != nil {
 		return "", err
 	}
+	defer dir.Close()
 	if rel == "." {
 		return worktree, nil
 	}

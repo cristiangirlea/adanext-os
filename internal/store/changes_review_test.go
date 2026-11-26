@@ -25,7 +25,7 @@ func reviewTask(t *testing.T, s *Store, state State, attemptState string) {
 	for _, u := range []string{"actor", "creator", "reviewer"} {
 		execute(t, s, "INSERT INTO project_members VALUES ('rp', ?, 'member', 'added')", u)
 	}
-	execute(t, s, `INSERT INTO project_sources VALUES ('rp','/source','/source/.git','f','now')`)
+	execute(t, s, `INSERT INTO project_sources(project,canonical_path,common_dir,fingerprint,imported) VALUES ('rp','/source','/source/.git','f','now')`)
 	execute(t, s, `INSERT INTO artifacts VALUES (?,0,'test','now')`, hashOf('e'))
 	execute(t, s, `INSERT INTO source_snapshots(id,project,base_commit,fingerprint,staged_patch,unstaged_patch,created_by,created) VALUES ('rs','rp',?,'f',?,?,'owner','now')`, strings.Repeat("c", 40), hashOf('e'), hashOf('e'))
 	execute(t, s, `INSERT INTO tasks(id,project,created_by,objective,acceptance_criteria,state,revision,created,updated,snapshot) VALUES ('rt','rp','creator','objective','criteria',?,4,'now','now','rs')`, state)

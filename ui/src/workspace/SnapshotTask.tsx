@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AdaError, type AdaClient, type Capabilities, type ErrorDetails, type ExecutionPolicy, type NewTask, type ProjectSummary, type Snapshot } from "../client/api";
 import { BusyButton } from "../motion/parts";
 import { ErrorLine, shown, type Shown } from "./errors";
 import { BlockerList } from "./ImportFlow";
+import { sensitive } from "./sensitive";
+import { PathText } from "../text/Marked";
 import { TaskForm } from "./TaskForm";
 
 // The browser owner's new task: a snapshot of an imported project, taken by the project's id,
@@ -31,13 +33,31 @@ export function SnapshotTask({
   const [details, setDetails] = useState<ErrorDetails | undefined>(undefined);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
 
+  const [files, setFiles] = useState<{ project: string; paths: string[]; selected: string[] } | null>(null);
+  useEffect(() => {
+    let live = true;
+    setFiles(null);
+    setError(null);
+    setDetails(undefined);
+    if (project) client.projectUntracked(project).then(paths => {
+      if (live) setFiles({ project, paths, selected: paths.length > 1000 ? [] : paths.filter(p => !sensitive(p)) });
+    }, e => {
+      if (live) {
+        setError(shown(e));
+        if (e instanceof AdaError) setDetails(e.details);
+      }
+    });
+    return () => { live = false; };
+  }, [client, project]);
+  const loaded = files?.project === project ? files : null;
+
   const take = async () => {
-    if (project === "" || taking) return;
+    if (!loaded || loaded.selected.length > 1000 || taking) return;
     setTaking(true);
     setError(null);
     setDetails(undefined);
     try {
-      setSnapshot(await client.snapshotProject(project, { untracked: [], include_sensitive: [], include_changes: includeChanges }));
+      setSnapshot(await client.snapshotProject(project, { untracked: loaded.selected, include_sensitive: loaded.selected.filter(sensitive), include_changes: includeChanges }));
     } catch (e) {
       setError(shown(e));
       if (e instanceof AdaError) setDetails(e.details);
@@ -59,14 +79,14 @@ export function SnapshotTask({
   }
   return (
     <div className="task-form" role="group" aria-label="Snapshot">
-      <p>A task runs on a snapshot of its project's repository. Take one here; untracked files stay out of it, since only the desktop can choose them.</p>
+      <p>A task runs on a snapshot of its project's repository. Choose the files to include.</p>
       {projects.length === 0 ? (
         <p className="empty">You are not a member of any project yet.</p>
       ) : (
         <>
           <label>
             Project
-            <select value={project} onChange={(e) => setProject(e.target.value)}>
+            <select disabled={taking} value={project} onChange={(e) => setProject(e.target.value)}>
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -78,8 +98,18 @@ export function SnapshotTask({
             <input type="checkbox" checked={includeChanges} onChange={(e) => setIncludeChanges(e.target.checked)} />
             Carry the repository's staged and unstaged changes
           </label>
+          {loaded && loaded.paths.length > 0 && <fieldset disabled={taking}>
+            <legend>Untracked files</legend>
+            {loaded.paths.length > 1000 && <p>Choose up to 1,000 files.</p>}
+            {loaded.paths.map(path => <label className="inline" key={path}>
+              <input type="checkbox" checked={loaded.selected.includes(path)} onChange={e => {
+                const selected = e.target.checked ? [...loaded.selected, path] : loaded.selected.filter(p => p !== path);
+                setFiles({ ...loaded, selected });
+              }} /><PathText path={path} />{sensitive(path) && <span className="tag tag-warn">looks like a credential</span>}
+            </label>)}
+          </fieldset>}
           <div>
-            <BusyButton busy={taking} disabled={taking} onClick={() => void take()}>
+            <BusyButton busy={taking} disabled={taking || !loaded || loaded.selected.length > 1000} onClick={() => void take()}>
               Take a snapshot
             </BusyButton>
           </div>

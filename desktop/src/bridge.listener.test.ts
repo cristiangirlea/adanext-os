@@ -174,3 +174,25 @@ describe("the listener methods through the bridge", () => {
     expect(seen).toHaveLength(0);
   });
 });
+
+it("posts only the main dialog's root and returns labels without host paths", async () => {
+  const root = { id: "r", label: "Folder", grants: [] };
+  const { bridge, seen } = await bridgeTo((s, res) => json(res, 200, s.method === "GET" ? [{ ...root, path: dir }] : root), { chooseFolder: async () => dir });
+  expect(await bridge.handle(event(), "addImportRoot", ["Folder"])).toEqual({ ok: true, value: root });
+  expect(JSON.parse(seen[0]!.body)).toEqual({ path: dir, label: "Folder" });
+  expect(seen[0]!.headers["idempotency-key"]).toBeTruthy();
+  expect(await bridge.handle(event(), "allImportRoots", [])).toEqual({ ok: true, value: [root] });
+});
+
+it("rejects malformed chooser paths before forwarding", async () => {
+  const { bridge, seen } = await bridgeTo((_s, res) => json(res, 200, []));
+  for (const method of ["browseRoot", "inspectInRoot", "importFromRoot"]) {
+    for (const path of ["/absolute", "//host/share", "C:relative", "C:/absolute", "a/../b", "a\\b", "a\0b", "\uD800", "\uDC00"]) {
+      expect(await bridge.handle(event(), method, ["root", path])).toMatchObject({ ok: false, error: { code: "malformed_call" } });
+    }
+    for (const path of ["", "repo-\u{1f680}"]) {
+      expect(await bridge.handle(event(), method, ["root", path])).toMatchObject({ ok: true });
+    }
+  }
+  expect(seen).toHaveLength(6);
+});

@@ -47,6 +47,7 @@ export interface Call {
   limit?: number;
   // A 2xx may come without a body; the call then resolves null.
   emptyOk?: boolean;
+  onHeaders?: (headers: http.IncomingHttpHeaders) => void;
   timeoutMs?: number;
 }
 
@@ -260,6 +261,7 @@ export function call(socketPath: string, request: Call): Promise<unknown> {
             reject(new BadResponse(`adad answered ${status} without a body`));
             return;
           }
+          request.onHeaders?.(res.headers);
           resolve(body ?? null);
         },
         (error: BadResponse) => reject(ok ? error : new Refusal(`http_${status}`, status, `adad answered ${status}: ${error.message}`)),

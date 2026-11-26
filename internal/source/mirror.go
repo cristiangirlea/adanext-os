@@ -83,7 +83,10 @@ func writeMirror(mirror string, src mirrorSource) error {
 	if info, err := os.Lstat(filepath.Join(l.commonDir, "objects")); err != nil || !info.IsDir() || isLink(filepath.Join(l.commonDir, "objects"), info) {
 		return errors.New("objects is not a directory")
 	}
-	objects := filepath.ToSlash(filepath.Join(l.commonDir, "objects"))
+	objects := filepath.ToSlash(l.objects)
+	if l.boundary != "" {
+		objects = quoteConfig(objects)
+	}
 	if err := os.WriteFile(filepath.Join(mirror, "objects", "info", "alternates"), []byte(objects+"\n"), 0o600); err != nil {
 		return err
 	}

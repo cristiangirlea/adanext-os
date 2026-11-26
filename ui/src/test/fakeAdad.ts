@@ -31,7 +31,7 @@ export class FakeAdad {
   tasks: Task[];
   projectList: ProjectSummary[] = [];
   matrix = capabilities();
-  // Refusals by route, such as "POST /v1/tasks/t1/ready".
+  // Overrides by route, such as "POST /v1/tasks/t1/ready".
   refusals: Record<string, Answer> = {};
   requests: Seen[] = [];
   sources: FakeSource[] = [];
@@ -54,6 +54,7 @@ export class FakeAdad {
   // What a stop would end now; stopped once a stop was accepted, finished once the shell quit.
   stopCounts: StopCounts = { running: 0, queued: 0, others_running: 0, others_queued: 0 };
   stopped = false;
+  roots: { id: string; label: string; grants: string[] }[] = [];
   snapshots = 0;
   finished = false;
   private bridgeListeners = new Map<string, Set<(message: StreamMessage) => void>>();
@@ -78,6 +79,20 @@ export class FakeAdad {
       return { status: 200, body: all.filter((e) => e.seq > after).slice(0, this.pageSize).map((e) => ({ attempt: events[1], time: "", ...e })) };
     }
     if (path === "/v1/coordinator/stop") return this.stop(method, body);
+    if (method === "GET" && path.endsWith("/untracked")) return { status: 200, body: [] };
+    if (method === "GET" && path === "/v1/import-roots/all") return { status: 200, body: this.roots };
+    if (method === "POST" && path === "/v1/import-roots") {
+      const root = { id: "r", label: JSON.parse(body).label, grants: [] };
+      this.roots.push(root);
+      return { status: 201, body: root };
+    }
+    const [, rootId, account] = /^\/v1\/import-roots\/([^/]+)(?:\/grants\/([^/]+))?$/.exec(path) ?? [];
+    const root = this.roots.find(r => r.id === rootId);
+    if (root && (method === "DELETE" || method === "PUT")) {
+      if (!account) this.roots = this.roots.filter(r => r !== root);
+      else root.grants = method === "PUT" ? [...root.grants, account] : root.grants.filter(id => id !== account);
+      return { status: 200, body: {} };
+    }
     const snapshot = /^\/v1\/projects\/([^/]+)\/snapshots$/.exec(path);
     if (method === "POST" && snapshot) {
       const project = decodeURIComponent(snapshot[1]!);
@@ -273,6 +288,11 @@ export class FakeAdad {
       ready: (id: string, revision: number) => result("POST", `/v1/tasks/${id}/ready`, { "if-match": `"${revision}"`, "idempotency-key": "bridge" }),
       cancel: (id: string, revision: number) => result("POST", `/v1/tasks/${id}/cancel`, { "if-match": `"${revision}"`, "idempotency-key": "bridge" }),
       onQuitRequested: () => () => {},
+      allImportRoots: () => result("GET", "/v1/import-roots/all"),
+      addImportRoot: (label: string) => result("POST", "/v1/import-roots", {}, { label }),
+      removeImportRoot: (id: string) => result("DELETE", `/v1/import-roots/${id}`),
+      grantImportRoot: (id: string, user: string) => result("PUT", `/v1/import-roots/${id}/grants/${user}`),
+      revokeImportRoot: (id: string, user: string) => result("DELETE", `/v1/import-roots/${id}/grants/${user}`),
       listAccounts: () => result("GET", "/v1/accounts"),
       stopCounts: () => result("GET", "/v1/coordinator/stop"),
       stop: (others: number) => result("POST", "/v1/coordinator/stop", { "idempotency-key": "bridge" }, { others }),

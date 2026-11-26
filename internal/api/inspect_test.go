@@ -105,3 +105,20 @@ func TestInspectFailureIsAnInternalError(t *testing.T) {
 		t.Fatalf("inspect = %d %s", status, data)
 	}
 }
+
+func TestHostPathImportsRefuseGitURLs(t *testing.T) {
+	f := newFixture(t)
+	for _, route := range []string{"/v1/projects", "/v1/projects/inspect"} {
+		for _, p := range []string{"https://example.invalid/repo", "git@example.invalid:repo", "x://host/repo"} {
+			body, _ := json.Marshal(map[string]string{"path": p})
+			status, data := f.request(t, "POST", route, "import", "", body)
+			if status != 400 || !strings.Contains(string(data), "bad_request") {
+				t.Fatal(route, p, status, string(data))
+			}
+		}
+	}
+}
+
+func (f *fakeInspector) InspectInRoot(ctx context.Context, path, root string) (source.Inspection, error) {
+	return f.Inspect(ctx, path)
+}

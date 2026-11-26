@@ -11,7 +11,7 @@ import (
 func TestArtifactMigrationFromEmptyReachesVersionThree(t *testing.T) {
 	s := openTestStore(t)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 15 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 16 {
 		t.Fatalf("version %d: %v", version, err)
 	}
 }
@@ -255,7 +255,7 @@ func TestAnArtifactStoredBeforeEveryOriginWasKeptStaysReadableByItsAttempt(t *te
 	s := openTestStore(t)
 	path := s.path
 	hash := strings.Repeat("ab", 32)
-	for _, q := range []string{"DROP TABLE permission_decisions", "ALTER TABLE projects DROP COLUMN default_mode", "DROP TABLE enrollment_codes", "DROP TABLE sessions", "DROP TABLE credentials", "DROP INDEX users_webauthn_handle", "ALTER TABLE users DROP COLUMN webauthn_handle", "ALTER TABLE users DROP COLUMN password_allowed", "ALTER TABLE users DROP COLUMN disabled", "DROP TABLE artifact_refs", "DELETE FROM schema_migrations WHERE version>=13", "PRAGMA user_version=12"} {
+	for _, q := range []string{"DROP TABLE import_root_grants", "DROP TABLE import_roots", "ALTER TABLE project_sources DROP COLUMN import_root", "DROP TABLE permission_decisions", "ALTER TABLE projects DROP COLUMN default_mode", "DROP TABLE enrollment_codes", "DROP TABLE sessions", "DROP TABLE credentials", "DROP INDEX users_webauthn_handle", "ALTER TABLE users DROP COLUMN webauthn_handle", "ALTER TABLE users DROP COLUMN password_allowed", "ALTER TABLE users DROP COLUMN disabled", "DROP TABLE artifact_refs", "DELETE FROM schema_migrations WHERE version>=13", "PRAGMA user_version=12"} {
 		execute(t, s, q)
 	}
 	execute(t, s, "INSERT INTO artifacts(hash,size,origin,created) VALUES(?,?,?,?)", hash, 12, "attempt:old:final", "now")
