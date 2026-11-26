@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -115,6 +116,23 @@ func (wb *web) static(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// uiTypes are the content types of the files a UI build ships, fixed here because on Windows
+// mime.TypeByExtension takes the machine's registry over Go's own table.
+var uiTypes = map[string]string{
+	".html":  "text/html; charset=utf-8",
+	".js":    "text/javascript; charset=utf-8",
+	".mjs":   "text/javascript; charset=utf-8",
+	".css":   "text/css; charset=utf-8",
+	".json":  "application/json",
+	".map":   "application/json",
+	".svg":   "image/svg+xml",
+	".png":   "image/png",
+	".ico":   "image/x-icon",
+	".woff":  "font/woff",
+	".woff2": "font/woff2",
+	".txt":   "text/plain; charset=utf-8",
+}
+
 // serveFile answers name when it is a regular file of the UI, and reports whether it did.
 func (wb *web) serveFile(w http.ResponseWriter, r *http.Request, name string) bool {
 	f, err := wb.ui.Open(name)
@@ -133,6 +151,9 @@ func (wb *web) serveFile(w http.ResponseWriter, r *http.Request, name string) bo
 			return false
 		}
 		content = bytes.NewReader(data)
+	}
+	if ct, ok := uiTypes[strings.ToLower(path.Ext(name))]; ok {
+		w.Header().Set("Content-Type", ct)
 	}
 	http.ServeContent(w, r, name, info.ModTime(), content)
 	return true
