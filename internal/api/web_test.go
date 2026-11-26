@@ -220,20 +220,20 @@ func TestEveryResponseCarriesTheContentSecurityPolicy(t *testing.T) {
 
 func TestUIFilesHaveTheSameContentTypeOnEveryMachine(t *testing.T) {
 	want := map[string]string{
-		"index.html":          "text/html; charset=utf-8",
-		"assets/app.js":       "text/javascript; charset=utf-8",
-		"assets/app.mjs":      "text/javascript; charset=utf-8",
-		"assets/app.css":      "text/css; charset=utf-8",
-		"assets/app.js.map":   "application/json",
-		"assets/data.json":    "application/json",
-		"assets/logo.svg":     "image/svg+xml",
-		"assets/logo.png":     "image/png",
-		"favicon.ico":         "image/x-icon",
-		"assets/font.woff":    "font/woff",
-		"assets/font.woff2":   "font/woff2",
-		"robots.txt":          "text/plain; charset=utf-8",
-		"assets/APP.JS":       "text/javascript; charset=utf-8",
-		"assets/unknown.blob": "application/octet-stream",
+		"index.html":        "text/html; charset=utf-8",
+		"assets/app.js":     "text/javascript; charset=utf-8",
+		"assets/app.mjs":    "text/javascript; charset=utf-8",
+		"assets/app.css":    "text/css; charset=utf-8",
+		"assets/app.js.map": "application/json",
+		"assets/data.json":  "application/json",
+		"assets/logo.svg":   "image/svg+xml",
+		"assets/logo.png":   "image/png",
+		"favicon.ico":       "image/x-icon",
+		"assets/font.woff":  "font/woff",
+		"assets/font.woff2": "font/woff2",
+		"robots.txt":        "text/plain; charset=utf-8",
+		"assets/APP.JS":     "text/javascript; charset=utf-8",
+		"assets/noext":      "application/octet-stream",
 	}
 	ui := fstest.MapFS{}
 	for name := range want {
